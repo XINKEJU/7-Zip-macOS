@@ -772,10 +772,6 @@ static NSImage *Symbol(NSString *name, CGFloat pointSize)
 @property (nonatomic, strong) NSScrollView *logScroll;
 @property (nonatomic, strong) NSBox *logSeparator;
 @property (nonatomic, assign) BOOL logVisible;
-/// 日志抽屉的高度约束。收起时把常量改为 0 而不是激活/停用约束——约束拓扑
-/// 一旦变化就要重新求解整套布局，容易在窗口缩放过程中出现一帧空白。
-@property (nonatomic, strong) NSLayoutConstraint *logHeightConstraint;
-@property (nonatomic, strong) NSLayoutConstraint *logSeparatorHeightConstraint;
 
 // 状态栏
 @property (nonatomic, strong) Z7BarView *statusBar;
@@ -1282,16 +1278,34 @@ static NSImage *Symbol(NSString *name, CGFloat pointSize)
     ]];
 }
 
-/// 内容区高度 = 窗口内容高 − 状态栏 − 分隔线 −（日志展开时的抽屉与分隔线）。
-/// 表格与空状态共用这一块矩形，互斥显示，因此两者 frame 始终一致。
+/// 自下而上分配：状态栏 30 → 分隔线 1 →（展开时）日志抽屉 132 + 分隔线 1 → 内容区。
+/// 表格与空状态共用内容区矩形，互斥显示，因此两者 frame 始终一致；日志抽屉同样
+/// 在此定框（原因见 assembleContent 的说明）。
 - (void)viewDidLayout
 {
     [super viewDidLayout];
-    CGFloat bottom = 31.0;                      // 状态栏 30 + 其上分隔线 1
-    if (self.logVisible) bottom += 133.0;       // 日志抽屉 132 + 其上分隔线 1
-    NSRect r = self.drop.bounds;
-    r.origin.y = bottom;
-    r.size.height = MAX(0.0, NSHeight(r) - bottom);
+    [self layoutContentFrames];
+}
+
+- (void)layoutContentFrames
+{
+    const CGFloat statusH = 30.0;
+    const CGFloat ruleH = 1.0;
+    const CGFloat drawerH = 132.0;
+
+    NSRect b = self.drop.bounds;
+    CGFloat bottom = statusH + ruleH;               // 31
+
+    if (self.logVisible) {
+        self.logSeparator.frame = NSMakeRect(0.0, bottom + drawerH, NSWidth(b), ruleH);
+        self.logScroll.frame = NSMakeRect(0.0, bottom, NSWidth(b), drawerH);
+        bottom += drawerH + ruleH;                  // 164
+    } else {
+        self.logScroll.frame = NSZeroRect;
+        self.logSeparator.frame = NSZeroRect;
+    }
+
+    NSRect r = NSMakeRect(0.0, bottom, NSWidth(b), MAX(0.0, NSHeight(b) - bottom));
     self.outlineScroll.frame = r;
     self.emptyState.frame = r;
 }
@@ -1343,35 +1357,29 @@ static NSImage *Symbol(NSString *name, CGFloat pointSize)
     self.log.textContainer.widthTracksTextView = YES;
 
     self.logScroll = [[NSScrollView alloc] initWithFrame:NSZeroRect];
-    self.logScroll.translatesAutoresizingMaskIntoConstraints = NO;
+    // 与内容区同理：交给 Auto Layout 会被整棵跳过绘制，因此显式定位。
+    self.logScroll.translatesAutoresizingMaskIntoConstraints = YES;
     self.logScroll.documentView = self.log;
     self.logScroll.hasVerticalScroller = YES;
     self.logScroll.autohidesScrollers = YES;
     self.logScroll.drawsBackground = YES;
     self.logScroll.backgroundColor = [NSColor textBackgroundColor];
     self.logScroll.borderType = NSNoBorder;
-    // 高度可切换：收起时为 0（不留空白），展开时 132。
-    self.logHeightConstraint = [self.logScroll.heightAnchor constraintEqualToConstant:132];
-    self.logHeightConstraint.active = YES;
 
-    // 日志上方的分隔线。这里不直接用 separator: 那个助手会钉死 1pt 高度，
-    // 而收起时需要它同时变成 0pt。
+    // 日志上方的分隔线。收起时两者一起隐藏，不留空白。
     self.logSeparator = [[NSBox alloc] initWithFrame:NSZeroRect];
     self.logSeparator.boxType = NSBoxSeparator;
-    self.logSeparator.translatesAutoresizingMaskIntoConstraints = NO;
-    self.logSeparatorHeightConstraint =
-        [self.logSeparator.heightAnchor constraintEqualToConstant:1];
-    self.logSeparatorHeightConstraint.active = YES;
+    self.logSeparator.translatesAutoresizingMaskIntoConstraints = YES;
 }
 
 - (void)setLogVisible:(BOOL)visible
 {
     _logVisible = visible;
-    self.logHeightConstraint.constant = visible ? 132 : 0;
-    self.logSeparatorHeightConstraint.constant = visible ? 1 : 0;
     self.logSeparator.hidden = !visible;
     self.logScroll.hidden = !visible;
     self.logBtn.state = visible ? NSControlStateValueOn : NSControlStateValueOff;
+    // 日志抽屉与内容区共用显式 frame，切换后立刻重排一次，不等下一次布局循环。
+    [self layoutContentFrames];
 }
 
 - (void)toggleLog:(id)s
@@ -1447,9 +1455,9 @@ static NSImage *Symbol(NSString *name, CGFloat pointSize)
 {
     NSBox *statusSeparator = [self separator];
 
-    // 底部三件套（日志抽屉 → 分隔线 → 状态栏）自下而上钉死。
-    NSArray<NSView *> *rows = @[self.logSeparator, self.logScroll,
-                                statusSeparator, self.statusBar];
+    // 底部两件套（分隔线 → 状态栏）自下而上钉死。状态栏是自定义不透明视图，
+    // 交给 Auto Layout 摆放可以正常绘制（见下方关于内容区的说明）。
+    NSArray<NSView *> *rows = @[statusSeparator, self.statusBar];
     for (NSView *v in rows) {
         [self.drop addSubview:v];
         [NSLayoutConstraint activateConstraints:@[
@@ -1460,17 +1468,17 @@ static NSImage *Symbol(NSString *name, CGFloat pointSize)
     [NSLayoutConstraint activateConstraints:@[
         [self.statusBar.bottomAnchor constraintEqualToAnchor:self.drop.bottomAnchor],
         [statusSeparator.bottomAnchor constraintEqualToAnchor:self.statusBar.topAnchor],
-        [self.logScroll.bottomAnchor constraintEqualToAnchor:statusSeparator.topAnchor],
-        [self.logSeparator.bottomAnchor constraintEqualToAnchor:self.logScroll.topAnchor],
     ]];
 
-    // 内容区（表格 / 空状态）刻意不走 Auto Layout，改由 viewDidLayout 直接给
-    // frame。原因：本机环境下，这两个视图一旦交给 Auto Layout 管理，即使
-    // frame、bounds、hidden、alpha、层级全部正确、布局也无歧义，AppKit 依然
-    // 会把它们连同各自整棵子树一起跳过绘制（界面上一片空白）。同一窗口里显式
+    // 内容区（表格 / 空状态）与日志抽屉刻意不走 Auto Layout，改由 viewDidLayout
+    // 直接给 frame。原因：本机环境下，NSScrollView 一旦交给 Auto Layout 管理，
+    // 即使 frame、bounds、hidden、alpha、层级全部正确、布局也无歧义，AppKit 依然
+    // 会把它们连同各自整棵子树一起跳过绘制（界面上是一片空白）。同一窗口里显式
     // 设定 frame 的视图、以及底部按约束摆放的状态栏都正常显示；这条差异经过
     // 逐一排除（尺寸推导 / 布局歧义 / 隐藏祖先 / 顶边锚定 / 工具栏样式 /
     // drawRect: / layer 承载）后仍稳定复现，因此按可工作的方式实现。
+    [self.drop addSubview:self.logSeparator];
+    [self.drop addSubview:self.logScroll];
     [self.drop addSubview:self.outlineScroll];
     [self.drop addSubview:self.emptyState];
 

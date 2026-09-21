@@ -107,12 +107,13 @@ SZ=/path/to/7zz && $SZ
 `short`、`long`、`signed` 等在 Objective-C 里仍是关键字，
 `NSString *short = ...` 会报 `expected identifier or '('`。
 
-### 坑点 7：内容区的视图不能用 Auto Layout 摆放
+### 坑点 7：`NSScrollView` 不能用 Auto Layout 摆放
 
-`dist/app-src/main.m` 里，**表格（`outlineScroll`）与空状态（`emptyState`）的
-frame 由 `viewDidLayout` 直接赋值，刻意不参与 Auto Layout**。这不是风格选择，
-而是踩过坑之后的结果：在本机（macOS 26 / AppKit，1470×923@2x 逻辑分辨率）
-把这两个视图交给约束管理时，出现过这样的现象——
+`dist/app-src/main.m` 里，**表格（`outlineScroll`）、空状态（`emptyState`）与日志
+抽屉（`logScroll`）的 frame 一律由 `layoutContentFrames`（经 `viewDidLayout`
+调用）直接赋值，刻意不参与 Auto Layout**。这不是风格选择，而是踩过坑之后的
+结果：在本机（macOS 26 / AppKit，1470×923@2x 逻辑分辨率）把这些视图交给约束
+管理时，出现过这样的现象——
 
 - 视图的 `frame`、`bounds`、`hidden`、`alpha`、父视图与窗口层级全部正确；
 - `hasAmbiguousLayout` 全为 `NO`，控制台没有任何约束冲突日志；
@@ -123,20 +124,30 @@ frame 由 `viewDidLayout` 直接赋值，刻意不参与 Auto Layout**。这不�
 是否有隐藏祖先、是否顶边锚定、`NSWindowToolbarStyle` 取 Unified 还是 Expanded、
 有无 `drawRect:` 实现、是否 `wantsLayer` / layer 承载。**对照组**：同一父视图下
 显式设定 frame 的视图（`autoresizingMask`）、以及按约束摆放但带显式高度的
-底部状态栏与分隔线，都始终正常显示。
+底部状态栏（`Z7BarView`，自定义不透明视图）与分隔线，都始终正常显示。
 
-因此约定：**内容区（随窗口伸缩的那块矩形）用显式 frame；底部状态栏、日志
-抽屉、分隔线用 Auto Layout。** 由此带来两个必须同时保留的配套处理：
+**日志抽屉的补充结论（第二轮修复）**：抽屉最初是照「底部三件套用 Auto Layout」
+的约定写的——约束解算完全正确（实测 `logScroll` 得到 `0,31,1040,132`，文本视图
+内含 215 字符），界面上的那 132pt 却是一片空白，用它换来的唯一可见效果是内容
+区中心上移了 164pt。改成显式 frame 后立刻正常绘制。可见触发条件与「是不是
+内容区」无关，而与**视图类型是 `NSScrollView`** 有关：凡 `NSScrollView` 作为
+`drop` 的直接子视图由约束定位，就会被跳过绘制。
 
-1. 内容区的两个视图由 `viewDidLayout` 计算
-   「窗口内容高 − 状态栏 − 分隔线 −（日志展开时的抽屉与分隔线）」，二者共用
-   同一块矩形、互斥显示，frame 始终一致；
+因此约定：**所有 `NSScrollView`（内容区表格、日志抽屉）用显式 frame；只有
+自定义不透明的状态栏与分隔线保留 Auto Layout。** 由此带来两个必须同时保留的
+配套处理：
+
+1. 自下而上一次性分配矩形：状态栏 30 → 分隔线 1 →（展开时）日志抽屉 132 +
+   分隔线 1 → 内容区（表格与空状态共用这块矩形、互斥显示，frame 始终一致）。
+   全部集中在 `layoutContentFrames` 一个方法内，`viewDidLayout` 与
+   `setLogVisible:` 都调它，切换抽屉时不必等下一次布局循环；
 2. 内容区不再参与约束后窗口的内容自适应尺寸会变得很小（实测宽度被压到
    145pt），故 `main.m` 中为 `drop` 补了一条最小宽度约束（880），并在
    `setFrameAutosaveName:` 返回 `NO`（首次运行）时显式给回 1040×700。
 
 若日后要改回约束布局，请先把上面 7 项变量逐一对齐到「能显示」的那一组，并
-用 `screencapture` 实测，不要只凭 `frame` 数值判断正确性。
+用 `screencapture` 实测，不要只凭 `frame` 数值判断正确性——**布局数值正确与
+内容被绘制是两件事**。
 
 ## 二·补：内嵌引擎库的构建顺序
 

@@ -55,8 +55,9 @@
 | 状态栏 | 底部通栏，左侧为当前状态（就绪 / 已载入 N 项 / 进度），右侧为当前压缩参数摘要 |
 | 外观 | 全部使用语义色（`labelColor`、`secondaryLabelColor`、`windowBackgroundColor`、`controlAccentColor`、`textBackgroundColor`），浅色与深色外观下自动适配 |
 
-> 内容区（表格与空状态）的 frame 由代码直接计算而非 Auto Layout 约束——
-> 这是实测踩坑后的约定，原因与完整排查记录见 `BUILD.md` 坑点 7。
+> 内容区（表格与空状态）与日志抽屉的 frame 由代码直接计算而非 Auto Layout
+> 约束——这是实测踩坑后的约定（`NSScrollView` 由约束定位时会被 AppKit 跳过
+> 绘制），原因与完整排查记录见 `BUILD.md` 坑点 7。
 
 ---
 
