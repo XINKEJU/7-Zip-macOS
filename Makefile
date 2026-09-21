@@ -101,7 +101,7 @@ bridge: dylib
 # ---------------------------------------------------------------------------
 app: universal bridge
 	@printf '==> 3/4 组装应用与 Quick Look 扩展\n'
-	sh '$(DIST)/app-src/build_app.sh' '$(ENGINE)' '$(ICNS)' '$(DIST)'
+	sh '$(DIST)/app-src/build_app.sh' '$(ICNS)' '$(DIST)'
 
 # Rebuild the extension alone, against an already assembled application.
 ql: universal

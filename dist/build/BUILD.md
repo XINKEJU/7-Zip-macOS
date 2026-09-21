@@ -222,16 +222,19 @@ root-cli/usr/local/                    组件包 com.7-zip.7zz   → /usr/local
 root-app/Applications/7-Zip.app/       组件包 com.7-zip.7zip  → /Applications
 ├── Contents/MacOS/7-Zip               (755, 前端；链接桥接层)
 ├── Contents/Frameworks/lib7z.dylib    (755, 内嵌引擎；LGPL 可替换库)
-├── Contents/Resources/7zz             (755, 供沙盒 Quick Look 扩展作为 helper 调用)
 ├── Contents/Resources/THIRD_PARTY.md  (第三方归属与许可)
 └── Contents/PlugIns/7ZipQuickLook.appex   (Quick Look 预览扩展)
-```
+    └── Contents/Resources/7zz         (755, 沙盒扩展自带的 helper；带 inherit 权限)
 
-> **为什么既内嵌 `lib7z.dylib` 又保留 `7zz`？**
+> **为什么内嵌 `lib7z.dylib`、而 `7zz` 只出现在 Quick Look 扩展里？**
 > 前端自身的归档操作全部通过 `lib7z.dylib` 在**进程内**完成（技术方案 §1.3），
-> 不再派生 `7zz`。但 Quick Look 扩展运行在 App Sandbox 中，无法加载应用包的
-> 动态库，因此它按设计改为调用 `7zz` 作为 helper（见 `ql-src/7zz-helper.entitlements`）。
-> 两者不可互相替代，缺一都会导致相应功能失效。
+> 不再派生 `7zz`。Quick Look 扩展运行在 App Sandbox 中，无法加载应用包的
+> 动态库，因此由 `ql-src/build_ql.sh` 把**自己的一份** `7zz` 放进 appex 并配以
+> `7zz-helper.entitlements`（含 `com.apple.security.inherit`）再签名；
+> `SevenZipFindTool()` 的候选列表只解析到 appex 自身（见 `ql-src/SevenZipPreviewProvider.m`），
+> 从不指向宿主应用。因此宿主应用包**不再**携带 `7zz`——审计（2026-09-22）确认
+> 那份 6.01 MB 的副本从不参与运行，属纯死载荷，移除后预览能力不受影响。
+> 若日后要在应用内也派生 `7zz`，必须连同 helper 权限一起重新评估，不能简单复制。
 
 ```bash
 # 一条命令完成全部打包

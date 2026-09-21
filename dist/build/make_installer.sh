@@ -73,12 +73,19 @@ check "$APP_SRC/Contents/MacOS/7-Zip" "7-Zip.app executable"
 check "$APPEX/Contents/MacOS/7ZipQuickLook" "Quick Look appex executable"
 check "$SRC/DOC/License.txt"          "upstream License.txt"
 
-# The application must carry its own embedded engine, otherwise the Finder
-# context menu has nothing to run.
-if [ -f "$APP_SRC/Contents/Resources/7zz" ]; then
-    printf '   ok      embedded engine in 7-Zip.app\n'
+# The Quick Look extension must carry its own 7zz helper — it is the only copy
+# the sandbox can execute (SevenZipFindTool() never resolves into the host app,
+# and only an inherit-entitled helper may be spawned). The application bundle
+# itself deliberately ships no 7zz (audit 2026-09-22: it was 6.01 MB of dead
+# payload).
+if [ -f "$APPEX/Contents/Resources/7zz" ]; then
+    printf '   ok      embedded 7zz helper in Quick Look appex\n'
 else
-    printf '   MISSING embedded engine in 7-Zip.app\n' >&2
+    printf '   MISSING embedded 7zz helper in Quick Look appex\n' >&2
+    missing=1
+fi
+if [ -e "$APP_SRC/Contents/Resources/7zz" ]; then
+    printf '   UNEXPECTED redundant 7zz in 7-Zip.app\n' >&2
     missing=1
 fi
 [ "$missing" -eq 0 ] || { echo "输入不完整，终止。" >&2; exit 1; }

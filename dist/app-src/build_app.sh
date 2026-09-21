@@ -7,24 +7,27 @@
 #     (lib7zbridgeobjc.a + lib7zbridge.a) and loads lib7z.dylib from
 #     Contents/Frameworks, so archive work runs inside the app process
 #     (no 7zz child process for the app's own operations);
-#   * Contents/Resources/7zz is still shipped because the sandboxed Quick Look
-#     extension spawns it as a helper (see ql-src/SevenZipPreviewProvider.m
-#     and ql-src/7zz-helper.entitlements) — it cannot load the app's dylib.
+#   * no 7zz is shipped in the application bundle itself. The Quick Look
+#     extension is self-contained: ql-src/build_ql.sh places its own copy at
+#     Contents/PlugIns/7ZipQuickLook.appex/Contents/Resources/7zz and signs it
+#     with the helper entitlements (7zz-helper.entitlements) that the sandbox
+#     requires. See ql-src/SevenZipPreviewProvider.m — SevenZipFindTool() only
+#     ever resolves inside that appex, never in the host application, so an
+#     extra copy here would be 6 MB of dead payload (audit 2026-09-22).
 #
-# Usage:  sh build_app.sh <path-to-7zz-universal> <path-to-7zip.icns> <output-dir>
+# Usage:  sh build_app.sh <path-to-7zip.icns> <output-dir>
 
 set -e
 
-ENGINE="$1"
-ICNS="$2"
-OUTDIR="$3"
+ICNS="$1"
+OUTDIR="$2"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 DIST="$(cd "$HERE/.." && pwd)"
 LIB="$DIST/lib"
 ENG_DIR="$DIST/engine"
 
-if [ -z "$ENGINE" ] || [ -z "$ICNS" ] || [ -z "$OUTDIR" ]; then
-    echo "usage: sh build_app.sh <7zz> <7zip.icns> <output-dir>" >&2
+if [ -z "$ICNS" ] || [ -z "$OUTDIR" ]; then
+    echo "usage: sh build_app.sh <7zip.icns> <output-dir>" >&2
     exit 1
 fi
 
@@ -69,8 +72,13 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Framewor
 cp -f "$BUILD/app-universal"     "$APP/Contents/MacOS/7-Zip"
 cp -f "$HERE/Info.plist"         "$APP/Contents/Info.plist"
 cp -f "$ICNS"                    "$APP/Contents/Resources/7zip.icns"
-cp -f "$ENGINE"                  "$APP/Contents/Resources/7zz"
 cp -f "$LIB/lib7z.dylib"         "$APP/Contents/Frameworks/lib7z.dylib"
+# 应用包不再携带 7zz（审计 2026-09-22：宿主应用那份从不被执行，纯占 6.01 MB）。
+# 这里的残留清理不能省：上面那段"就地覆盖"策略下，历史上由本脚本放进来的
+# Resources/7zz 会留在包里，而且第 7 步的 codesign --deep 会把它一并签进封存，
+# 于是末尾的签名校验根本不会报警——陈旧 6 MB 会被静默保留。因此显式删这一个
+# 已知路径（单个 rm -f，不涉及批量通配）。
+rm -f "$APP/Contents/Resources/7zz"
 # 第三方归属与许可（§2.3 / P5）：应用内「致谢与许可…」读取该文件。
 # 与 package.sh / make_installer.sh 保持同一门禁：文件缺失即视为许可完整性
 # 缺陷而中止，不发行缺少归属声明的应用包（About 面板的运行时回退仅作为
@@ -82,14 +90,17 @@ else
     echo "缺少 $THIRD，应用包将不满足许可完整性要求" >&2
     exit 1
 fi
-chmod 755 "$APP/Contents/MacOS/7-Zip" "$APP/Contents/Resources/7zz" \
+chmod 755 "$APP/Contents/MacOS/7-Zip" \
           "$APP/Contents/Frameworks/lib7z.dylib"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 
 echo "== 5. 嵌入引擎校验 =="
-EMBED="$(shasum -a 256 "$APP/Contents/Resources/7zz" | awk '{print $1}')"
-SRC="$(shasum -a 256 "$ENGINE" | awk '{print $1}')"
-[ "$EMBED" = "$SRC" ] && echo "   7zz 与源产物一致" || { echo "   7zz 不一致！" >&2; exit 1; }
+# 应用级 7zz 已移除；需要校验的是 Quick Look 扩展内那份（由 build_ql.sh 在
+# 第 8 步放置并签名），此处只断言"应用包里不该再有 7zz"。
+if [ -e "$APP/Contents/Resources/7zz" ]; then
+    echo "   应用包内仍有 Resources/7zz，残留未清！" >&2; exit 1
+fi
+echo "   应用包内无冗余 7zz（Quick Look 扩展自带宽）"
 DSRC="$(shasum -a 256 "$LIB/lib7z.dylib" | awk '{print $1}')"
 DEMBED="$(shasum -a 256 "$APP/Contents/Frameworks/lib7z.dylib" | awk '{print $1}')"
 [ "$DSRC" = "$DEMBED" ] && echo "   lib7z.dylib 与源产物一致" || { echo "   lib7z.dylib 不一致！" >&2; exit 1; }

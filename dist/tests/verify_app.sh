@@ -31,6 +31,7 @@ fi
 
 BIN="$APP/Contents/MacOS/7-Zip"
 DYLIB="$APP/Contents/Frameworks/lib7z.dylib"
+QLTOOL="$APP/Contents/PlugIns/7ZipQuickLook.appex/Contents/Resources/7zz"
 
 # ---------------------------------------------------------------------------
 head1 "1. 包结构"
@@ -38,23 +39,21 @@ head1 "1. 包结构"
 [ -x "$BIN" ]     && ok "主可执行文件存在且可执行"        || bad "缺少 $BIN"
 [ -f "$DYLIB" ]   && ok "内嵌引擎动态库存在"              || bad "缺少 $DYLIB"
 [ -f "$APP/Contents/Info.plist" ] && ok "Info.plist 存在" || bad "缺少 Info.plist"
-[ -f "$APP/Contents/Resources/7zz" ] \
-    && ok "7zz 存在（沙盒 Quick Look 扩展所需）" || bad "缺少 Resources/7zz（Quick Look 预览会失效）"
 [ -f "$APP/Contents/Resources/THIRD_PARTY.md" ] \
     && ok "第三方归属文档已随包分发" || bad "缺少 THIRD_PARTY.md（应用内许可入口会回退到内置摘要）"
 
-for f in 7zz lib7z.dylib; do
-    if [ -f "$APP/Contents/Resources/$f" ]; then
-        EMB="$(shasum -a 256 "$APP/Contents/Resources/$f" | awk '{print $1}')"
-        SRC="$(shasum -a 256 "$DIST/build/$f" 2>/dev/null | awk '{print $1}')"
-        [ "$EMB" = "$SRC" ] && ok "$f 与源产物逐字节一致" || bad "$f 与源产物不一致"
-    fi
-done
-if [ -f "$APP/Contents/Resources/7zz" ] && [ -f "$DIST/build/7zz" ]; then
-    EMB="$(shasum -a 256 "$APP/Contents/Resources/7zz" | awk '{print $1}')"
-    SRC="$(shasum -a 256 "$DIST/build/7zz" | awk '{print $1}')"
-    [ "$EMB" = "$SRC" ] && ok "Resources/7zz 与源产物逐字节一致" || bad "Resources/7zz 不一致"
+# 应用级 7zz 已于 2026-09-22 审计中移除：SevenZipFindTool() 的候选列表只解析到
+# appex 自身，且沙盒只允许执行带 com.apple.security.inherit 的助手（宿主应用那份
+# 无任何 entitlement），运行时实测其日志亦落在 appex 内。因此这里反过来守卫：
+# 真正的助手在 appex 里且带权限，应用包里不该再有第二份 6 MB 副本。
+[ -x "$QLTOOL" ] \
+    && ok "Quick Look 扩展自带 7zz 助手" || bad "缺少 appex 内的 7zz（Quick Look 预览会失效）"
+if [ -f "$QLTOOL" ]; then
+    codesign -d --entitlements - "$QLTOOL" 2>/dev/null | grep -q "com.apple.security.inherit" \
+        && ok "助手带 inherit 权限（沙盒可执行）" || bad "助手缺少 inherit 权限，沙盒下无法启动"
 fi
+[ ! -e "$APP/Contents/Resources/7zz" ] \
+    && ok "应用包内无冗余 7zz（不复刻 6 MB 死载荷）" || bad "应用包内仍有冗余 Resources/7zz"
 
 # ---------------------------------------------------------------------------
 head1 "2. 动态库依赖解析（真正解析到磁盘）"
