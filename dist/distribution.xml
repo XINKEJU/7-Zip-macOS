@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<installer-gui-script minSpecVersion="1">
+  <title>7-Zip 26.03</title>
+  <organization>com.7-zip</organization>
+  <domains enable_localSystem="true" enable_anywhere="false" enable_currentUserHome="false"/>
+  <options customize="allow" require-scripts="false" hostArchitectures="x86_64,arm64"/>
+  <welcome file="welcome.html"/>
+  <readme file="readme.html"/>
+  <license file="License.txt"/>
+
+  <choices-outline>
+    <line choice="cli"/>
+    <line choice="app"/>
+  </choices-outline>
+
+  <choice id="cli"
+          title="Command line tools"
+          description="The 7zz archiver, its manual pages, shell completions for zsh / bash / fish, and the documentation. Installs into /usr/local."
+          visible="true"
+          selected="true"
+          enabled="true">
+    <pkg-ref id="com.7-zip.7zz"/>
+  </choice>
+
+  <choice id="app"
+          title="7-Zip application"
+          description="The native GUI application with the Finder context menu and the Quick Look archive preview. Installs into /Applications."
+          visible="true"
+          selected="true"
+          enabled="true">
+    <pkg-ref id="com.7-zip.7zip"/>
+  </choice>
+
+  <pkg-ref id="com.7-zip.7zz"  version="26.03" onConclusion="none" auth="root">7-Zip-cli.pkg</pkg-ref>
+  <pkg-ref id="com.7-zip.7zip" version="26.03" onConclusion="none" auth="root">7-Zip-app.pkg</pkg-ref>
+</installer-gui-script>

@@ -1,0 +1,75 @@
+7-Zip 26.03 — macOS port
+Licensing notice
+================================================================================
+
+This repository contains two distinct bodies of work, both distributed under
+the same license terms as upstream 7-Zip.
+
+
+1. Upstream 7-Zip source code — directory 7z2603-src/
+--------------------------------------------------------------------------------
+
+    Copyright (C) 1999-2026 Igor Pavlov.
+    https://www.7-zip.org/
+
+Vendored verbatim from the official release tarball
+7z2603-src.tar.xz (7-Zip 26.03, https://github.com/ip7z/7zip).
+
+The complete license statement shipped by upstream is reproduced in
+7z2603-src/DOC/License.txt. Summarised, the licenses per file group are:
+
+    - CPP/7zip/Compress/Rar* ......... GNU LGPL + unRAR license restriction
+    - CPP/7zip/Compress/LzfseDecoder.cpp ... BSD 3-clause
+    - C/ZstdDec.c .................... BSD 3-clause
+    - C/Xxh64.c ...................... BSD 2-clause
+    - files marked "public domain" ... public domain
+    - all other files ................ GNU LGPL
+
+Full texts are included in the tree:
+
+    7z2603-src/DOC/License.txt        composite statement (authoritative)
+    7z2603-src/DOC/copying.txt        GNU LGPL version 2.1 (also ./LICENSE)
+    7z2603-src/DOC/unRarLicense.txt   unRAR license restriction
+
+
+2. macOS port — directories dist/, docs/, and the top-level build files
+--------------------------------------------------------------------------------
+
+    Copyright (C) 2026 XINKEJU and contributors.
+
+This is a derivative work based on the upstream source above. It is released
+under the same terms: GNU LGPL version 2.1 or later, together with the unRAR
+license restriction, because the resulting binary compiles in the RAR
+decompression engine.
+
+Full text: ./LICENSE (GNU LGPL v2.1).
+
+
+unRAR license restriction — applies to the compiled binary
+--------------------------------------------------------------------------------
+
+    The decompression engine for RAR archives was developed using source code
+    of the unRAR program. All copyrights to original unRAR code are owned by
+    Alexander Roshal.
+
+    The license for original unRAR code has the following restriction:
+
+      The unRAR sources cannot be used to re-create the RAR compression
+      algorithm, which is proprietary. Distribution of modified unRAR sources
+      in separate form or as a part of other software is permitted, provided
+      that it is clearly stated in the documentation and source comments that
+      the code may not be used to develop a RAR (WinRAR) compatible archiver.
+
+Accordingly: this project can decompress RAR archives, but it must not be used
+to develop a RAR-compatible compressor.
+
+The full text is reproduced in 7z2603-src/DOC/unRarLicense.txt, which is also
+installed to /usr/local/share/doc/7zip/unRarLicense.txt at runtime.
+
+
+Trademarks
+--------------------------------------------------------------------------------
+
+"7-Zip", "WinRAR" and "RAR" are marks of their respective owners. This is an
+independent community port and is not affiliated with or endorsed by Igor
+Pavlov or by RARLAB.

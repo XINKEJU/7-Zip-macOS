@@ -1,0 +1,214 @@
+.TH 7ZZ 1 "2026-09-03" "7-Zip 26.03" "User Commands"
+.SH NAME
+7zz \- 7-Zip file archiver, console version
+.SH SYNOPSIS
+.B 7zz
+.I <command>
+.RI [ <switches> ...]
+.I <archive_name>
+.RI [ <file_names> ...]
+.RI [ @listfile ]
+.SH DESCRIPTION
+.B 7zz
+is the command line version of 7\-Zip, a file archiver with a high
+compression ratio.  It reads and writes the 7z format and can also
+read many other archive formats, including ZIP, RAR, TAR, GZIP, BZIP2,
+XZ, CAB, ISO, DMG, APFS, NTFS, WIM, VHD/VHDX/VMDI/VDI, SquashFS and
+several filesystem images.
+.PP
+This manual page documents the
+.B 7zz
+binary installed by this package.  The authoritative documentation for
+the command syntax and the 7z format is installed under
+.IR /usr/local/share/doc/7\-Zip/ .
+.SH COMMANDS
+.TP
+.B a
+Add files to archive.
+.TP
+.B b
+Benchmark: measure compression and decompression speed.
+.TP
+.B d
+Delete files from archive.
+.TP
+.B e
+Extract files from archive, without restoring directory names.
+.TP
+.B h
+Calculate hash values for files.
+.TP
+.B i
+Show information about supported formats, codecs and hashers.
+.TP
+.B l
+List contents of archive.
+.TP
+.B rn
+Rename files in archive.
+.TP
+.B t
+Test integrity of archive.
+.TP
+.B u
+Update files to archive.
+.TP
+.B x
+Extract files with full paths.
+.SH SWITCHES
+.TP
+.B \-o{Directory}
+Set the output directory for extracted files.
+.TP
+.B \-p{Password}
+Set a password.  Use
+.B \-p
+with no value to be prompted interactively.
+.TP
+.B \-m{Parameters}
+Set the compression method, for example
+.BR \-mx=9
+for maximum compression or
+.BR \-m0=lzma2
+to select the codec explicitly.
+.TP
+.B \-t{Type}
+Set the archive type, for example
+.BR \-t7z " or " \-tzip .
+.TP
+.B \-y
+Assume
+.B yes
+on all queries.
+.TP
+.B \-r[\-|0]
+Recurse subdirectories for name search.
+.TP
+.B \-v{Size}[b|k|m|g]
+Create multi\-volume archive with the given volume size.
+.TP
+.B \-si[{name}]
+Read data from standard input.
+.TP
+.B \-so
+Write data to standard output.
+.TP
+.B \-slt
+Show technical information for the
+.B l
+command.
+.TP
+.B \-scrc{CRC32|CRC64|SHA256|SHA1|XXH64|BLAKE2SP|*}
+Set the hash function used by the
+.BR x ,
+.B e
+and
+.B h
+commands.
+.TP
+.B \-sdel
+Delete files after they have been compressed.
+.TP
+.B \-snl
+Store symbolic links as links instead of following them.
+.TP
+.B \-snh
+Store hard links as links.
+.TP
+.B \-ssw
+Compress shared files.
+.TP
+.B \-ssp
+Do not change the last access time of source files while archiving.
+.TP
+.B \-bb[0\-3]
+Set the output log level.
+.TP
+.B \-bd
+Disable the progress indicator.
+.TP
+.B \-spd
+Disable wildcard matching for file names.
+.TP
+.B \-w[{path}]
+Assign a working directory.  An empty path selects a temporary directory.
+.TP
+.B \-x[r[\-|0]][m[\-|2]][w[\-]]{@listfile|!wildcard}
+Exclude file names.
+.TP
+.B \-i[r[\-|0]][m[\-|2]][w[\-]]{@listfile|!wildcard}
+Include file names.
+.SH EXAMPLES
+Create a maximum\-compression 7z archive:
+.PP
+.RS 4
+.B 7zz a \-t7z \-mx=9 archive.7z dir/
+.RE
+.PP
+List an archive with technical details:
+.PP
+.RS 4
+.B 7zz l \-slt archive.7z
+.RE
+.PP
+Extract to a specific directory, answering yes to all prompts:
+.PP
+.RS 4
+.B 7zz x archive.7z \-o/tmp/dest \-y
+.RE
+.PP
+Verify archive integrity:
+.PP
+.RS 4
+.B 7zz t archive.7z
+.RE
+.PP
+Create an encrypted archive (AES\-256):
+.PP
+.RS 4
+.B 7zz a \-p archive.7z secret.txt
+.RE
+.PP
+Stream a tar archive to standard output:
+.PP
+.RS 4
+.B 7zz a \-ttar \-so dir/ | gzip > dir.tar.gz
+.RE
+.SH FILES
+.TP
+.I /usr/local/bin/7zz
+The executable.
+.TP
+.I /usr/local/bin/7z
+Convenience symbolic link to
+.IR 7zz .
+.TP
+.I /usr/local/share/doc/7\-Zip/
+License texts and format documentation.
+.SH LICENSE
+7\-Zip Copyright (C) 1999\-2026 Igor Pavlov.
+.PP
+The program is distributed under the GNU LGPL, with the following
+exceptions: parts of the RAR code are covered by the GNU LGPL together
+with the unRAR license restriction, and a small number of source files
+are covered by the BSD 3\-clause license.  The LZMA SDK is placed in the
+public domain.
+.PP
+The unRAR sources may not be used to re\-create a RAR (WinRAR)
+compatible archiver.
+.PP
+See
+.I /usr/local/share/doc/7\-Zip/License.txt
+for the full text.
+.SH SEE ALSO
+.BR gzip (1),
+.BR bzip2 (1),
+.BR xz (1),
+.BR tar (1),
+.BR zip (1),
+.BR unzip (1)
+.PP
+Project home page:
+.I https://www.7\-zip.org/
+.SH AUTHOR
+Igor Pavlov and contributors.

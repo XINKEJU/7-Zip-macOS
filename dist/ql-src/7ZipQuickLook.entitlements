@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- ExtensionKit requires App Sandbox for .appex bundles. -->
+	<key>com.apple.security.app-sandbox</key>
+	<true/>
+	<!-- Quick Look hands the previewed file to the extension, but the
+	     read-only file entitlement is required for the sandbox to honour it. -->
+	<key>com.apple.security.files.user-selected.read-only</key>
+	<true/>
+</dict>
+</plist>

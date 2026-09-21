@@ -1,0 +1,122 @@
+#compdef 7zz 7z
+# zsh completion for the 7-Zip command line tool (7zz).
+#
+# Install as _7zz on $fpath (the installer places it in
+# /usr/local/share/zsh/site-functions) and ensure compinit is initialised:
+#
+#     autoload -Uz compinit && compinit
+#
+# The `#compdef` tag above binds this file to both names, so the body below is
+# the completion function itself and needs no further wiring.
+
+local context state state_descr line
+typeset -A opt_args
+
+local -a commands write_commands read_commands
+commands=(
+  'a:Add files to archive'
+  'b:Benchmark CPU and compression speed'
+  'd:Delete files from archive'
+  'e:Extract files without directory names'
+  'h:Calculate hash values for files'
+  'i:Show information about supported formats'
+  'l:List contents of archive'
+  'rn:Rename files inside archive'
+  't:Test integrity of archive'
+  'u:Update files to archive'
+  'x:Extract files with full paths'
+)
+write_commands=(a u)
+read_commands=(d e l rn t x)
+
+# Switches that apply to every command.
+local -a common_switches
+common_switches=(
+  '-p+[Set password]:password'
+  '-t+[Set archive type]:archive type:(7z xz bzip2 gzip tar zip wim zstd)'
+  '-r-[Recurse subdirectories]'
+  '-w+[Set working directory]:directory:_directories'
+  '-y[Assume Yes on all queries]'
+  '-bb+[Set output log level]:level:(0 1 2 3)'
+  '-ba[Disable progress indicator]'
+  '-bd[Disable progress indicator]'
+  '-bs+[Set output stream]:stream:(o e 1 2)'
+  '-bt[Show execution time statistics]'
+  '-scc+[Set console charset]:charset:(UTF-8 UTF-16LE)'
+  '-scs+[Set list file charset]:charset:(UTF-8 UTF-16LE)'
+  '-slp[Set Large Pages mode]'
+  '-slt[Show technical information in list output]'
+  '-sni[Store NT security information]'
+  '-snl[Store symbolic links as links]'
+  '-snh[Store hard links as links]'
+  '-snr[Store macOS resource forks]'
+  '-stl[Set archive timestamp from the newest file]'
+  '-stm+[Set hash value for the archive]:hash'
+  '-stx+[Exclude archive type]:archive type:(7z xz bzip2 gzip tar zip wim zstd)'
+  '-spd[Disable wildcard matching for file names]'
+  '-spe[Disable parsing of wildcards after -r]'
+  '-ssw[Synchronize files for solid blocks]'
+  '-sse[Stop if an input file cannot be opened]'
+)
+
+# Switches only meaningful when creating or updating an archive.
+local -a write_switches
+write_switches=(
+  '-m+[Set compression method]:method:(Copy LZMA2 LZMA Deflate Deflate64 BZip2 Zstd PPMd Delta BCJ BCJ2 ARM64 LZ4)'
+  '-mx+[Set compression level]:level:(0 1 3 5 7 9)'
+  '-mmt+[Set number of CPU threads]:threads'
+  '-ms+[Set solid mode]:mode:(on off 4m 8m 16m e)'
+  '-md+[Set dictionary size]:size'
+  '-mfb+[Set number of fast bytes]:count'
+  '-mtm+[Set match finder]:method'
+  '-v+[Create volumes]:size'
+  '-u+[Set update options]:options'
+  '-sdel[Delete files after compression]'
+  '-sfx+[Create SFX archive]:module'
+)
+
+# Switches only meaningful when reading an archive.
+local -a read_switches
+read_switches=(
+  '-so[Write data to stdout]'
+  '-si[Read data from stdin]'
+  '-o+[Set output directory]:directory:_directories'
+  '-aoa[Overwrite all existing files]'
+  '-aos[Skip extracting of existing files]'
+  '-aou[Rename extracted files if they already exist]'
+  '-aot[Rename existing files before extracting]'
+  '-an[Disable parsing of the archive name]'
+  '-ai-[Include archive names]:pattern'
+  '-ax-[Exclude archive names]:pattern'
+  '-ap+[Set path inside archive]:path'
+)
+
+# Switches only meaningful for the hashing command.
+local -a hash_switches
+hash_switches=(
+  '-scrc+[Set hash method]:hash method:(CRC32 CRC64 SHA1 SHA256 SHA384 SHA512 BLAKE2sp MD5 XXH64)'
+  '-scr+[Set hash method]:hash method:(CRC32 CRC64 SHA1 SHA256 SHA384 SHA512 BLAKE2sp MD5 XXH64)'
+)
+
+# Select the applicable switch set from the command already on the line, then
+# let _arguments do a single pass over switches and file arguments. Choosing
+# the set up front avoids nesting _arguments calls, which is fragile.
+#
+# words[1] is the name being completed (7zz); the 7-Zip subcommand is words[2].
+local -a sw
+sw=(${common_switches[@]})
+case ${words[2]} in
+  a|u)        sw+=(${write_switches[@]}) ;;
+  d|e|l|rn|t|x) sw+=(${read_switches[@]}) ;;
+  h)          sw+=(${hash_switches[@]}) ;;
+esac
+
+_arguments -C \
+  ${sw[@]} \
+  '1:command:->command' \
+  '2:archive or file:_files' \
+  '*:file:_files' && return
+
+if [[ $state == command ]]; then
+  _describe -t commands '7zz command' commands
+fi

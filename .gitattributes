@@ -1,0 +1,51 @@
+# ===========================================================================
+# 7-Zip macOS port — attribute rules
+#
+# The vendored upstream tree must be stored byte-for-byte as published, while
+# the port's own sources are normalised to LF. Order matters: the last
+# matching pattern wins, so the broad rule for 7z2603-src/ is placed last.
+# ===========================================================================
+
+# --- binary assets ---------------------------------------------------------
+*.icns   binary
+*.png    binary
+*.jpg    binary
+*.pdf    binary
+*.dmg    binary
+*.pkg    binary
+*.xz     binary
+*.gz     binary
+*.7z     binary
+
+# --- port sources: always LF ----------------------------------------------
+*.sh     text eol=lf
+*.bash   text eol=lf
+*.fish   text eol=lf
+*.c      text eol=lf
+*.h      text eol=lf
+*.m      text eol=lf
+*.md     text eol=lf
+*.txt    text eol=lf
+*.plist  text eol=lf
+*.xml    text eol=lf
+*.rb     text eol=lf
+*.1      text eol=lf
+*.json   text eol=lf
+
+# --- verbatim copies of upstream files ------------------------------------
+# dist/resources/License.txt is installed to the disk image and to the pkg
+# welcome page straight from 7z2603-src/DOC/License.txt. That file is CRLF, and
+# normalising it would mean the distributed licence text no longer matches the
+# one published by upstream, so the blanket *.txt rule is overridden here.
+dist/resources/License.txt  -text -eol
+
+# --- vendored upstream source: preserve exactly as shipped -----------------
+# Upstream mixes LF and CRLF — 1842 of the 1943 files contain CR. Converting
+# either way would rewrite nearly the whole tree, create an unreadable first
+# diff and make the vendored copy diverge from the signed release tarball.
+# -text disables normalisation, -eol removes the eol=lf inherited from the
+# *.txt rule above, so nothing can reintroduce conversion.
+7z2603-src/**  -text -eol
+
+# --- linguist: keep the vendored tree out of language statistics -----------
+7z2603-src/**  linguist-vendored

@@ -1,0 +1,35 @@
+<html><body style="font-family:-apple-system,Helvetica,sans-serif;font-size:13px;line-height:1.6">
+
+<h3 style="font-weight:500">Command line tools</h3>
+<table cellpadding="3" style="font-size:13px">
+<tr><td><code>/usr/local/bin/7zz</code></td><td>universal archiver (arm64 + x86_64)</td></tr>
+<tr><td><code>/usr/local/bin/7z</code></td><td>symlink to 7zz</td></tr>
+<tr><td><code>/usr/local/share/man/man1/7zz.1</code></td><td>manual page (<code>man 7zz</code>)</td></tr>
+<tr><td><code>/usr/local/share/man/man1/7z.1</code></td><td>same page for the alias</td></tr>
+<tr><td><code>/usr/local/share/zsh/site-functions/_7zz</code></td><td>zsh completion</td></tr>
+<tr><td><code>/usr/local/share/bash-completion/completions/7zz</code></td><td>bash completion</td></tr>
+<tr><td><code>/usr/local/share/fish/vendor_completions.d/7zz.fish</code></td><td>fish completion</td></tr>
+<tr><td><code>/usr/local/share/doc/7zip/</code></td><td>licences, format reference, readme</td></tr>
+</table>
+
+<h3 style="font-weight:500">7-Zip application</h3>
+<table cellpadding="3" style="font-size:13px">
+<tr><td><code>/Applications/7-Zip.app</code></td><td>native GUI application</td></tr>
+<tr><td><code>&nbsp;&nbsp;&#8627; 7ZipQuickLook.appex</code></td><td>Quick Look archive preview</td></tr>
+</table>
+<p>The application supplies a Finder context menu with
+&ldquo;Compress with 7-Zip&rdquo; and &ldquo;Extract with 7-Zip&rdquo;, and
+archive previews when you press Space on an archive.</p>
+
+<h3 style="font-weight:500">Removing</h3>
+<p>Run <code>sudo sh /usr/local/share/doc/7zip/uninstall.sh</code> to remove
+every file this package installed, including the application and its Quick
+Look extension.</p>
+
+<h3 style="font-weight:500">Note</h3>
+<p>This package is ad-hoc signed but not notarized by Apple. If macOS blocks
+an installed executable, clear the quarantine attribute with:</p>
+<p><code>xattr -dr com.apple.quarantine /usr/local/bin/7zz</code><br>
+<code>xattr -dr com.apple.quarantine /Applications/7-Zip.app</code></p>
+
+</body></html>

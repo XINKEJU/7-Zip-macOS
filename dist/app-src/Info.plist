@@ -1,0 +1,245 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+
+    <key>CFBundleDevelopmentRegion</key>
+    <string>zh_CN</string>
+
+    <key>CFBundleExecutable</key>
+    <string>7-Zip</string>
+
+    <key>CFBundleIdentifier</key>
+    <string>org.7-zip.macos.app</string>
+
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+
+    <key>CFBundleName</key>
+    <string>7-Zip</string>
+
+    <key>CFBundleDisplayName</key>
+    <string>7-Zip</string>
+
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+
+    <key>CFBundleShortVersionString</key>
+    <string>26.03</string>
+
+    <key>CFBundleVersion</key>
+    <string>26.03</string>
+
+    <key>CFBundleIconFile</key>
+    <string>7zip</string>
+
+    <key>LSMinimumSystemVersion</key>
+    <string>11.0</string>
+
+    <key>NSHighResolutionCapable</key>
+    <true/>
+
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
+
+    <key>NSSupportsAutomaticGraphicsSwitching</key>
+    <true/>
+
+    <key>NSHumanReadableCopyright</key>
+    <string>7-Zip Copyright (C) 1999-2026 Igor Pavlov. Distributed under the GNU LGPL with the unRAR license restriction.</string>
+
+    <!-- ============================ Document types ============================ -->
+
+    <key>CFBundleDocumentTypes</key>
+    <array>
+
+        <!-- Archive formats. These are the identifiers macOS itself uses, so
+             the app joins the existing type identity instead of splitting it.
+             Using a private spelling here (e.g. org.7-zip.7z-archive) would
+             make .7z files resolve to a second, unrelated UTI. -->
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>归档文件</string>
+            <key>CFBundleTypeRole</key>
+            <string>Viewer</string>
+            <key>LSHandlerRank</key>
+            <string>Alternate</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>org.7-zip.7-zip-archive</string>
+                <string>public.zip-archive</string>
+                <string>public.tar-archive</string>
+                <string>org.gnu.gnu-zip-archive</string>
+                <string>org.gnu.gnu-zip-tar-archive</string>
+                <string>public.bzip2-archive</string>
+                <string>org.tukaani.xz-archive</string>
+                <string>com.rarlab.rar-archive</string>
+                <string>public.iso-image</string>
+                <string>public.disk-image</string>
+                <string>com.microsoft.cab-archive</string>
+                <string>public.zstandard-archive</string>
+            </array>
+            <key>CFBundleTypeExtensions</key>
+            <array>
+                <string>7z</string>
+                <string>zip</string>
+                <string>zipx</string>
+                <string>tar</string>
+                <string>gz</string>
+                <string>tgz</string>
+                <string>bz2</string>
+                <string>tbz</string>
+                <string>tbz2</string>
+                <string>xz</string>
+                <string>txz</string>
+                <string>rar</string>
+                <string>cab</string>
+                <string>iso</string>
+                <string>dmg</string>
+                <string>zst</string>
+                <string>lzma</string>
+                <string>lzh</string>
+                <string>arj</string>
+                <string>cpio</string>
+                <string>rpm</string>
+                <string>deb</string>
+                <string>wim</string>
+                <string>swm</string>
+                <string>esd</string>
+                <string>apfs</string>
+                <string>hfs</string>
+                <string>vhd</string>
+                <string>vhdx</string>
+                <string>vmdk</string>
+                <string>vdi</string>
+                <string>qcow2</string>
+                <string>squashfs</string>
+                <string>udf</string>
+                <string>msi</string>
+                <string>chm</string>
+                <string>xar</string>
+                <string>pkg</string>
+            </array>
+        </dict>
+
+        <!-- split volumes and other extension-only cases -->
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>分卷归档</string>
+            <key>CFBundleTypeRole</key>
+            <string>Viewer</string>
+            <key>LSHandlerRank</key>
+            <string>Alternate</string>
+            <key>CFBundleTypeExtensions</key>
+            <array>
+                <string>001</string>
+                <string>7z.001</string>
+                <string>zip.001</string>
+                <string>part1.rar</string>
+                <string>r00</string>
+                <string>z01</string>
+                <string>z02</string>
+            </array>
+        </dict>
+
+    </array>
+
+    <!-- ====================== Type declarations we introduce ====================== -->
+
+    <!--
+      These restate identifiers that modern macOS already declares system-wide.
+      Importing them is harmless there (the system definition wins) and ensures
+      the extension-to-UTI binding still resolves on older releases.
+      Zstandard is intentionally omitted: the system's public.zstandard-archive
+      is authoritative and a second owner would fragment the type.
+    -->
+
+    <key>UTImportedTypeDeclarations</key>
+    <array>
+
+        <dict>
+            <key>UTTypeIdentifier</key>
+            <string>org.7-zip.7-zip-archive</string>
+            <key>UTTypeDescription</key>
+            <string>7-Zip 归档</string>
+            <key>UTTypeConformsTo</key>
+            <array>
+                <string>public.data</string>
+                <string>public.archive</string>
+            </array>
+            <key>UTTypeTagSpecification</key>
+            <dict>
+                <key>public.filename-extension</key>
+                <array>
+                    <string>7z</string>
+                </array>
+                <key>public.mime-type</key>
+                <string>application/x-7z-compressed</string>
+            </dict>
+        </dict>
+
+        <dict>
+            <key>UTTypeIdentifier</key>
+            <string>org.tukaani.xz-archive</string>
+            <key>UTTypeDescription</key>
+            <string>XZ 压缩文件</string>
+            <key>UTTypeConformsTo</key>
+            <array>
+                <string>public.data</string>
+                <string>public.archive</string>
+            </array>
+            <key>UTTypeTagSpecification</key>
+            <dict>
+                <key>public.filename-extension</key>
+                <array>
+                    <string>xz</string>
+                    <string>txz</string>
+                </array>
+                <key>public.mime-type</key>
+                <string>application/x-xz</string>
+            </dict>
+        </dict>
+
+    </array>
+
+    <!-- ============================ Finder services ============================ -->
+
+    <key>NSServices</key>
+    <array>
+
+        <dict>
+            <key>NSMenuItem</key>
+            <dict>
+                <key>default</key>
+                <string>用 7-Zip 压缩</string>
+            </dict>
+            <key>NSMessage</key>
+            <string>compressWithSevenZip</string>
+            <key>NSPortName</key>
+            <string>7-Zip</string>
+            <key>NSSendFileTypes</key>
+            <array>
+                <string>public.item</string>
+            </array>
+        </dict>
+
+        <dict>
+            <key>NSMenuItem</key>
+            <dict>
+                <key>default</key>
+                <string>用 7-Zip 解压</string>
+            </dict>
+            <key>NSMessage</key>
+            <string>extractWithSevenZip</string>
+            <key>NSPortName</key>
+            <string>7-Zip</string>
+            <key>NSSendFileTypes</key>
+            <array>
+                <string>public.item</string>
+            </array>
+        </dict>
+
+    </array>
+
+</dict>
+</plist>
