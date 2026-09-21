@@ -628,16 +628,86 @@ typedef NS_ENUM(NSInteger, Z7TaskKind) {
 
 - (void)drawRect:(NSRect)dirty
 {
-    [super drawRect:dirty];
-    if (self.highlighted) {
-        [[NSColor colorWithCalibratedRed:0.145 green:0.286 blue:0.541 alpha:0.12] setFill];
-        NSRectFillUsingOperation(self.bounds, NSCompositingOperationSourceOver);
-        NSBezierPath *p = [NSBezierPath bezierPathWithRoundedRect:NSInsetRect(self.bounds, 8, 8)
-                                                          xRadius:12 yRadius:12];
-        [p setLineWidth:3];
-        [[NSColor colorWithCalibratedRed:0.145 green:0.286 blue:0.541 alpha:0.8] setStroke];
-        [p stroke];
+    // 显式绘制窗口背景色：内容区不依赖窗口的默认底色，空状态与表格边框因此
+    // 在浅色/深色外观下都有确定的可对比基准。
+    [[NSColor windowBackgroundColor] setFill];
+    NSRectFill(dirty);
+
+    if (!self.highlighted) return;
+    // 用系统强调色而不是硬编码的蓝：拖放提示应当跟随用户的系统外观设置。
+    NSColor *accent = [NSColor controlAccentColor];
+    [[accent colorWithAlphaComponent:0.10] setFill];
+    NSRectFillUsingOperation(self.bounds, NSCompositingOperationSourceOver);
+    NSBezierPath *p = [NSBezierPath bezierPathWithRoundedRect:NSInsetRect(self.bounds, 10, 10)
+                                                      xRadius:12 yRadius:12];
+    [p setLineWidth:3];
+    [[accent colorWithAlphaComponent:0.75] setStroke];
+    [p stroke];
+}
+
+@end
+
+#pragma mark - 图标（SF Symbols）
+
+/// 取一个 SF Symbols 图标。名称在旧系统上不存在时返回 nil —— 调用方据此降级
+/// 为纯文字按钮，避免出现"图标缺失、按钮一片空白"这种更难排查的界面缺陷。
+static NSImage *Symbol(NSString *name, CGFloat pointSize)
+{
+    NSImage *img = [NSImage imageWithSystemSymbolName:name accessibilityDescription:nil];
+    if (!img) return nil;
+    NSImageSymbolConfiguration *c =
+        [NSImageSymbolConfiguration configurationWithPointSize:pointSize
+                                                        weight:NSFontWeightRegular];
+    return [img imageWithSymbolConfiguration:c];
+}
+
+#pragma mark - 透明容器
+
+/// 空状态容器：layer 承载，底色为文档区的 textBackgroundColor。
+/// 与 NSScrollView 的底色一致，空状态与表格切换时不会出现底色跳变。
+@interface Z7PaneView : NSView
+@end
+
+@implementation Z7PaneView
+
+- (instancetype)initWithFrame:(NSRect)frame
+{
+    if ((self = [super initWithFrame:frame])) {
+        // 用 layer 承载，而不是依赖 drawRect:。见类注释：本机仅有 layer 承载
+        // （或 AppKit 原生 layer 控件）的视图能稳定进入合成。
+        self.wantsLayer = YES;
     }
+    return self;
+}
+
+- (BOOL)wantsUpdateLayer
+{
+    return YES;
+}
+
+- (void)updateLayer
+{
+    // 在视图当前外观下解析语义色，浅色/深色都得到正确底色。
+    self.layer.backgroundColor = [NSColor textBackgroundColor].CGColor;
+}
+
+@end
+
+#pragma mark - 状态栏背景（不透明，随外观自适应）
+
+/// 状态栏底色。这里刻意不用 NSVisualEffectView：玻璃材质在本机会透出窗口
+/// 背后的桌面（实测状态栏里混进了壁纸上的文字），既不美观也让前景文字与
+/// 背景的对比度不受控。直接用 windowBackgroundColor 绘制，浅色/深色外观下
+/// 都与系统窗口背景一致，labelColor 的对比度因此始终成立。
+@interface Z7BarView : NSView
+@end
+
+@implementation Z7BarView
+
+- (void)drawRect:(NSRect)dirty
+{
+    [[NSColor windowBackgroundColor] setFill];
+    NSRectFill(dirty);
 }
 
 @end
@@ -651,12 +721,22 @@ typedef NS_ENUM(NSInteger, Z7TaskKind) {
 @end
 
 @interface MainViewController ()
-// 头部
+    <NSToolbarDelegate>
+
+// 工具栏
+@property (nonatomic, strong) NSToolbar *toolbar;
 @property (nonatomic, strong) NSButton *openBtn;
 @property (nonatomic, strong) NSButton *compressBtn;
-@property (nonatomic, strong) NSTextField *archiveLabel;
+@property (nonatomic, strong) NSButton *extractBtn;
+@property (nonatomic, strong) NSButton *addBtn;
+@property (nonatomic, strong) NSButton *deleteBtn;
+@property (nonatomic, strong) NSButton *testBtn;
+@property (nonatomic, strong) NSButton *logBtn;
+@property (nonatomic, strong) NSButton *optionsBtn;
+@property (nonatomic, strong) NSSearchField *searchField;
 
-// §5.1 配置面板
+// §5.1 配置面板（控件本身放进「压缩选项」弹出面板；名称与字段保持与
+// currentOptions 的映射一致）
 @property (nonatomic, strong) NSPopUpButton *formatPop;
 @property (nonatomic, strong) NSSlider *levelSlider;
 @property (nonatomic, strong) NSTextField *levelLabel;
@@ -676,27 +756,42 @@ typedef NS_ENUM(NSInteger, Z7TaskKind) {
 @property (nonatomic, strong) NSButton *compressHeaderCheck;
 @property (nonatomic, strong) NSButton *fullPathsCheck;
 @property (nonatomic, strong) NSPopUpButton *updateModePop;
-@property (nonatomic, strong) NSStackView *advancedStack;
+@property (nonatomic, strong) NSPopover *optionsPopover;
 
-// 树与列表
+// 内容区（表格与空状态互斥占用，二者共用同一块矩形）
 @property (nonatomic, strong) Z7OutlineView *outline;
 @property (nonatomic, strong) NSScrollView *outlineScroll;
-@property (nonatomic, strong) NSSearchField *searchField;
+@property (nonatomic, strong) NSView *emptyState;
+@property (nonatomic, strong) NSImageView *emptyIcon;
+@property (nonatomic, strong) NSTextField *emptyTitle;
+@property (nonatomic, strong) NSTextField *emptySubtitle;
+@property (nonatomic, strong) NSButton *emptyButton;
 
-// 日志与状态
+// 日志（默认收起，出错或有告警时自动展开）
 @property (nonatomic, strong) NSTextView *log;
 @property (nonatomic, strong) NSScrollView *logScroll;
-@property (nonatomic, strong) NSProgressIndicator *progress;
+@property (nonatomic, strong) NSBox *logSeparator;
+@property (nonatomic, assign) BOOL logVisible;
+/// 日志抽屉的高度约束。收起时把常量改为 0 而不是激活/停用约束——约束拓扑
+/// 一旦变化就要重新求解整套布局，容易在窗口缩放过程中出现一帧空白。
+@property (nonatomic, strong) NSLayoutConstraint *logHeightConstraint;
+@property (nonatomic, strong) NSLayoutConstraint *logSeparatorHeightConstraint;
+
+// 状态栏
+@property (nonatomic, strong) Z7BarView *statusBar;
 @property (nonatomic, strong) NSTextField *statusLabel;
-@property (nonatomic, strong) NSButton *extractBtn;
-@property (nonatomic, strong) NSButton *testBtn;
-@property (nonatomic, strong) NSButton *addBtn;
-@property (nonatomic, strong) NSButton *deleteBtn;
+@property (nonatomic, strong) NSTextField *summaryLabel;
+@property (nonatomic, strong) NSProgressIndicator *progress;
 @property (nonatomic, strong) NSButton *cancelBtn;
+
+// 拖放
 @property (nonatomic, strong) DropView *drop;
 
 // 数据
 @property (nonatomic, copy) NSString *archivePath;
+/// 打开当前归档所用的密码。与「压缩选项」里的密码分开：前者只在本次会话内
+/// 存活、用完即清（§8.2），后者是新建归档时的加密口令。
+@property (nonatomic, copy) NSString *openPassword;
 @property (nonatomic, assign) BOOL archiveHeaderEncrypted;
 @property (nonatomic, strong) NSArray<Z7Node *> *roots;
 @property (nonatomic, strong) NSArray<Z7Node *> *displayRoots; // 搜索结果时扁平列表
@@ -709,24 +804,53 @@ typedef NS_ENUM(NSInteger, Z7TaskKind) {
 
 // 预览
 @property (nonatomic, strong) NSURL *previewURL;
+
+// 前向声明：loadView 与构建阶段会调用文件后面才定义的方法与属性。
+- (void)buildCompressionControls;
+- (void)buildTreeAndEmptyState;
+- (void)buildLogDrawer;
+- (void)buildStatusBar;
+- (void)assembleContent;
+- (void)buildToolbar;
+- (void)setLogVisible:(BOOL)visible;
+- (void)updateEmptyState;
+- (void)updateOptionsSummary;
+- (void)updateArchiveChrome;
+- (NSString *)archivePassword;
+- (Z7CompressionOptions *)currentOptions;
+- (void)setControlsEnabled:(BOOL)on;
+- (void)setBusy:(BOOL)busy;
+- (void)showStatus:(NSString *)s;
+- (void)appendLog:(NSString *)s;
+- (void)appendLog:(NSString *)s reveal:(BOOL)reveal;
 @end
 
 @implementation MainViewController
 
 - (void)loadView
 {
-    self.drop = [[DropView alloc] initWithFrame:NSMakeRect(0, 0, 1000, 700)];
+    self.drop = [[DropView alloc] initWithFrame:NSMakeRect(0, 0, 1040, 700)];
     self.drop.dropDelegate = self;
     self.view = self.drop;
+
     self.queue = [[NSOperationQueue alloc] init];
     self.queue.maxConcurrentOperationCount = 1;   // §7.1 串行，避免并发写同一归档
     self.queue.name = @"org.7-zip.macos.engine";
     self.roots = @[];
     self.displayRoots = @[];
     self.indexByPath = [NSMutableDictionary dictionary];
-    [self buildUI];
-    [self setControlsEnabled:NO];
-    self.statusLabel.stringValue = @"将归档或文件夹拖到这里";
+
+    [self buildCompressionControls];
+    [self buildTreeAndEmptyState];
+    [self buildLogDrawer];
+    [self buildStatusBar];
+    [self assembleContent];
+    [self buildToolbar];
+
+    [self setLogVisible:NO];
+    [self setBusy:NO];
+    [self formatChanged:nil];   // 建立与初始格式一致的控件可用状态
+    [self updateEmptyState];
 }
 
 #pragma mark 构件
@@ -736,6 +860,7 @@ typedef NS_ENUM(NSInteger, Z7TaskKind) {
     NSTextField *t = [[NSTextField alloc] initWithFrame:NSZeroRect];
     t.stringValue = s;
     t.editable = NO;
+    t.selectable = NO;
     t.bordered = NO;
     t.drawsBackground = NO;
     t.translatesAutoresizingMaskIntoConstraints = NO;
@@ -758,93 +883,38 @@ typedef NS_ENUM(NSInteger, Z7TaskKind) {
     return p;
 }
 
-- (void)buildUI
+/// 工具栏按钮。SF Symbol 在本机不存在时退化为文字按钮——宁可显示文字，也不要
+/// 出现一个"没有图标、看起来是空白"的按钮。
+- (NSButton *)toolbarButton:(NSString *)symbol title:(NSString *)title action:(SEL)sel
 {
-    // ---------------- 头部 ----------------
-    NSTextField *title = [self label:@"7-Zip"];
-    title.font = [NSFont systemFontOfSize:22 weight:NSFontWeightSemibold];
+    NSImage *img = Symbol(symbol, 15.0);
+    NSButton *b = img ? [NSButton buttonWithImage:img target:self action:sel]
+                      : [NSButton buttonWithTitle:title target:self action:sel];
+    b.bezelStyle = NSBezelStyleToolbar;
+    b.bordered = YES;
+    if (img) b.imagePosition = NSImageOnly;
+    b.refusesFirstResponder = YES;
+    b.toolTip = title;
+    b.translatesAutoresizingMaskIntoConstraints = NO;
+    [b.widthAnchor constraintGreaterThanOrEqualToConstant:36].active = YES;
+    [b.heightAnchor constraintEqualToConstant:26].active = YES;
+    return b;
+}
 
-    self.archiveLabel = [self label:@"未打开归档"];
-    self.archiveLabel.textColor = [NSColor secondaryLabelColor];
-    self.archiveLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
+/// 分隔线（1px，随明暗外观自适应）。
+- (NSBox *)separator
+{
+    NSBox *b = [[NSBox alloc] initWithFrame:NSZeroRect];
+    b.boxType = NSBoxSeparator;
+    b.translatesAutoresizingMaskIntoConstraints = NO;
+    [b.heightAnchor constraintEqualToConstant:1].active = YES;
+    return b;
+}
 
-    self.openBtn = [self button:@"打开归档…" action:@selector(doOpen:)];
-    self.compressBtn = [self button:@"新建归档…" action:@selector(doCompressPick:)];
+#pragma mark 压缩选项控件（§5.1）
 
-    // ---------------- §5.1 配置面板 ----------------
-    // 格式
-    self.formatPop = [self popup:@[@"7z", @"zip", @"tar", @"xz", @"gz", @"bz2"]
-                          action:@selector(formatChanged:)];
-
-    self.levelSlider = [[NSSlider alloc] initWithFrame:NSZeroRect];
-    self.levelSlider.translatesAutoresizingMaskIntoConstraints = NO;
-    self.levelSlider.minValue = 0; self.levelSlider.maxValue = 9;
-    self.levelSlider.integerValue = 5;
-    self.levelSlider.target = self;
-    self.levelSlider.action = @selector(levelChanged:);
-    self.levelLabel = [self label:@"级别 5"];
-
-    // 方法 / 字典 / 字长 / 快速字节 / 匹配查找器
-    self.methodPop = [self popup:@[@"自动", @"LZMA2", @"LZMA", @"PPMd", @"BZip2", @"Deflate", @"Copy"]
-                          action:@selector(methodChanged:)];
-    self.dictPop = [self popup:@[@"字典 自动", @"64 KB", @"1 MB", @"4 MB", @"16 MB", @"32 MB",
-                                 @"64 MB", @"128 MB", @"256 MB", @"512 MB", @"1 GB"]
-                        action:nil];
-    self.wordPop = [self popup:@[@"字长 自动", @"32", @"64", @"128", @"192", @"273"] action:nil];
-    self.fastBytesField = [[NSTextField alloc] initWithFrame:NSZeroRect];
-    self.fastBytesField.translatesAutoresizingMaskIntoConstraints = NO;
-    self.fastBytesField.placeholderString = @"快速字节";
-    self.fastBytesField.alignment = NSTextAlignmentCenter;
-    self.matchPop = [self popup:@[@"匹配 自动", @"bt4", @"bt2", @"hc4", @"hc3"] action:nil];
-
-    // 固实
-    self.solidCheck = [NSButton checkboxWithTitle:@"固实" target:self action:@selector(solidChanged:)];
-    self.solidCheck.translatesAutoresizingMaskIntoConstraints = NO;
-    self.solidCheck.state = NSControlStateValueOn;
-    self.solidBlockPop = [self popup:@[@"分块 不限", @"e", @"100f", @"64m", @"256m", @"1g"] action:nil];
-
-    // 线程
-    self.autoThreadsCheck = [NSButton checkboxWithTitle:@"自动线程" target:self
-                                                 action:@selector(threadsChanged:)];
-    self.autoThreadsCheck.translatesAutoresizingMaskIntoConstraints = NO;
-    self.autoThreadsCheck.state = NSControlStateValueOn;
-    self.threadsField = [[NSTextField alloc] initWithFrame:NSZeroRect];
-    self.threadsField.translatesAutoresizingMaskIntoConstraints = NO;
-    self.threadsField.placeholderString = @"线程";
-    self.threadsField.alignment = NSTextAlignmentCenter;
-
-    // 分卷
-    self.volumePop = [self popup:@[@"不分卷", @"1m", @"10m", @"100m", @"1g"] action:nil];
-
-    // 加密
-    self.encryptMethPop = [self popup:@[@"AES256", @"AES128", @"ZipCrypto"] action:nil];
-    self.password = [[NSSecureTextField alloc] initWithFrame:NSZeroRect];
-    self.password.translatesAutoresizingMaskIntoConstraints = NO;
-    self.password.placeholderString = @"密码（可选）";
-    self.encryptHeaderCheck = [NSButton checkboxWithTitle:@"加密文件名" target:nil action:nil];
-    self.encryptHeaderCheck.translatesAutoresizingMaskIntoConstraints = NO;
-    self.encryptHeaderCheck.state = NSControlStateValueOn;
-    self.compressHeaderCheck = [NSButton checkboxWithTitle:@"压缩头" target:nil action:nil];
-    self.compressHeaderCheck.translatesAutoresizingMaskIntoConstraints = NO;
-    self.compressHeaderCheck.state = NSControlStateValueOn;
-    self.fullPathsCheck = [NSButton checkboxWithTitle:@"完整路径" target:nil action:nil];
-    self.fullPathsCheck.translatesAutoresizingMaskIntoConstraints = NO;
-
-    // 更新模式（§5.1「更新模式」，作用于添加操作）
-    self.updateModePop = [self popup:@[@"添加：跳过同名", @"添加：替换同名"] action:nil];
-
-    self.advancedStack = [NSStackView stackViewWithViews:@[
-        self.methodPop, self.dictPop, self.wordPop, self.fastBytesField,
-        self.matchPop, self.solidCheck, self.solidBlockPop,
-        self.autoThreadsCheck, self.threadsField, self.volumePop,
-        self.encryptMethPop, self.encryptHeaderCheck, self.compressHeaderCheck,
-        self.fullPathsCheck
-    ]];
-    self.advancedStack.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-    self.advancedStack.spacing = 8;
-    self.advancedStack.translatesAutoresizingMaskIntoConstraints = NO;
-
-    // ---------------- 搜索 + 归档树 ----------------
+- (void)buildCompressionControls
+{
     self.searchField = [[NSSearchField alloc] initWithFrame:NSZeroRect];
     self.searchField.translatesAutoresizingMaskIntoConstraints = NO;
     self.searchField.placeholderString = @"搜索条目";
@@ -853,34 +923,298 @@ typedef NS_ENUM(NSInteger, Z7TaskKind) {
     self.searchField.sendsWholeSearchString = NO;
     self.searchField.sendsSearchStringImmediately = YES;
 
+    // 格式
+    self.formatPop = [self popup:@[@"7z", @"zip", @"tar", @"xz", @"gz", @"bz2"]
+                          action:@selector(formatChanged:)];
+
+    self.levelSlider = [[NSSlider alloc] initWithFrame:NSZeroRect];
+    self.levelSlider.translatesAutoresizingMaskIntoConstraints = NO;
+    self.levelSlider.minValue = 0; self.levelSlider.maxValue = 9;
+    self.levelSlider.integerValue = 5;
+    self.levelSlider.continuous = YES;
+    self.levelSlider.target = self;
+    self.levelSlider.action = @selector(levelChanged:);
+    self.levelLabel = [self label:@"等级 5"];
+    self.levelLabel.font = [NSFont systemFontOfSize:12];
+    self.levelLabel.textColor = [NSColor labelColor];
+
+    // 方法 / 字典 / 字长 / 快速字节 / 匹配查找器
+    self.methodPop = [self popup:@[@"自动", @"LZMA2", @"LZMA", @"PPMd", @"BZip2", @"Deflate", @"Copy"]
+                          action:@selector(methodChanged:)];
+    self.dictPop = [self popup:@[@"自动", @"64 KB", @"1 MB", @"4 MB", @"16 MB", @"32 MB",
+                                 @"64 MB", @"128 MB", @"256 MB", @"512 MB", @"1 GB"]
+                        action:@selector(updateOptionsSummary:)];
+    self.wordPop = [self popup:@[@"自动", @"32", @"64", @"128", @"192", @"273"]
+                        action:@selector(updateOptionsSummary:)];
+    self.fastBytesField = [[NSTextField alloc] initWithFrame:NSZeroRect];
+    self.fastBytesField.translatesAutoresizingMaskIntoConstraints = NO;
+    self.fastBytesField.placeholderString = @"自动";
+    self.fastBytesField.alignment = NSTextAlignmentCenter;
+    self.fastBytesField.target = self;
+    self.fastBytesField.action = @selector(updateOptionsSummary:);
+    self.matchPop = [self popup:@[@"自动", @"bt4", @"bt2", @"hc4", @"hc3"]
+                         action:@selector(updateOptionsSummary:)];
+
+    // 固实
+    self.solidCheck = [NSButton checkboxWithTitle:@"固实" target:self action:@selector(solidChanged:)];
+    self.solidCheck.translatesAutoresizingMaskIntoConstraints = NO;
+    self.solidCheck.state = NSControlStateValueOn;
+    self.solidBlockPop = [self popup:@[@"分块不限", @"10 MB", @"64 MB", @"256 MB", @"1 GB"]
+                              action:@selector(updateOptionsSummary:)];
+
+    // 线程
+    self.autoThreadsCheck = [NSButton checkboxWithTitle:@"自动" target:self
+                                                 action:@selector(threadsChanged:)];
+    self.autoThreadsCheck.translatesAutoresizingMaskIntoConstraints = NO;
+    self.autoThreadsCheck.state = NSControlStateValueOn;
+    self.threadsField = [[NSTextField alloc] initWithFrame:NSZeroRect];
+    self.threadsField.translatesAutoresizingMaskIntoConstraints = NO;
+    self.threadsField.placeholderString = @"线程";
+    self.threadsField.alignment = NSTextAlignmentCenter;
+    self.threadsField.target = self;
+    self.threadsField.action = @selector(updateOptionsSummary:);
+
+    // 分卷
+    self.volumePop = [self popup:@[@"不分卷", @"1 MB", @"10 MB", @"100 MB", @"1 GB"]
+                          action:@selector(updateOptionsSummary:)];
+
+    // 加密
+    self.encryptMethPop = [self popup:@[@"AES256", @"AES128", @"ZipCrypto"]
+                               action:@selector(updateOptionsSummary:)];
+    self.password = [[NSSecureTextField alloc] initWithFrame:NSZeroRect];
+    self.password.translatesAutoresizingMaskIntoConstraints = NO;
+    self.password.placeholderString = @"新建归档的密码（可选）";
+    self.password.target = self;
+    self.password.action = @selector(updateOptionsSummary:);
+    self.encryptHeaderCheck = [NSButton checkboxWithTitle:@"加密文件名" target:self
+                                                   action:@selector(updateOptionsSummary:)];
+    self.encryptHeaderCheck.translatesAutoresizingMaskIntoConstraints = NO;
+    self.encryptHeaderCheck.state = NSControlStateValueOn;
+    self.compressHeaderCheck = [NSButton checkboxWithTitle:@"压缩头" target:self
+                                                    action:@selector(updateOptionsSummary:)];
+    self.compressHeaderCheck.translatesAutoresizingMaskIntoConstraints = NO;
+    self.compressHeaderCheck.state = NSControlStateValueOn;
+    self.fullPathsCheck = [NSButton checkboxWithTitle:@"保存完整路径" target:self
+                                               action:@selector(updateOptionsSummary:)];
+    self.fullPathsCheck.translatesAutoresizingMaskIntoConstraints = NO;
+
+    // 更新模式（§5.1「更新模式」，作用于添加操作）
+    self.updateModePop = [self popup:@[@"跳过同名", @"替换同名"]
+                              action:@selector(updateOptionsSummary:)];
+}
+
+#pragma mark 「压缩选项」弹出面板
+
+/// 一行标签：右对齐、固定宽度，两列才能对齐。
+- (NSTextField *)optionsLabel:(NSString *)s
+{
+    NSTextField *t = [self label:s];
+    t.font = [NSFont systemFontOfSize:12];
+    t.textColor = [NSColor secondaryLabelColor];
+    t.alignment = NSTextAlignmentRight;
+    [t.widthAnchor constraintEqualToConstant:70].active = YES;
+    return t;
+}
+
+/// 一个控件槽位：固定宽度，保证左右两列的控件边界严格对齐。
+- (NSStackView *)optionsSlot:(NSArray<NSView *> *)views
+{
+    NSStackView *s = [NSStackView stackViewWithViews:views];
+    s.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    s.alignment = NSLayoutAttributeCenterY;
+    s.spacing = 6;
+    s.translatesAutoresizingMaskIntoConstraints = NO;
+    [s.widthAnchor constraintEqualToConstant:142].active = YES;
+    return s;
+}
+
+- (NSStackView *)optionsRow:(NSArray<NSView *> *)cols
+{
+    NSStackView *r = [NSStackView stackViewWithViews:cols];
+    r.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    r.alignment = NSLayoutAttributeCenterY;
+    r.spacing = 8;
+    r.translatesAutoresizingMaskIntoConstraints = NO;
+    [r.widthAnchor constraintEqualToConstant:448].active = YES;
+    return r;
+}
+
+- (NSView *)buildOptionsView
+{
+    // 控件宽度统一在这里给：单控件槽位直接铺满槽宽，多控件槽位按比例分配。
+    for (NSPopUpButton *p in @[self.formatPop, self.methodPop, self.dictPop, self.wordPop,
+                               self.matchPop, self.volumePop, self.encryptMethPop,
+                               self.updateModePop]) {
+        [p.widthAnchor constraintEqualToConstant:142].active = YES;
+    }
+    [self.solidBlockPop.widthAnchor constraintEqualToConstant:84].active = YES;
+    [self.levelSlider.widthAnchor constraintEqualToConstant:86].active = YES;
+    [self.levelLabel.widthAnchor constraintEqualToConstant:48].active = YES;
+    [self.fastBytesField.widthAnchor constraintEqualToConstant:100].active = YES;
+    [self.threadsField.widthAnchor constraintEqualToConstant:44].active = YES;
+    [self.password.widthAnchor constraintEqualToConstant:142].active = YES;
+
+    NSArray<NSArray *> *specs = @[
+        @[@"格式", @[self.formatPop],      @"等级",     @[self.levelSlider, self.levelLabel]],
+        @[@"方法", @[self.methodPop],      @"字典",     @[self.dictPop]],
+        @[@"字长", @[self.wordPop],        @"快速字节", @[self.fastBytesField]],
+        @[@"匹配查找器", @[self.matchPop], @"分卷",     @[self.volumePop]],
+        @[@"固实", @[self.solidCheck, self.solidBlockPop],
+          @"线程", @[self.autoThreadsCheck, self.threadsField]],
+        @[@"加密算法", @[self.encryptMethPop], @"密码", @[self.password]],
+        @[@"添加时", @[self.updateModePop], @"", @[]],
+    ];
+
+    NSMutableArray<NSView *> *rows = [NSMutableArray array];
+    for (NSArray *s in specs) {
+        NSMutableArray *cols = [NSMutableArray arrayWithObject:[self optionsLabel:s[0]]];
+        [cols addObject:[self optionsSlot:s[1]]];
+        if ([(NSString *)s[2] length]) {
+            [cols addObject:[self optionsLabel:s[2]]];
+            [cols addObject:[self optionsSlot:s[3]]];
+        }
+        [rows addObject:[self optionsRow:cols]];
+    }
+
+    // 三个开关横跨整行——它们是"要不要做"的独立开关，不属于某个标签。
+    NSStackView *checks = [NSStackView stackViewWithViews:@[self.encryptHeaderCheck,
+                                                            self.compressHeaderCheck,
+                                                            self.fullPathsCheck]];
+    checks.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    checks.alignment = NSLayoutAttributeCenterY;
+    checks.spacing = 14;
+    checks.translatesAutoresizingMaskIntoConstraints = NO;
+
+    NSTextField *hint = [self label:@"密码用于新建归档；打开加密归档时会单独询问。"];
+    hint.font = [NSFont systemFontOfSize:11];
+    hint.textColor = [NSColor tertiaryLabelColor];
+    hint.lineBreakMode = NSLineBreakByWordWrapping;
+    hint.maximumNumberOfLines = 2;
+    [hint.widthAnchor constraintEqualToConstant:300].active = YES;
+
+    NSButton *done = [self button:@"完成" action:@selector(closeOptions:)];
+    NSStackView *footer = [NSStackView stackViewWithViews:@[hint, done]];
+    footer.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    footer.alignment = NSLayoutAttributeCenterY;
+    footer.spacing = 12;
+    footer.translatesAutoresizingMaskIntoConstraints = NO;
+    [footer.widthAnchor constraintEqualToConstant:448].active = YES;
+    [hint setContentHuggingPriority:NSLayoutPriorityDefaultLow - 1
+                     forOrientation:NSLayoutConstraintOrientationHorizontal];
+
+    NSMutableArray<NSView *> *column = [NSMutableArray array];
+    [column addObjectsFromArray:rows];
+    [column addObject:[self separator]];
+    [column addObject:checks];
+    [column addObject:footer];
+
+    NSStackView *stack = [NSStackView stackViewWithViews:column];
+    stack.orientation = NSUserInterfaceLayoutOrientationVertical;
+    stack.alignment = NSLayoutAttributeLeading;
+    stack.spacing = 9;
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+
+    NSView *box = [[NSView alloc] initWithFrame:NSZeroRect];
+    [box addSubview:stack];
+    [NSLayoutConstraint activateConstraints:@[
+        [stack.topAnchor constraintEqualToAnchor:box.topAnchor constant:18],
+        [stack.leadingAnchor constraintEqualToAnchor:box.leadingAnchor constant:18],
+        [stack.trailingAnchor constraintEqualToAnchor:box.trailingAnchor constant:-18],
+        [stack.bottomAnchor constraintEqualToAnchor:box.bottomAnchor constant:-16],
+        [box.widthAnchor constraintEqualToConstant:484],
+    ]];
+    return box;
+}
+
+- (void)showOptions:(id)sender
+{
+    if (!self.optionsPopover) {
+        NSViewController *vc = [[NSViewController alloc] init];
+        vc.view = [self buildOptionsView];
+
+        self.optionsPopover = [[NSPopover alloc] init];
+        self.optionsPopover.contentViewController = vc;
+        self.optionsPopover.behavior = NSPopoverBehaviorSemitransient;
+        self.optionsPopover.animates = YES;
+
+        NSSize fit = vc.view.fittingSize;
+        self.optionsPopover.contentSize = (fit.width > 200 && fit.height > 80)
+            ? fit : NSMakeSize(484, 320);
+
+        [[NSNotificationCenter defaultCenter] addObserver:self
+            selector:@selector(optionsPopoverDidClose:)
+            name:NSPopoverDidCloseNotification
+            object:self.optionsPopover];
+    }
+    NSView *anchor = [sender isKindOfClass:[NSView class]] ? (NSView *)sender : self.optionsBtn;
+    [self.optionsPopover showRelativeToRect:anchor.bounds
+                                     ofView:anchor
+                             preferredEdge:NSRectEdgeMinY];
+}
+
+- (void)closeOptions:(id)s
+{
+    [self.optionsPopover close];
+}
+
+- (void)optionsPopoverDidClose:(NSNotification *)n
+{
+    [self updateOptionsSummary];
+}
+
+/// 状态栏右侧的摘要：让用户不必展开面板就知道「新建归档」会用什么参数。
+- (void)updateOptionsSummary
+{
+    Z7CompressionOptions *o = [self currentOptions];
+    NSMutableArray *bits = [NSMutableArray arrayWithObject:(o.format.length ? o.format : @"7z")];
+    [bits addObject:[NSString stringWithFormat:@"等级 %ld", (long)o.level]];
+    if (o.password.length) [bits addObject:@"已设密码"];
+    self.summaryLabel.stringValue = [NSString stringWithFormat:@"新建归档：%@",
+                                     [bits componentsJoinedByString:@" · "]];
+}
+
+#pragma mark 归档树与空状态
+
+- (void)buildTreeAndEmptyState
+{
     self.outline = [[Z7OutlineView alloc] initWithFrame:NSZeroRect];
     self.outline.keyDelegate = self;
     self.outline.dataSource = self;
     self.outline.delegate = self;
+    // 显式指定 .fullWidth：默认的"自动"样式在本机会解析为 .inset，于是空表被
+    // 渲染成一叠带圆角的空白行块（旧界面截图里那一片灰条就是这么来的）。
+    self.outline.style = NSTableViewStyleFullWidth;
     self.outline.usesAlternatingRowBackgroundColors = YES;
     self.outline.allowsMultipleSelection = YES;
-    self.outline.rowHeight = 20;
+    self.outline.allowsColumnReordering = YES;
+    self.outline.allowsColumnResizing = YES;
+    self.outline.columnAutoresizingStyle = NSTableViewUniformColumnAutoresizingStyle;
+    self.outline.rowHeight = 22;
     self.outline.indentationPerLevel = 14;
     self.outline.autosaveExpandedItems = NO;
+    self.outline.autoresizesOutlineColumn = YES;
+    self.outline.gridStyleMask = NSTableViewGridNone;
+    self.outline.allowsEmptySelection = YES;
     // 拖出提取（§6.6）
     [self.outline setDraggingSourceOperationMask:NSDragOperationCopy forLocal:NO];
     [self.outline registerForDraggedTypes:@[NSPasteboardTypeFileURL]];
 
     // §6.2 八列
     NSArray *cols = @[
-        @[@"名称", @330, @YES],
+        @[@"名称", @340, @YES],
         @[@"大小", @90, @YES],
         @[@"压缩后", @90, @YES],
-        @[@"压缩率", @70, @YES],
-        @[@"修改时间", @150, @YES],
-        @[@"CRC", @90, @YES],
-        @[@"方法", @110, @YES],
-        @[@"属性", @110, @YES],
+        @[@"压缩率", @80, @YES],
+        @[@"修改时间", @160, @YES],
+        @[@"CRC", @100, @YES],
+        @[@"方法", @100, @YES],
+        @[@"属性", @90, @YES],
     ];
     for (NSArray *c in cols) {
         NSTableColumn *col = [[NSTableColumn alloc] initWithIdentifier:c[0]];
         col.title = c[0];
         col.width = [c[1] doubleValue];
+        col.minWidth = 60;
         col.sortDescriptorPrototype = [NSSortDescriptor sortDescriptorWithKey:c[0]
                                                                    ascending:YES
                                                                     selector:@selector(localizedStandardCompare:)];
@@ -888,155 +1222,262 @@ typedef NS_ENUM(NSInteger, Z7TaskKind) {
     }
     self.outline.outlineTableColumn = self.outline.tableColumns.firstObject;
 
+    // 内容区的两个成员（表格与空状态）由 viewDidLayout 直接给定 frame，不走
+    // Auto Layout —— 原因见 assembleContent 的说明。
     self.outlineScroll = [[NSScrollView alloc] initWithFrame:NSZeroRect];
-    self.outlineScroll.translatesAutoresizingMaskIntoConstraints = NO;
+    self.outlineScroll.translatesAutoresizingMaskIntoConstraints = YES;
     self.outlineScroll.documentView = self.outline;
     self.outlineScroll.hasVerticalScroller = YES;
+    self.outlineScroll.hasHorizontalScroller = YES;
+    self.outlineScroll.autohidesScrollers = YES;
     self.outlineScroll.drawsBackground = YES;
     self.outlineScroll.backgroundColor = [NSColor textBackgroundColor];
+    self.outlineScroll.borderType = NSNoBorder;
 
-    // ---------------- 日志 ----------------
-    self.log = [[NSTextView alloc] initWithFrame:NSZeroRect];
+    [self buildEmptyState];
+}
+
+- (void)buildEmptyState
+{
+    self.emptyIcon = [[NSImageView alloc] initWithFrame:NSZeroRect];
+    self.emptyIcon.translatesAutoresizingMaskIntoConstraints = NO;
+    self.emptyIcon.imageScaling = NSImageScaleProportionallyUpOrDown;
+    self.emptyIcon.contentTintColor = [NSColor tertiaryLabelColor];
+    [self.emptyIcon.widthAnchor constraintEqualToConstant:54].active = YES;
+    [self.emptyIcon.heightAnchor constraintEqualToConstant:54].active = YES;
+
+    self.emptyTitle = [self label:@"未打开归档"];
+    self.emptyTitle.font = [NSFont systemFontOfSize:17 weight:NSFontWeightSemibold];
+    self.emptyTitle.textColor = [NSColor labelColor];
+    self.emptyTitle.alignment = NSTextAlignmentCenter;
+
+    self.emptySubtitle = [self label:@""];
+    self.emptySubtitle.font = [NSFont systemFontOfSize:12];
+    self.emptySubtitle.textColor = [NSColor secondaryLabelColor];
+    self.emptySubtitle.alignment = NSTextAlignmentCenter;
+    self.emptySubtitle.lineBreakMode = NSLineBreakByWordWrapping;
+    self.emptySubtitle.maximumNumberOfLines = 2;
+    [self.emptySubtitle.widthAnchor constraintLessThanOrEqualToConstant:380].active = YES;
+
+    self.emptyButton = [self button:@"打开归档…" action:@selector(doOpen:)];
+
+    NSStackView *stack = [NSStackView stackViewWithViews:@[self.emptyIcon, self.emptyTitle,
+                                                           self.emptySubtitle, self.emptyButton]];
+    stack.orientation = NSUserInterfaceLayoutOrientationVertical;
+    stack.alignment = NSLayoutAttributeCenterX;
+    stack.spacing = 8;
+    [stack setCustomSpacing:18 afterView:self.emptySubtitle];
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+
+    self.emptyState = [[Z7PaneView alloc] initWithFrame:NSZeroRect];
+    self.emptyState.translatesAutoresizingMaskIntoConstraints = YES;
+    [self.emptyState addSubview:stack];
+    [NSLayoutConstraint activateConstraints:@[
+        [stack.centerXAnchor constraintEqualToAnchor:self.emptyState.centerXAnchor],
+        [stack.centerYAnchor constraintEqualToAnchor:self.emptyState.centerYAnchor constant:-14],
+        [stack.leadingAnchor constraintGreaterThanOrEqualToAnchor:self.emptyState.leadingAnchor
+                                                        constant:24],
+        [stack.trailingAnchor constraintLessThanOrEqualToAnchor:self.emptyState.trailingAnchor
+                                                       constant:-24],
+    ]];
+}
+
+/// 内容区高度 = 窗口内容高 − 状态栏 − 分隔线 −（日志展开时的抽屉与分隔线）。
+/// 表格与空状态共用这一块矩形，互斥显示，因此两者 frame 始终一致。
+- (void)viewDidLayout
+{
+    [super viewDidLayout];
+    CGFloat bottom = 31.0;                      // 状态栏 30 + 其上分隔线 1
+    if (self.logVisible) bottom += 133.0;       // 日志抽屉 132 + 其上分隔线 1
+    NSRect r = self.drop.bounds;
+    r.origin.y = bottom;
+    r.size.height = MAX(0.0, NSHeight(r) - bottom);
+    self.outlineScroll.frame = r;
+    self.emptyState.frame = r;
+}
+
+/// 只有真的没有内容可显示时才占据整个内容区——空状态与表格互斥，不叠加。
+- (void)updateEmptyState
+{
+    BOOL hasContent = (self.displayRoots.count > 0);
+    self.emptyState.hidden = hasContent;
+    self.outlineScroll.hidden = !hasContent;
+    if (hasContent) return;
+
+    NSImage *icon = nil;
+    if (!self.archivePath.length) {
+        icon = Symbol(@"archivebox", 44.0);
+        self.emptyTitle.stringValue = @"未打开归档";
+        self.emptySubtitle.stringValue = @"把归档或文件夹拖到这里，或点按工具栏中的「打开归档」。";
+        self.emptyButton.hidden = NO;
+    } else if (self.filtering) {
+        icon = Symbol(@"magnifyingglass", 44.0);
+        self.emptyTitle.stringValue = @"没有匹配的条目";
+        self.emptySubtitle.stringValue = [NSString stringWithFormat:@"没有名称包含「%@」的条目。",
+                                          self.searchField.stringValue];
+        self.emptyButton.hidden = YES;
+    } else {
+        icon = Symbol(@"archivebox", 44.0);
+        self.emptyTitle.stringValue = @"归档为空";
+        self.emptySubtitle.stringValue = @"这个归档里没有任何条目。";
+        self.emptyButton.hidden = YES;
+    }
+    self.emptyIcon.image = icon;
+    self.emptyIcon.hidden = (icon == nil);
+}
+
+#pragma mark 日志抽屉
+
+- (void)buildLogDrawer
+{
+    self.log = [[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, 400, 132)];
     self.log.editable = NO;
+    self.log.selectable = YES;
     self.log.font = [NSFont monospacedSystemFontOfSize:11 weight:NSFontWeightRegular];
+    self.log.textContainerInset = NSMakeSize(10, 8);
+    self.log.autoresizingMask = NSViewWidthSizable;
+    self.log.minSize = NSMakeSize(0, 0);
+    self.log.maxSize = NSMakeSize(CGFLOAT_MAX, CGFLOAT_MAX);
+    self.log.verticallyResizable = YES;
+    self.log.horizontallyResizable = NO;
+    self.log.textContainer.widthTracksTextView = YES;
+
     self.logScroll = [[NSScrollView alloc] initWithFrame:NSZeroRect];
     self.logScroll.translatesAutoresizingMaskIntoConstraints = NO;
     self.logScroll.documentView = self.log;
     self.logScroll.hasVerticalScroller = YES;
+    self.logScroll.autohidesScrollers = YES;
     self.logScroll.drawsBackground = YES;
     self.logScroll.backgroundColor = [NSColor textBackgroundColor];
+    self.logScroll.borderType = NSNoBorder;
+    // 高度可切换：收起时为 0（不留空白），展开时 132。
+    self.logHeightConstraint = [self.logScroll.heightAnchor constraintEqualToConstant:132];
+    self.logHeightConstraint.active = YES;
 
-    // ---------------- 底部操作 ----------------
-    self.extractBtn = [self button:@"解压到…" action:@selector(doExtract:)];
-    self.testBtn    = [self button:@"测试" action:@selector(doTest:)];
-    self.addBtn     = [self button:@"添加文件…" action:@selector(doAdd:)];
-    self.deleteBtn  = [self button:@"删除" action:@selector(doDelete:)];
-    self.cancelBtn  = [self button:@"停止" action:@selector(doCancel:)];
-    self.cancelBtn.enabled = NO;
+    // 日志上方的分隔线。这里不直接用 separator: 那个助手会钉死 1pt 高度，
+    // 而收起时需要它同时变成 0pt。
+    self.logSeparator = [[NSBox alloc] initWithFrame:NSZeroRect];
+    self.logSeparator.boxType = NSBoxSeparator;
+    self.logSeparator.translatesAutoresizingMaskIntoConstraints = NO;
+    self.logSeparatorHeightConstraint =
+        [self.logSeparator.heightAnchor constraintEqualToConstant:1];
+    self.logSeparatorHeightConstraint.active = YES;
+}
+
+- (void)setLogVisible:(BOOL)visible
+{
+    _logVisible = visible;
+    self.logHeightConstraint.constant = visible ? 132 : 0;
+    self.logSeparatorHeightConstraint.constant = visible ? 1 : 0;
+    self.logSeparator.hidden = !visible;
+    self.logScroll.hidden = !visible;
+    self.logBtn.state = visible ? NSControlStateValueOn : NSControlStateValueOff;
+}
+
+- (void)toggleLog:(id)s
+{
+    [self setLogVisible:!self.logVisible];
+    if (self.logVisible) {
+        NSUInteger len = self.log.string.length;
+        [self.log scrollRangeToVisible:NSMakeRange(len, 0)];
+    }
+}
+
+- (void)clearLog:(id)s
+{
+    self.log.string = @"";
+}
+
+#pragma mark 状态栏
+
+- (void)buildStatusBar
+{
+    self.statusBar = [[Z7BarView alloc] initWithFrame:NSZeroRect];
+    self.statusBar.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.statusBar.heightAnchor constraintEqualToConstant:30].active = YES;
+
+    self.statusLabel = [self label:@"就绪"];
+    self.statusLabel.font = [NSFont systemFontOfSize:12];
+    self.statusLabel.textColor = [NSColor labelColor];
+    self.statusLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
+    [self.statusLabel setContentHuggingPriority:NSLayoutPriorityDefaultLow - 1
+                                 forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [self.statusLabel setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
+                                               forOrientation:NSLayoutConstraintOrientationHorizontal];
+
+    self.summaryLabel = [self label:@""];
+    self.summaryLabel.font = [NSFont systemFontOfSize:11];
+    self.summaryLabel.textColor = [NSColor secondaryLabelColor];
+    self.summaryLabel.alignment = NSTextAlignmentRight;
 
     self.progress = [[NSProgressIndicator alloc] initWithFrame:NSZeroRect];
     self.progress.translatesAutoresizingMaskIntoConstraints = NO;
     self.progress.style = NSProgressIndicatorStyleBar;
     self.progress.indeterminate = NO;
     self.progress.minValue = 0; self.progress.maxValue = 100;
+    self.progress.controlSize = NSControlSizeSmall;
+    [self.progress.widthAnchor constraintEqualToConstant:150].active = YES;
 
-    self.statusLabel = [self label:@"就绪"];
-    self.statusLabel.textColor = [NSColor secondaryLabelColor];
+    self.cancelBtn = [NSButton buttonWithTitle:@"停止" target:self action:@selector(doCancel:)];
+    self.cancelBtn.translatesAutoresizingMaskIntoConstraints = NO;
+    self.cancelBtn.controlSize = NSControlSizeSmall;
+    self.cancelBtn.toolTip = @"停止当前任务（⌘.）";
+    self.cancelBtn.hidden = YES;
 
-    for (NSView *v in @[title, self.archiveLabel, self.openBtn, self.compressBtn,
-                        self.formatPop, self.levelSlider, self.levelLabel, self.password,
-                        self.updateModePop, self.advancedStack,
-                        self.searchField, self.outlineScroll, self.logScroll,
-                        self.extractBtn, self.testBtn, self.addBtn, self.deleteBtn,
-                        self.cancelBtn, self.progress, self.statusLabel]) {
+    NSStackView *row = [NSStackView stackViewWithViews:@[self.statusLabel, self.summaryLabel,
+                                                         self.progress, self.cancelBtn]];
+    row.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    row.alignment = NSLayoutAttributeCenterY;
+    row.distribution = NSStackViewDistributionFill;
+    row.spacing = 10;
+    row.edgeInsets = NSEdgeInsetsMake(0, 12, 0, 12);
+    row.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.statusBar addSubview:row];
+    [NSLayoutConstraint activateConstraints:@[
+        [row.topAnchor constraintEqualToAnchor:self.statusBar.topAnchor],
+        [row.leadingAnchor constraintEqualToAnchor:self.statusBar.leadingAnchor],
+        [row.trailingAnchor constraintEqualToAnchor:self.statusBar.trailingAnchor],
+        [row.bottomAnchor constraintEqualToAnchor:self.statusBar.bottomAnchor],
+    ]];
+}
+
+#pragma mark 组装
+
+- (void)assembleContent
+{
+    NSBox *statusSeparator = [self separator];
+
+    // 底部三件套（日志抽屉 → 分隔线 → 状态栏）自下而上钉死。
+    NSArray<NSView *> *rows = @[self.logSeparator, self.logScroll,
+                                statusSeparator, self.statusBar];
+    for (NSView *v in rows) {
         [self.drop addSubview:v];
+        [NSLayoutConstraint activateConstraints:@[
+            [v.leadingAnchor constraintEqualToAnchor:self.drop.leadingAnchor],
+            [v.trailingAnchor constraintEqualToAnchor:self.drop.trailingAnchor],
+        ]];
     }
+    [NSLayoutConstraint activateConstraints:@[
+        [self.statusBar.bottomAnchor constraintEqualToAnchor:self.drop.bottomAnchor],
+        [statusSeparator.bottomAnchor constraintEqualToAnchor:self.statusBar.topAnchor],
+        [self.logScroll.bottomAnchor constraintEqualToAnchor:statusSeparator.topAnchor],
+        [self.logSeparator.bottomAnchor constraintEqualToAnchor:self.logScroll.topAnchor],
+    ]];
 
-    NSMutableArray *cons = [NSMutableArray array];
-    #define LEAD(item, view, cst) \
-        [cons addObject:[NSLayoutConstraint constraintWithItem:view attribute:NSLayoutAttributeLeading \
-            relatedBy:NSLayoutRelationEqual toItem:item attribute:NSLayoutAttributeLeading multiplier:1 constant:cst]]
-    #define TOP(item, view, cst) \
-        [cons addObject:[NSLayoutConstraint constraintWithItem:view attribute:NSLayoutAttributeTop \
-            relatedBy:NSLayoutRelationEqual toItem:item attribute:NSLayoutAttributeTop multiplier:1 constant:cst]]
-    #define TRAIL(item, view, cst) \
-        [cons addObject:[NSLayoutConstraint constraintWithItem:view attribute:NSLayoutAttributeTrailing \
-            relatedBy:NSLayoutRelationEqual toItem:item attribute:NSLayoutAttributeTrailing multiplier:1 constant:cst]]
+    // 内容区（表格 / 空状态）刻意不走 Auto Layout，改由 viewDidLayout 直接给
+    // frame。原因：本机环境下，这两个视图一旦交给 Auto Layout 管理，即使
+    // frame、bounds、hidden、alpha、层级全部正确、布局也无歧义，AppKit 依然
+    // 会把它们连同各自整棵子树一起跳过绘制（界面上一片空白）。同一窗口里显式
+    // 设定 frame 的视图、以及底部按约束摆放的状态栏都正常显示；这条差异经过
+    // 逐一排除（尺寸推导 / 布局歧义 / 隐藏祖先 / 顶边锚定 / 工具栏样式 /
+    // drawRect: / layer 承载）后仍稳定复现，因此按可工作的方式实现。
+    [self.drop addSubview:self.outlineScroll];
+    [self.drop addSubview:self.emptyState];
 
-    // 头部
-    TOP(self.drop, title, 16);
-    LEAD(self.drop, title, 20);
-    [cons addObject:[NSLayoutConstraint constraintWithItem:self.archiveLabel attribute:NSLayoutAttributeLeading
-        relatedBy:NSLayoutRelationEqual toItem:title attribute:NSLayoutAttributeTrailing multiplier:1 constant:12]];
-    [cons addObject:[NSLayoutConstraint constraintWithItem:self.archiveLabel attribute:NSLayoutAttributeCenterY
-        relatedBy:NSLayoutRelationEqual toItem:title attribute:NSLayoutAttributeCenterY multiplier:1 constant:0]];
-    [cons addObject:[NSLayoutConstraint constraintWithItem:self.compressBtn attribute:NSLayoutAttributeCenterY
-        relatedBy:NSLayoutRelationEqual toItem:title attribute:NSLayoutAttributeCenterY multiplier:1 constant:0]];
-    TRAIL(self.drop, self.compressBtn, -20);
-    [cons addObject:[NSLayoutConstraint constraintWithItem:self.openBtn attribute:NSLayoutAttributeTrailing
-        relatedBy:NSLayoutRelationEqual toItem:self.compressBtn attribute:NSLayoutAttributeLeading multiplier:1 constant:-8]];
-    [cons addObject:[NSLayoutConstraint constraintWithItem:self.openBtn attribute:NSLayoutAttributeCenterY
-        relatedBy:NSLayoutRelationEqual toItem:title attribute:NSLayoutAttributeCenterY multiplier:1 constant:0]];
-    [cons addObject:[NSLayoutConstraint constraintWithItem:self.archiveLabel attribute:NSLayoutAttributeTrailing
-        relatedBy:NSLayoutRelationLessThanOrEqual toItem:self.openBtn attribute:NSLayoutAttributeLeading
-        multiplier:1 constant:-12]];
+    // 内容区（表格/空状态/日志）用显式 frame，窗口的内容自适应尺寸会因此变得
+    // 很小、开窗即被压成一条。补一条最小宽度约束，等价于声明内容区的最小尺寸。
+    [[self.drop.widthAnchor constraintGreaterThanOrEqualToConstant:880] setActive:YES];
 
-    // 第一行：格式 / 级别 / 级别文字 / 更新模式 / 密码
-    TOP(title, self.formatPop, 14);
-    LEAD(self.drop, self.formatPop, 20);
-    NSArray *row1 = @[self.formatPop, self.levelSlider, self.levelLabel, self.updateModePop, self.password];
-    NSView *prev = self.formatPop;
-    for (NSUInteger i = 1; i < row1.count; i++) {
-        NSView *v = row1[i];
-        [cons addObject:[NSLayoutConstraint constraintWithItem:v attribute:NSLayoutAttributeLeading
-            relatedBy:NSLayoutRelationEqual toItem:prev attribute:NSLayoutAttributeTrailing multiplier:1 constant:10]];
-        [cons addObject:[NSLayoutConstraint constraintWithItem:v attribute:NSLayoutAttributeCenterY
-            relatedBy:NSLayoutRelationEqual toItem:self.formatPop attribute:NSLayoutAttributeCenterY multiplier:1 constant:0]];
-        prev = v;
-    }
-    [cons addObject:[NSLayoutConstraint constraintWithItem:self.levelSlider attribute:NSLayoutAttributeWidth
-        relatedBy:NSLayoutRelationEqual toItem:nil attribute:NSLayoutAttributeNotAnAttribute multiplier:1 constant:130]];
-    [cons addObject:[NSLayoutConstraint constraintWithItem:self.password attribute:NSLayoutAttributeWidth
-        relatedBy:NSLayoutRelationEqual toItem:nil attribute:NSLayoutAttributeNotAnAttribute multiplier:1 constant:170]];
-
-    // 第二行：高级参数
-    TOP(self.formatPop, self.advancedStack, 10);
-    LEAD(self.drop, self.advancedStack, 20);
-    TRAIL(self.drop, self.advancedStack, -20);
-    [cons addObject:[NSLayoutConstraint constraintWithItem:self.fastBytesField attribute:NSLayoutAttributeWidth
-        relatedBy:NSLayoutRelationEqual toItem:nil attribute:NSLayoutAttributeNotAnAttribute multiplier:1 constant:80]];
-    [cons addObject:[NSLayoutConstraint constraintWithItem:self.threadsField attribute:NSLayoutAttributeWidth
-        relatedBy:NSLayoutRelationEqual toItem:nil attribute:NSLayoutAttributeNotAnAttribute multiplier:1 constant:60]];
-
-    // 搜索框
-    TOP(self.advancedStack, self.searchField, 12);
-    LEAD(self.drop, self.searchField, 20);
-    [cons addObject:[NSLayoutConstraint constraintWithItem:self.searchField attribute:NSLayoutAttributeWidth
-        relatedBy:NSLayoutRelationEqual toItem:nil attribute:NSLayoutAttributeNotAnAttribute multiplier:1 constant:240]];
-
-    // 归档树
-    TOP(self.searchField, self.outlineScroll, 8);
-    LEAD(self.drop, self.outlineScroll, 20);
-    TRAIL(self.drop, self.outlineScroll, -20);
-    [cons addObject:[NSLayoutConstraint constraintWithItem:self.outlineScroll attribute:NSLayoutAttributeHeight
-        relatedBy:NSLayoutRelationEqual toItem:self.drop attribute:NSLayoutAttributeHeight multiplier:0.46 constant:0]];
-
-    // 日志
-    TOP(self.outlineScroll, self.logScroll, 10);
-    LEAD(self.drop, self.logScroll, 20);
-    TRAIL(self.drop, self.logScroll, -20);
-    [cons addObject:[NSLayoutConstraint constraintWithItem:self.logScroll attribute:NSLayoutAttributeHeight
-        relatedBy:NSLayoutRelationEqual toItem:nil attribute:NSLayoutAttributeNotAnAttribute multiplier:1 constant:100]];
-
-    // 按钮行
-    NSArray *acts = @[self.extractBtn, self.testBtn, self.addBtn, self.deleteBtn, self.cancelBtn];
-    TOP(self.logScroll, self.extractBtn, 12);
-    LEAD(self.drop, self.extractBtn, 20);
-    prev = self.extractBtn;
-    for (NSUInteger i = 1; i < acts.count; i++) {
-        NSView *v = acts[i];
-        [cons addObject:[NSLayoutConstraint constraintWithItem:v attribute:NSLayoutAttributeLeading
-            relatedBy:NSLayoutRelationEqual toItem:prev attribute:NSLayoutAttributeTrailing multiplier:1 constant:8]];
-        [cons addObject:[NSLayoutConstraint constraintWithItem:v attribute:NSLayoutAttributeCenterY
-            relatedBy:NSLayoutRelationEqual toItem:self.extractBtn attribute:NSLayoutAttributeCenterY multiplier:1 constant:0]];
-        prev = v;
-    }
-
-    // 进度 + 状态
-    LEAD(self.drop, self.progress, 20);
-    [cons addObject:[NSLayoutConstraint constraintWithItem:self.progress attribute:NSLayoutAttributeTrailing
-        relatedBy:NSLayoutRelationEqual toItem:self.statusLabel attribute:NSLayoutAttributeLeading multiplier:1 constant:-10]];
-    [cons addObject:[NSLayoutConstraint constraintWithItem:self.progress attribute:NSLayoutAttributeCenterY
-        relatedBy:NSLayoutRelationEqual toItem:self.statusLabel attribute:NSLayoutAttributeCenterY multiplier:1 constant:0]];
-    [cons addObject:[NSLayoutConstraint constraintWithItem:self.progress attribute:NSLayoutAttributeWidth
-        relatedBy:NSLayoutRelationGreaterThanOrEqual toItem:nil attribute:NSLayoutAttributeNotAnAttribute multiplier:1 constant:240]];
-    TRAIL(self.drop, self.statusLabel, -20);
-    [cons addObject:[NSLayoutConstraint constraintWithItem:self.statusLabel attribute:NSLayoutAttributeBottom
-        relatedBy:NSLayoutRelationEqual toItem:self.drop attribute:NSLayoutAttributeBottom multiplier:1 constant:-14]];
-    [cons addObject:[NSLayoutConstraint constraintWithItem:self.statusLabel attribute:NSLayoutAttributeWidth
-        relatedBy:NSLayoutRelationGreaterThanOrEqual toItem:nil attribute:NSLayoutAttributeNotAnAttribute multiplier:1 constant:150]];
-
-    [NSLayoutConstraint activateConstraints:cons];
 
     // 右键菜单（§6.4）
     NSMenu *ctx = [[NSMenu alloc] init];
@@ -1046,10 +1487,85 @@ typedef NS_ENUM(NSInteger, Z7TaskKind) {
     [ctx addItemWithTitle:@"删除" action:@selector(doDelete:) keyEquivalent:@""];
     for (NSMenuItem *mi in ctx.itemArray) mi.target = self;
     self.outline.menu = ctx;
+}
 
-    #undef LEAD
-    #undef TOP
-    #undef TRAIL
+#pragma mark 工具栏
+
+- (void)buildToolbar
+{
+    self.openBtn     = [self toolbarButton:@"folder" title:@"打开归档" action:@selector(doOpen:)];
+    self.compressBtn = [self toolbarButton:@"doc.badge.plus" title:@"新建归档"
+                                    action:@selector(doCompressPick:)];
+    self.extractBtn  = [self toolbarButton:@"square.and.arrow.down" title:@"解压到…"
+                                    action:@selector(doExtract:)];
+    self.addBtn      = [self toolbarButton:@"plus.circle" title:@"添加文件…"
+                                    action:@selector(doAdd:)];
+    self.deleteBtn   = [self toolbarButton:@"trash" title:@"删除所选"
+                                    action:@selector(doDelete:)];
+    self.testBtn     = [self toolbarButton:@"checkmark.seal" title:@"测试归档"
+                                    action:@selector(doTest:)];
+    self.optionsBtn  = [self toolbarButton:@"slider.horizontal.3" title:@"压缩选项"
+                                    action:@selector(showOptions:)];
+    self.logBtn      = [self toolbarButton:@"text.alignleft" title:@"日志"
+                                    action:@selector(toggleLog:)];
+    self.logBtn.buttonType = NSButtonTypeToggle;
+
+    NSToolbar *tb = [[NSToolbar alloc] initWithIdentifier:@"org.7-zip.macos.toolbar"];
+    tb.delegate = self;
+    tb.displayMode = NSToolbarDisplayModeIconOnly;
+    // 固定布局：自定义会让同一个按钮实例被插入两次，而自定义视图无法分身。
+    tb.allowsUserCustomization = NO;
+    self.toolbar = tb;
+}
+
+- (NSArray<NSToolbarItemIdentifier> *)toolbarDefaultItemIdentifiers:(NSToolbar *)tb
+{
+    return @[@"open", @"new", NSToolbarSpaceItemIdentifier,
+             @"extract", @"add", @"delete", @"test",
+             NSToolbarFlexibleSpaceItemIdentifier,
+             @"search", @"options", @"log"];
+}
+
+- (NSArray<NSToolbarItemIdentifier> *)toolbarAllowedItemIdentifiers:(NSToolbar *)tb
+{
+    return @[@"open", @"new", @"extract", @"add", @"delete", @"test",
+             @"search", @"options", @"log",
+             NSToolbarSpaceItemIdentifier, NSToolbarFlexibleSpaceItemIdentifier];
+}
+
+- (NSToolbarItem *)toolbar:(NSToolbar *)tb
+     itemForItemIdentifier:(NSToolbarItemIdentifier)ident
+ willBeInsertedIntoToolbar:(BOOL)flag
+{
+    if ([ident isEqualToString:@"search"]) {
+        NSSearchToolbarItem *it = [[NSSearchToolbarItem alloc] initWithItemIdentifier:ident];
+        it.searchField = self.searchField;
+        it.preferredWidthForSearchField = 190;
+        it.label = @"搜索";
+        it.paletteLabel = @"搜索";
+        it.toolTip = @"按名称搜索归档内的条目";
+        return it;
+    }
+
+    NSDictionary<NSString *, NSArray *> *map = @{
+        @"open":    @[self.openBtn,     @"打开归档"],
+        @"new":     @[self.compressBtn, @"新建归档"],
+        @"extract": @[self.extractBtn,  @"解压到…"],
+        @"add":     @[self.addBtn,      @"添加文件…"],
+        @"delete":  @[self.deleteBtn,   @"删除所选"],
+        @"test":    @[self.testBtn,     @"测试归档"],
+        @"options": @[self.optionsBtn,  @"压缩选项"],
+        @"log":     @[self.logBtn,      @"日志"],
+    };
+    NSArray *spec = map[ident];
+    if (!spec) return nil;
+
+    NSToolbarItem *it = [[NSToolbarItem alloc] initWithItemIdentifier:ident];
+    it.view = spec[0];
+    it.label = spec[1];
+    it.paletteLabel = spec[1];
+    it.toolTip = spec[1];
+    return it;
 }
 
 #pragma mark §5.1 面板 -> Z7CompressionOptions
@@ -1074,13 +1590,15 @@ typedef NS_ENUM(NSInteger, Z7TaskKind) {
     self.encryptHeaderCheck.enabled = [f isEqualToString:@"7z"];
     self.compressHeaderCheck.enabled = [f isEqualToString:@"7z"];
     self.fullPathsCheck.enabled = YES;
-    if (single) self.password.stringValue = self.password.stringValue;
+    self.updateModePop.enabled = !single;
+    [self updateOptionsSummary];
 }
 
 - (void)levelChanged:(id)s
 {
-    self.levelLabel.stringValue = [NSString stringWithFormat:@"级别 %ld",
+    self.levelLabel.stringValue = [NSString stringWithFormat:@"等级 %ld",
                                    (long)self.levelSlider.integerValue];
+    [self updateOptionsSummary];
 }
 
 - (void)methodChanged:(id)s
@@ -1091,39 +1609,57 @@ typedef NS_ENUM(NSInteger, Z7TaskKind) {
     self.wordPop.enabled = advanced;
     self.fastBytesField.enabled = advanced;
     self.matchPop.enabled = advanced;
+    [self updateOptionsSummary];
 }
 
 - (void)solidChanged:(id)s
 {
     self.solidBlockPop.enabled = (self.solidCheck.state == NSControlStateValueOn);
+    [self updateOptionsSummary];
 }
 
 - (void)threadsChanged:(id)s
 {
     self.threadsField.enabled = (self.autoThreadsCheck.state != NSControlStateValueOn);
+    [self updateOptionsSummary];
 }
 
 /// 字典大小下拉项 -> 字节数（0 = 自动）
 static unsigned long long DictSizeForTitle(NSString *t)
 {
-    if (!t.length || [t hasPrefix:@"字典"]) return 0;
+    t = [t stringByReplacingOccurrencesOfString:@" " withString:@""];
+    if (!t.length || [t isEqualToString:@"自动"]) return 0;
     if ([t hasSuffix:@"KB"]) return (unsigned long long)([t substringToIndex:t.length - 2].doubleValue * 1024.0);
     if ([t hasSuffix:@"MB"]) return (unsigned long long)([t substringToIndex:t.length - 2].doubleValue * 1024.0 * 1024.0);
     if ([t hasSuffix:@"GB"]) return (unsigned long long)([t substringToIndex:t.length - 2].doubleValue * 1024.0 * 1024.0 * 1024.0);
     return 0;
 }
 
+/// 面板上显示的是人类可读的容量，引擎要的是 7z 自己的分块记号（10m / 1g …）。
+/// 直接把 "10 MB" 交给引擎会得到一个无效的 -ms 值，故在此做映射。
+static NSString *SolidBlockToken(NSString *title)
+{
+    if ([title isEqualToString:@"10 MB"])  return @"10m";
+    if ([title isEqualToString:@"64 MB"])  return @"64m";
+    if ([title isEqualToString:@"256 MB"]) return @"256m";
+    if ([title isEqualToString:@"1 GB"])   return @"1g";
+    return nil;   // 「不限」= 引擎默认
+}
+
+/// 分卷大小下拉项 -> 字节数。「不分卷」返回 NO；其余按人类可读写法解析
+/// （10 MB / 1 GB / 100m 都接受）。
 static BOOL ParseVolumeSize(NSString *t, unsigned long long *out)
 {
     if (!t.length || [t isEqualToString:@"不分卷"]) return NO;
-    NSString *s = [t lowercaseString];
+    NSString *s = [[t uppercaseString] stringByReplacingOccurrencesOfString:@" " withString:@""];
     double m = 1.0;
-    if ([s hasSuffix:@"k"]) m = 1024.0;
-    else if ([s hasSuffix:@"m"]) m = 1024.0 * 1024.0;
-    else if ([s hasSuffix:@"g"]) m = 1024.0 * 1024.0 * 1024.0;
-    BOOL hasSuffix = [s hasSuffix:@"k"] || [s hasSuffix:@"m"] || [s hasSuffix:@"g"];
-    NSString *num = hasSuffix ? [s substringToIndex:s.length - 1] : s;
-    double v = num.doubleValue;
+    if ([s hasSuffix:@"KB"])      { m = 1024.0;                      s = [s substringToIndex:s.length - 2]; }
+    else if ([s hasSuffix:@"MB"]) { m = 1024.0 * 1024.0;             s = [s substringToIndex:s.length - 2]; }
+    else if ([s hasSuffix:@"GB"]) { m = 1024.0 * 1024.0 * 1024.0;    s = [s substringToIndex:s.length - 2]; }
+    else if ([s hasSuffix:@"K"])  { m = 1024.0;                      s = [s substringToIndex:s.length - 1]; }
+    else if ([s hasSuffix:@"M"])  { m = 1024.0 * 1024.0;             s = [s substringToIndex:s.length - 1]; }
+    else if ([s hasSuffix:@"G"])  { m = 1024.0 * 1024.0 * 1024.0;    s = [s substringToIndex:s.length - 1]; }
+    double v = s.doubleValue;
     if (v <= 0) return NO;
     *out = (unsigned long long)(v * m);
     return YES;
@@ -1142,7 +1678,9 @@ static BOOL ParseVolumeSize(NSString *t, unsigned long long *out)
     if (dict > 0) { o.hasDictionarySize = YES; o.dictionarySize = dict; }
 
     NSString *w = self.wordPop.titleOfSelectedItem;
-    if (w && ![w hasPrefix:@"字长"]) { o.hasWordLength = YES; o.wordLength = w.integerValue; }
+    if (w.length && ![w isEqualToString:@"自动"]) {
+        o.hasWordLength = YES; o.wordLength = w.integerValue;
+    }
 
     if (self.fastBytesField.enabled && self.fastBytesField.stringValue.length) {
         NSInteger fb = self.fastBytesField.integerValue;
@@ -1150,12 +1688,12 @@ static BOOL ParseVolumeSize(NSString *t, unsigned long long *out)
     }
 
     NSString *mf = self.matchPop.titleOfSelectedItem;
-    if (mf && ![mf hasPrefix:@"匹配"]) o.matchFinder = mf;
+    if (mf.length && ![mf isEqualToString:@"自动"]) o.matchFinder = mf;
 
     o.hasSolid = YES;
     o.solid = (self.solidCheck.state == NSControlStateValueOn);
-    NSString *sb = self.solidBlockPop.titleOfSelectedItem;
-    if (sb && ![sb hasPrefix:@"分块"]) o.solidBlock = sb;
+    // 面板上显示的是人类可读的容量，引擎要的是 7z 自己的分块记号。
+    o.solidBlock = SolidBlockToken(self.solidBlockPop.titleOfSelectedItem);
 
     if (self.autoThreadsCheck.state == NSControlStateValueOn) {
         o.hasThreads = YES; o.threads = 0;
@@ -1192,8 +1730,16 @@ static BOOL ParseVolumeSize(NSString *t, unsigned long long *out)
 
 - (void)appendLog:(NSString *)s
 {
+    [self appendLog:s reveal:NO];
+}
+
+/// reveal=YES 时自动展开日志抽屉。警告与错误才是用户需要看到的内容，
+/// 因此由它们自己把抽屉拉出来，而不是让一个空的日志框长期占据空间。
+- (void)appendLog:(NSString *)s reveal:(BOOL)reveal
+{
     if (!s.length) return;
     dispatch_async(dispatch_get_main_queue(), ^{
+        if (reveal && !self.logVisible) [self setLogVisible:YES];
         NSTextStorage *st = self.log.textStorage;
         [st appendAttributedString:[[NSAttributedString alloc] initWithString:s
             attributes:@{NSFontAttributeName: [NSFont monospacedSystemFontOfSize:11 weight:NSFontWeightRegular],
@@ -1205,6 +1751,31 @@ static BOOL ParseVolumeSize(NSString *t, unsigned long long *out)
 - (void)showStatus:(NSString *)s
 {
     dispatch_async(dispatch_get_main_queue(), ^{ self.statusLabel.stringValue = s ?: @""; });
+}
+
+/// 需要"打开既有归档"的任务（解压 / 测试 / 添加 / 删除 / 预览）用它取密码：
+/// 优先用打开该归档时用户输入的密码，否则回退到压缩面板里的密码（新建场景）。
+- (NSString *)archivePassword
+{
+    if (self.openPassword.length) return self.openPassword;
+    return self.password.stringValue ?: @"";
+}
+
+/// 标题栏的归档标识：窗口标题保持应用名，文件名放进副标题，并挂上代理图标
+/// （representedURL），于是标题栏支持 ⌘ 点按显示路径——这是 macOS 文档窗口
+/// 的标准行为，比在内容区里塞一个长路径标签更符合系统习惯。
+- (void)updateArchiveChrome
+{
+    NSWindow *w = self.view.window;
+    if (!w) return;
+    if (self.archivePath.length) {
+        w.representedURL = [NSURL fileURLWithPath:self.archivePath];
+        w.subtitle = [NSString stringWithFormat:@"%@%@", self.archivePath.lastPathComponent,
+                      self.archiveHeaderEncrypted ? @" · 文件名已加密" : @""];
+    } else {
+        w.representedURL = nil;
+        w.subtitle = @"";
+    }
 }
 
 #pragma mark 任务执行（§7）
@@ -1219,9 +1790,7 @@ static BOOL ParseVolumeSize(NSString *t, unsigned long long *out)
         return;
     }
     self.current = task;
-    self.cancelBtn.enabled = YES;
-    self.progress.doubleValue = 0;
-    [self setControlsEnabled:NO];
+    [self setBusy:YES];
     [self showStatus:task.title];
     [self appendLog:[NSString stringWithFormat:@"\n== %@ ==\n", task.title]];
 
@@ -1239,7 +1808,9 @@ static BOOL ParseVolumeSize(NSString *t, unsigned long long *out)
         if (!me) return;
         NSString *tag = level == Z7LogLevelError ? @"[错误] " :
                         (level == Z7LogLevelWarning ? @"[警告] " : @"");
-        [me appendLog:[tag stringByAppendingString:msg]];
+        // 警告与错误把日志抽屉自动拉出来；普通信息不打扰用户。
+        [me appendLog:[tag stringByAppendingString:msg]
+                reveal:(level != Z7LogLevelInfo)];
         [me appendLog:@"\n"];
     };
 
@@ -1250,13 +1821,34 @@ static BOOL ParseVolumeSize(NSString *t, unsigned long long *out)
             MainViewController *me = weakSelf;
             if (!me) return;
             me.current = nil;
-            me.cancelBtn.enabled = NO;
-            me.progress.doubleValue = ok ? 100 : 0;
-            [me setControlsEnabled:me.archivePath != nil];
+            [me setBusy:NO];
             if (after) after(ok, err);
         });
     }];
     [self.queue addOperation:op];
+}
+
+/// 进度条与「停止」按钮只在真的有任务时出现——空闲时它们是纯噪声。
+- (void)setBusy:(BOOL)busy
+{
+    self.progress.hidden = !busy;
+    self.cancelBtn.hidden = !busy;
+    self.summaryLabel.hidden = busy;
+    self.progress.doubleValue = 0;
+    self.cancelBtn.enabled = busy;
+    [self setControlsEnabled:!busy && self.archivePath != nil];
+}
+
+- (BOOL)validateMenuItem:(NSMenuItem *)item
+{
+    SEL a = item.action;
+    if (a == @selector(doCancel:)) return self.current != nil;
+    if (a == @selector(doExtract:) || a == @selector(doExtractSelection:) ||
+        a == @selector(doTest:) || a == @selector(doAdd:) || a == @selector(doDelete:) ||
+        a == @selector(doPreview:)) {
+        return self.archivePath != nil && self.current == nil;
+    }
+    return YES;
 }
 
 - (void)doCancel:(id)s
@@ -1307,17 +1899,21 @@ static BOOL ParseVolumeSize(NSString *t, unsigned long long *out)
 - (void)openArchive:(NSString *)path password:(NSString *)password
 {
     if (!path.length) return;
-    if (password) self.password.stringValue = password;
+
+    // 打开用的密码只存在这个字段里，与「压缩选项」的加密口令分开：前者是本次
+    // 会话的临时凭据（§8.2 不落盘、用完即清），后者是新建归档时的口令。
+    self.openPassword = password;
 
     self.archivePath = path;
-    self.archiveLabel.stringValue = path;
+    [self updateArchiveChrome];
+    [self updateEmptyState];
 
     Z7Task *t = [[Z7Task alloc] init];
     t.kind = Z7TaskKindOpen;
     t.title = [NSString stringWithFormat:@"正在读取 %@", path.lastPathComponent];
     t.archivePath = path;
     Z7CompressionOptions *o = [self currentOptions];
-    o.password = self.password.stringValue ?: @"";
+    o.password = password ?: @"";
     t.options = o;
 
     __weak MainViewController *weakSelf = self;
@@ -1326,12 +1922,13 @@ static BOOL ParseVolumeSize(NSString *t, unsigned long long *out)
         if (!me) return;
         if (!ok) {
             NSString *msg = error.localizedDescription ?: @"无法打开归档";
-            [me appendLog:[msg stringByAppendingString:@"\n"]];
+            [me appendLog:[msg stringByAppendingString:@"\n"] reveal:YES];
             me.roots = @[];
             me.displayRoots = @[];
             [me.outline reloadData];
             [me setControlsEnabled:NO];
             [me showStatus:msg];
+            [me updateEmptyState];
 
             // 需要密码 / 密码错误时提示重试
             BOOL needsPassword = [msg containsString:@"需要正确密码"] || [msg containsString:@"密码错误"];
@@ -1351,10 +1948,9 @@ static BOOL ParseVolumeSize(NSString *t, unsigned long long *out)
         [me rebuildIndex];
         [me.outline reloadData];
         [me.outline expandItem:nil expandChildren:NO];
-        me.archiveLabel.stringValue = [NSString stringWithFormat:@"%@  ·  %lu 项%@",
-                                       path, (unsigned long)t.openedItems.count,
-                                       t.headerEncryptedOut ? @"  ·  文件名已加密" : @""];
         [me setControlsEnabled:YES];
+        [me updateArchiveChrome];
+        [me updateEmptyState];
         [me showStatus:[NSString stringWithFormat:@"已载入 %lu 项", (unsigned long)t.openedItems.count]];
     }];
 }
@@ -1383,6 +1979,7 @@ static BOOL ParseVolumeSize(NSString *t, unsigned long long *out)
         self.filtering = NO;
         self.displayRoots = self.roots;
         [self.outline reloadData];
+        [self updateEmptyState];
         [self showStatus:[NSString stringWithFormat:@"共 %lu 个顶层条目", (unsigned long)self.roots.count]];
         return;
     }
@@ -1399,6 +1996,7 @@ static BOOL ParseVolumeSize(NSString *t, unsigned long long *out)
     }
     self.displayRoots = hits;
     [self.outline reloadData];
+    [self updateEmptyState];
     [self showStatus:[NSString stringWithFormat:@"匹配 %lu 项", (unsigned long)hits.count]];
 }
 
@@ -1469,7 +2067,10 @@ static BOOL ParseVolumeSize(NSString *t, unsigned long long *out)
     t.indices = indices;
     t.destDir = dest;
     t.overwrite = YES;
-    t.options = [self currentOptions];
+    // 解压既有归档：密码取自打开该归档时的输入，而不是压缩面板里的口令。
+    Z7CompressionOptions *opts = [self currentOptions];
+    opts.password = [self archivePassword];
+    t.options = opts;
 
     __weak MainViewController *weakSelf = self;
     [self runTask:t after:^(BOOL ok, NSError *error) {
@@ -1501,7 +2102,9 @@ static BOOL ParseVolumeSize(NSString *t, unsigned long long *out)
     t.title = @"正在校验完整性";
     t.archivePath = self.archivePath;
     t.destDir = NSTemporaryDirectory();   // 测试模式不写盘，仅需一个合法路径
-    t.options = [self currentOptions];
+    Z7CompressionOptions *opts = [self currentOptions];
+    opts.password = [self archivePassword];
+    t.options = opts;
 
     __weak MainViewController *weakSelf = self;
     [self runTask:t after:^(BOOL ok, NSError *error) {
@@ -1532,7 +2135,11 @@ static BOOL ParseVolumeSize(NSString *t, unsigned long long *out)
     t.title = [NSString stringWithFormat:@"正在添加 %lu 项", (unsigned long)paths.count];
     t.archivePath = self.archivePath;
     t.inputPaths = paths;
-    t.options = [self currentOptions];
+    // 添加既要把既有归档打开（需要它的密码），又要把新条目按同一口令加密，
+    // 因此用 archivePassword：加密归档取打开时的密码，明文归档回退到面板口令。
+    Z7CompressionOptions *opts = [self currentOptions];
+    opts.password = [self archivePassword];
+    t.options = opts;
     t.replaceExisting = (self.updateModePop.indexOfSelectedItem == 1);
 
     __weak MainViewController *weakSelf = self;
@@ -1542,8 +2149,9 @@ static BOOL ParseVolumeSize(NSString *t, unsigned long long *out)
         if (!me) return;
         if (ok) {
             [me showStatus:t.replaceExisting ? @"已添加（同名条目已替换）" : @"已添加（同名条目已跳过）"];
-            [me clearPasswordField];
-            [me openArchive:reopen];         // 归档已被原子替换，必须重新打开
+            // 归档已被原子替换，必须重新打开；沿用本次会话已有的密码，
+            // 免得用户为同一个归档反复输入。
+            [me openArchive:reopen password:me.openPassword];
         } else {
             [me showStatus:[NSString stringWithFormat:@"添加失败：%@", error.localizedDescription]];
             [me appendLog:[NSString stringWithFormat:@"添加失败：%@\n", error.localizedDescription]];
@@ -1568,12 +2176,12 @@ static BOOL ParseVolumeSize(NSString *t, unsigned long long *out)
     [alert addButtonWithTitle:@"取消"];
     if ([alert runModal] != NSAlertFirstButtonReturn) return;
 
-    if (self.archiveHeaderEncrypted && !self.password.stringValue.length) {
+    if (self.archiveHeaderEncrypted && ![self archivePassword].length) {
         [self showStatus:@"该归档已加密文件名，删除需要密码"];
         __weak MainViewController *weakSelf = self;
         [self promptPasswordWithMessage:@"该归档已加密文件名，删除会重新打包，需要密码。"
                              completion:^(NSString *pw) {
-            if (pw.length) { weakSelf.password.stringValue = pw; [weakSelf doDelete:nil]; }
+            if (pw.length) { weakSelf.openPassword = pw; [weakSelf doDelete:nil]; }
         }];
         return;
     }
@@ -1586,7 +2194,9 @@ static BOOL ParseVolumeSize(NSString *t, unsigned long long *out)
     t.title = [NSString stringWithFormat:@"正在删除 %lu 个条目", (unsigned long)arcPaths.count];
     t.archivePath = self.archivePath;
     t.arcPaths = arcPaths;
-    t.options = [self currentOptions];
+    Z7CompressionOptions *opts = [self currentOptions];
+    opts.password = [self archivePassword];
+    t.options = opts;
 
     __weak MainViewController *weakSelf = self;
     NSString *reopen = self.archivePath;
@@ -1595,19 +2205,13 @@ static BOOL ParseVolumeSize(NSString *t, unsigned long long *out)
         if (!me) return;
         if (ok) {
             [me showStatus:@"删除完成"];
-            [me clearPasswordField];
-            [me openArchive:reopen];
+            [me openArchive:reopen password:me.openPassword];
         } else {
             NSString *msg = [NSString stringWithFormat:@"删除失败：%@", error.localizedDescription];
             [me showStatus:msg];
             [me appendLog:[msg stringByAppendingString:@"\n"]];
         }
     }];
-}
-
-- (void)clearPasswordField
-{
-    self.password.stringValue = @"";
 }
 
 #pragma mark 压缩
@@ -1654,8 +2258,10 @@ static BOOL ParseVolumeSize(NSString *t, unsigned long long *out)
         if (ok) {
             [me showStatus:@"压缩完成"];
             [me appendLog:@"压缩完成\n"];
-            [me clearPasswordField];
-            [me openArchive:dest];
+            // 新归档用面板口令加密，因此直接把该口令交给打开流程，
+            // 而不是让用户立刻为刚建的归档再输一次。
+            NSString *pw = me.password.stringValue.length ? me.password.stringValue : nil;
+            [me openArchive:dest password:pw];
         } else {
             NSString *msg = [NSString stringWithFormat:@"压缩失败：%@", error.localizedDescription];
             [me showStatus:msg];
@@ -1721,34 +2327,30 @@ static BOOL ParseVolumeSize(NSString *t, unsigned long long *out)
         tf.font = [NSFont systemFontOfSize:12];
         [cell addSubview:tf];
         cell.textField = tf;
+        // 只固定右边界与垂直居中；左边界分两种情形给出——「名称」列跟在图标
+        // 之后，其余列直接贴单元格左边。二者互斥，绝不叠加：同一个 attribute
+        // 上挂两条 required 约束会被求解器丢掉一条，表现为文字压住图标。
         [NSLayoutConstraint activateConstraints:@[
-            [NSLayoutConstraint constraintWithItem:tf attribute:NSLayoutAttributeLeading
-                relatedBy:NSLayoutRelationEqual toItem:cell attribute:NSLayoutAttributeLeading multiplier:1 constant:2],
-            [NSLayoutConstraint constraintWithItem:tf attribute:NSLayoutAttributeTrailing
-                relatedBy:NSLayoutRelationEqual toItem:cell attribute:NSLayoutAttributeTrailing multiplier:1 constant:-2],
-            [NSLayoutConstraint constraintWithItem:tf attribute:NSLayoutAttributeCenterY
-                relatedBy:NSLayoutRelationEqual toItem:cell attribute:NSLayoutAttributeCenterY multiplier:1 constant:0],
+            [tf.trailingAnchor constraintEqualToAnchor:cell.trailingAnchor constant:-2],
+            [tf.centerYAnchor constraintEqualToAnchor:cell.centerYAnchor],
         ]];
 
         if ([ident isEqualToString:@"名称"]) {
             NSImageView *iv = [[NSImageView alloc] initWithFrame:NSZeroRect];
             iv.translatesAutoresizingMaskIntoConstraints = NO;
+            iv.imageScaling = NSImageScaleProportionallyUpOrDown;
+            iv.contentTintColor = [NSColor secondaryLabelColor];
             [cell addSubview:iv];
             cell.imageView = iv;
             [NSLayoutConstraint activateConstraints:@[
-                [NSLayoutConstraint constraintWithItem:iv attribute:NSLayoutAttributeLeading
-                    relatedBy:NSLayoutRelationEqual toItem:cell attribute:NSLayoutAttributeLeading multiplier:1 constant:0],
-                [NSLayoutConstraint constraintWithItem:iv attribute:NSLayoutAttributeCenterY
-                    relatedBy:NSLayoutRelationEqual toItem:cell attribute:NSLayoutAttributeCenterY multiplier:1 constant:0],
-                [NSLayoutConstraint constraintWithItem:iv attribute:NSLayoutAttributeWidth
-                    relatedBy:NSLayoutRelationEqual toItem:nil attribute:NSLayoutAttributeNotAnAttribute multiplier:1 constant:16],
-                [NSLayoutConstraint constraintWithItem:iv attribute:NSLayoutAttributeHeight
-                    relatedBy:NSLayoutRelationEqual toItem:nil attribute:NSLayoutAttributeNotAnAttribute multiplier:1 constant:16],
+                [iv.leadingAnchor constraintEqualToAnchor:cell.leadingAnchor constant:2],
+                [iv.centerYAnchor constraintEqualToAnchor:cell.centerYAnchor],
+                [iv.widthAnchor constraintEqualToConstant:16],
+                [iv.heightAnchor constraintEqualToConstant:16],
+                [tf.leadingAnchor constraintEqualToAnchor:iv.trailingAnchor constant:4],
             ]];
-            [NSLayoutConstraint activateConstraints:@[
-                [NSLayoutConstraint constraintWithItem:cell.textField attribute:NSLayoutAttributeLeading
-                    relatedBy:NSLayoutRelationEqual toItem:iv attribute:NSLayoutAttributeTrailing multiplier:1 constant:4],
-            ]];
+        } else {
+            [tf.leadingAnchor constraintEqualToAnchor:cell.leadingAnchor constant:2].active = YES;
         }
     }
 
@@ -1756,10 +2358,13 @@ static BOOL ParseVolumeSize(NSString *t, unsigned long long *out)
     if ([ident2 isEqualToString:@"名称"]) {
         cell.textField.stringValue = [n displayName];
         // SF Symbols 自 macOS 11.0 起可用，正好覆盖本移植的最低部署目标
+        // SF Symbols 自 macOS 11.0 起可用，正好覆盖本移植的最低部署目标。
+        // 按 13pt 配置后放进 16×16 的图标位，视觉重量与 12pt 正文匹配。
         NSString *sym = n.isSymLink ? @"link" : (n.isDirectory ? @"folder" : @"doc");
-        NSImage *icon = [NSImage imageWithSystemSymbolName:sym accessibilityDescription:nil];
+        NSImage *icon = Symbol(sym, 13.0);
         icon.template = YES;
         cell.imageView.image = icon;
+        cell.imageView.hidden = (icon == nil);
         cell.textField.textColor = [NSColor labelColor];
     } else if ([ident2 isEqualToString:@"大小"]) {
         cell.textField.stringValue = HumanSize(n.size, n.hasSize, n.isDirectory);
@@ -1874,7 +2479,9 @@ static BOOL ParseVolumeSize(NSString *t, unsigned long long *out)
     t.archivePath = self.archivePath;
     t.indices = @[@(n.index)];
     t.destDir = [tmp stringByDeletingLastPathComponent];
-    t.options = [self currentOptions];
+    Z7CompressionOptions *opts = [self currentOptions];
+    opts.password = [self archivePassword];
+    t.options = opts;
 
     __weak MainViewController *weakSelf = self;
     [self runTask:t after:^(BOOL ok, NSError *error) {
@@ -1956,7 +2563,7 @@ static BOOL ParseVolumeSize(NSString *t, unsigned long long *out)
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSError *err = nil;
         Z7Archive *a = [Z7Archive openPath:self.archivePath
-                                  password:(self.password.stringValue.length ? self.password.stringValue : nil)
+                                  password:([self archivePassword].length ? [self archivePassword] : nil)
                                   callback:nil error:&err];
         if (!a) { completionHandler(err); return; }
         uint32_t target = UINT32_MAX;
@@ -2067,6 +2674,9 @@ static BOOL ParseVolumeSize(NSString *t, unsigned long long *out)
     [bar addItem:appItem];
     NSMenu *appMenu = [[NSMenu alloc] init];
     [appMenu addItemWithTitle:@"关于 7-Zip" action:@selector(showAbout:) keyEquivalent:@""];
+    [appMenu addItem:[NSMenuItem separatorItem]];
+    // ⌘, 是 macOS 上「打开设置」的固定位置，压缩选项属于这一类。
+    [appMenu addItemWithTitle:@"压缩选项…" action:@selector(showOptions:) keyEquivalent:@","];
     [appMenu addItemWithTitle:@"致谢与许可…" action:@selector(showLicenses:) keyEquivalent:@""];
     [appMenu addItem:[NSMenuItem separatorItem]];
     [appMenu addItemWithTitle:@"服务" action:nil keyEquivalent:@""];
@@ -2112,6 +2722,14 @@ static BOOL ParseVolumeSize(NSString *t, unsigned long long *out)
     [arcMenu addItemWithTitle:@"停止当前任务" action:@selector(doCancel:) keyEquivalent:@"."];
     arcItem.submenu = arcMenu;
 
+    // 显示
+    NSMenuItem *viewItem = [[NSMenuItem alloc] init];
+    [bar addItem:viewItem];
+    NSMenu *viewMenu = [[NSMenu alloc] initWithTitle:@"显示"];
+    [viewMenu addItemWithTitle:@"显示/隐藏日志" action:@selector(toggleLog:) keyEquivalent:@"l"];
+    [viewMenu addItemWithTitle:@"清空日志" action:@selector(clearLog:) keyEquivalent:@""];
+    viewItem.submenu = viewMenu;
+
     // 窗口
     NSMenuItem *winItem = [[NSMenuItem alloc] init];
     [bar addItem:winItem];
@@ -2153,14 +2771,27 @@ static BOOL ParseVolumeSize(NSString *t, unsigned long long *out)
     atexit_b(^{ [[Z7TempRegistry shared] cleanupAll]; });
 
     self.vc = [[MainViewController alloc] init];
-    NSRect frame = NSMakeRect(0, 0, 1000, 700);
+    NSRect frame = NSMakeRect(0, 0, 1040, 700);
     self.window = [[NSWindow alloc] initWithContentRect:frame
         styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
                    NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable)
           backing:NSBackingStoreBuffered defer:NO];
     self.window.title = @"7-Zip";
+    self.window.backgroundColor = [NSColor windowBackgroundColor];
+    // 统一工具栏：标题与工具栏同处一行，内容区从工具栏下方开始。配合窗口
+    // 自身的 contentView，不会再出现"控件压在标题栏上"的叠影。
+    self.window.toolbarStyle = NSWindowToolbarStyleUnified;
+    // 先钉下最小尺寸，再挂 contentViewController：否则窗口会按内容的自适应
+    // 尺寸收缩（内容区现在是显式 frame，不再参与约束，窗口宽度无从约束）。
+    self.window.contentMinSize = NSMakeSize(880, 560);
     self.window.contentViewController = self.vc;
-    self.window.minSize = NSMakeSize(900, 620);
+    self.window.toolbar = self.vc.toolbar;
+    self.window.minSize = NSMakeSize(880, 560);
+    // setFrameAutosaveName: 返回是否成功恢复了上次保存的尺寸。首次运行（没有
+    // 保存记录）时窗口会停在内容自适应得到的最小尺寸上，这里显式给回默认尺寸。
+    if (![self.window setFrameAutosaveName:@"7ZipMainWindow"]) {
+        [self.window setContentSize:NSMakeSize(1040, 700)];
+    }
     [self.window center];
     [self.window makeKeyAndOrderFront:nil];
 

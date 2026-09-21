@@ -41,6 +41,23 @@
 7zz l -t <Tab>      # 补全容器类型：7z、zip、tar、gzip、xz、bzip2、zstd …
 ```
 
+### 界面设计
+
+图形界面按 macOS 人机界面指南实现，不使用自绘窗口装饰：
+
+| 区域 | 实现 |
+|---|---|
+| 标题栏 | 统一工具栏（`NSWindowToolbarStyleUnified`）：窗口标题与按钮同处一行；打开归档后标题下方显示归档名，可 ⌘-点击在 Finder 中定位 |
+| 工具栏 | 纯图标按钮（SF Symbols，`NSToolbarDisplayModeIconOnly`），悬停显示中文说明；系统符号缺失时自动降级为文字按钮，不会出现空白按钮；搜索框使用系统 `NSSearchToolbarItem` |
+| 压缩参数 | 收进工具栏「压缩选项」弹出的 `NSPopover`，不占用主界面；面板内两列对齐排布 |
+| 内容区 | 有归档时是八列表格（`NSTableViewStyleFullWidth`），没有时是居中的空状态（图标 + 标题 + 说明 + 主操作按钮），二者互斥显示，不叠加 |
+| 日志 | 默认收起，出错或出现告警时自动展开；也可由工具栏按钮或 ⌘L 开关 |
+| 状态栏 | 底部通栏，左侧为当前状态（就绪 / 已载入 N 项 / 进度），右侧为当前压缩参数摘要 |
+| 外观 | 全部使用语义色（`labelColor`、`secondaryLabelColor`、`windowBackgroundColor`、`controlAccentColor`、`textBackgroundColor`），浅色与深色外观下自动适配 |
+
+> 内容区（表格与空状态）的 frame 由代码直接计算而非 Auto Layout 约束——
+> 这是实测踩坑后的约定，原因与完整排查记录见 `BUILD.md` 坑点 7。
+
 ---
 
 ## 二、目录结构
