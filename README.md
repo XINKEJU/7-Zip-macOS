@@ -28,7 +28,7 @@
 | **命令别名** | `7z` → `7zz` 符号链接 | `/usr/local/bin/7z` |
 | **手册页** | `man 7zz`（完整命令与开关说明）、`man 7z`（别名页） | `/usr/local/share/man/man1/` |
 | **命令补全** | zsh / bash / fish 三套，按子命令区分可用开关 | `/usr/local/share/{zsh,bash-completion,fish}/` |
-| **图形界面** | 原生 AppKit 应用：拖放、归档浏览（名称/大小/压缩后/时间/方法/属性）、压缩（格式＋压缩等级＋密码＋加密文件名）、解压、完整性校验、进度与中止 | `/Applications/7-Zip.app` |
+| **图形界面** | 原生 AppKit 应用，**引擎内嵌于进程**（`Contents/Frameworks/lib7z.dylib`，不派生 `7zz` 子进程）：拖放、归档树浏览（八列、排序、搜索、右键菜单、拖出、空格预览）、压缩、追加与**删除条目**、解压、完整性校验，以及完整的压缩参数面板（格式/等级/方法/字典/字长/快速字节/匹配查找器/固实与分块/线程/分卷/加密算法/文件名加密/压缩头/完整路径） | `/Applications/7-Zip.app` |
 | **Quick Look** | 按空格即预览归档内容，不再显示十六进制乱码 | `7-Zip.app/Contents/PlugIns/7ZipQuickLook.appex` |
 | **Finder 服务** | 右键「服务」中的**用 7-Zip 压缩** / **用 7-Zip 解压** | 随应用注册 |
 | **文档类型** | 向 LaunchServices 声明 `.7z`、`.zip`、`.tar`、`.gz`、`.bz2`、`.xz`、`.zst`、`.rar`、`.cab`、`.iso` 等 | 随应用注册 |
@@ -50,6 +50,18 @@
 ├── 7z2603-src/                上游 7-Zip 26.03 源码（原样内置，含 DOC/ 许可文件）
 ├── dist/                      移植层：源码、构建脚本与产物输出目录
 │   ├── app-src/               AppKit 应用源码（main.m、Info.plist、build_app.sh）
+│   ├── engine/                引擎内嵌层
+│   │   ├── build_dylib.sh     由上游 Format7zF Bundle 构建 lib7z.dylib
+│   │   ├── SevenZipEngine.{h,cpp}      C++ 桥接层（归档读写、安全策略、任务取消）
+│   │   ├── SevenZipEngineObjC.{h,mm}   Objective-C 适配层（App 实际调用的一层）
+│   │   └── build_engine.sh    构建 lib7zbridge.a + lib7zbridgeobjc.a
+│   ├── tests/                 验收测试与工具
+│   │   ├── engine_test.cpp    桥接层验收程序（对照官方 7zz 逐项比对）
+│   │   ├── objc_test.m        ObjC 适配层验收程序
+│   │   ├── verify_engine.sh   桥接层验收套件（85 个用例）
+│   │   ├── verify_app.sh      应用包验收（依赖解析 / 部署目标 / 签名 / 真实启动）
+│   │   └── build_test.sh, build_objc_test.sh
+│   ├── lib/                   构建产物：lib7z.dylib、lib7zbridge*.a
 │   ├── ql-src/                Quick Look 扩展源码
 │   │   ├── SevenZipPreviewProvider.m   预览提供者（Objective-C）
 │   │   ├── ArchiveReader.c/.h          纯 C 归档解析器（进程内，不派生子进程）
@@ -58,6 +70,7 @@
 │   ├── build/                 打包脚本、手册页、说明文档、卸载脚本
 │   │   ├── make_installer.sh  生成 .pkg / .dmg / .tar.xz 与校验和
 │   │   ├── package.sh         生成 Homebrew 用的分发包
+│   │   ├── mk_tarball.py      可复现归档器（固定顺序/mtime/属主/权限）
 │   │   ├── verify_scripts.sh  离线验证安装/卸载脚本逻辑
 │   │   ├── BUILD.md           可复现构建说明（含实测坑点）
 │   │   └── uninstall.sh
@@ -69,7 +82,8 @@
 ├── docs/                      源码分析报告
 ├── Makefile                   构建入口
 ├── LICENSE                    GNU LGPL v2.1 全文
-└── NOTICE                     复合许可声明（LGPL + BSD + unRAR 限制）
+├── NOTICE                     复合许可声明（LGPL + BSD + unRAR 限制）
+└── THIRD_PARTY.md             逐组件第三方归属与许可对照表
 ```
 
 `dist/` 中除源码与脚本外的内容均为构建产物，已在 `.gitignore` 中排除。
@@ -118,7 +132,7 @@ brew install --formula https://raw.githubusercontent.com/XINKEJU/7-Zip-macOS/mai
 /usr/local/share/zsh/site-functions/_7zz    zsh 补全
 /usr/local/share/bash-completion/completions/7zz
 /usr/local/share/fish/vendor_completions.d/7zz.fish
-/usr/local/share/doc/7zip/                  许可证、格式规范、说明、卸载脚本
+/usr/local/share/doc/7zip/                  许可证、格式规范、说明、归属声明、卸载脚本
 /Applications/7-Zip.app                     图形应用
 /Applications/7-Zip.app/Contents/PlugIns/7ZipQuickLook.appex
 ```
@@ -156,15 +170,26 @@ make            # engine → universal → app → pkg
 ```bash
 make engine      # 编译 arm64 与 x86_64 两个切片（上游 Alone2 目标）
 make universal   # lipo 合并 + ad-hoc 签名 → dist/build/7zz
+make dylib       # 构建内嵌引擎动态库 → dist/lib/lib7z.dylib
+make bridge      # 构建桥接层 → dist/lib/lib7zbridge*.a
 make app         # 组装 7-Zip.app，并构建内嵌 Quick Look 扩展
 make ql          # 只重建 Quick Look 扩展
 make pkg         # 生成 .pkg / .dmg / .tar.xz / checksums.txt
 make tarball     # 生成 Homebrew 分发包
+make test        # 桥接层验收（对照官方 7zz 逐项比对，85 个用例）
+make objc-test   # ObjC 适配层验收（App 实际调用的那一层，41 个用例）
+make appcheck    # 应用包验收：依赖解析 / 部署目标 / 签名 / 真实启动（21 个用例）
 make verify      # 离线校验：安装/卸载脚本逻辑 + 公式一致性
 make check       # verify + 产物校验和、DMG 完整性、应用签名
 make clean       # 删除构建产物
 make distclean   # 连同上游 b/ 编译目录一并删除
 ```
+
+> `make appcheck` 会**真实启动一次应用**并确认：进程内已映射
+> `Contents/Frameworks/lib7z.dylib`、且**没有派生任何 `7zz` 子进程**。
+> 它同时会把每个 `@rpath` 依赖真正解析成磁盘路径——这条检查能挡住
+> "库是对的但应用起不来"（如 `install_name` 与文件名不一致）这类只在运行期
+> 暴露的问题。
 
 工程细节与实测坑点（macOS 专用 makefile、`MACOSX_DEPLOYMENT_TARGET`、
 扩展签名顺序、扩展属性与 `._` 条目等）记录在
@@ -257,7 +282,8 @@ pkgutil --expand-full dist/7-Zip-26.03-macOS.pkg /tmp/exp    # 检查载荷与�
   可解压 RAR，但**不得**用于开发 RAR 兼容压缩器
 - 源码中个别文件适用 BSD 2/3-clause（LZFSE、Zstandard、XXH64 解码）
 
-完整声明见 [`NOTICE`](NOTICE) 与上游原文件
+完整声明见 [`NOTICE`](NOTICE)、[`THIRD_PARTY.md`](THIRD_PARTY.md)（逐组件归属与
+许可对照表，随安装包、应用包与 Homebrew 分发包一同分发）与上游原文件
 `7z2603-src/DOC/{License,copying,unRarLicense}.txt`。
 
 ```

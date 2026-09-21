@@ -44,7 +44,7 @@ class SevenzipMacos < Formula
   desc "File archiver with a high compression ratio (native macOS build)"
   homepage "https://www.7-zip.org/"
   url "https://github.com/XINKEJU/7-Zip-macOS/releases/download/v26.03/7zip-macos-26.03-macos-universal.tar.gz"
-  sha256 "0394ea20d1dec8d2d182d77f2900a4a8e1aac60016b43a4ef7109bfc1b60d55f"
+  sha256 "1aadf109c4260edbc4287b328e46ea6f7eb41cfa7a7fd46cfe311a872193b3ba"
   version "26.03"
   license "LGPL-2.1-or-later"
 

@@ -36,7 +36,7 @@ DEPLOY  ?= 11.0
 VERSION := 26.03
 
 .DEFAULT_GOAL := all
-.PHONY: all engine universal app ql pkg tarball verify check clean distclean help
+.PHONY: all engine universal dylib bridge app ql pkg tarball test objc-test appcheck verify check clean distclean help
 
 # ---------------------------------------------------------------------------
 # all — the default pipeline
@@ -72,19 +72,64 @@ universal: engine
 	@codesign --verify --strict '$(ENGINE)' && echo '   签名校验通过'
 
 # ---------------------------------------------------------------------------
+# dylib / bridge — the embedded engine and the glue the app links against
+#
+#   dylib    lib7z.dylib: the engine built as a shared library (Format7zF).
+#            This is the LGPL "replaceable library": the app loads it at
+#            runtime from Contents/Frameworks, so a user may substitute it.
+#   bridge   lib7zbridge.a + lib7zbridgeobjc.a: the C++ / ObjC++ layer that
+#            exposes the engine to the AppKit front end.
+#
+# NOTE: build_dylib.sh uses `make -B` rather than deleting b/. A security
+# hook can block bulk `rm -rf`, which silently left the old artifact in place
+# and made script edits appear to have no effect.
+# ---------------------------------------------------------------------------
+dylib:
+	@printf '==> 构建内嵌引擎动态库\n'
+	sh '$(DIST)/engine/build_dylib.sh'
+
+bridge: dylib
+	@printf '==> 构建桥接层（C++ / ObjC++）\n'
+	sh '$(DIST)/engine/build_engine.sh'
+
+# ---------------------------------------------------------------------------
 # app — assemble 7-Zip.app, which also builds the Quick Look extension.
 #
 # build_app.sh re-seals the bundle with --deep *before* invoking the extension
 # build, because --deep would otherwise strip the extension's sandbox
 # entitlement and ExtensionKit would refuse to register it.
 # ---------------------------------------------------------------------------
-app: universal
+app: universal bridge
 	@printf '==> 3/4 组装应用与 Quick Look 扩展\n'
 	sh '$(DIST)/app-src/build_app.sh' '$(ENGINE)' '$(ICNS)' '$(DIST)'
 
 # Rebuild the extension alone, against an already assembled application.
 ql: universal
 	APP_BUNDLE='$(APP)' sh '$(DIST)/ql-src/build_ql.sh'
+
+# ---------------------------------------------------------------------------
+# test — bridge and adapter verification, then the assembled bundle
+#
+#   test        lib7zbridge 验收（对照官方 7zz 逐项比对）
+#   objc-test   Objective-C 适配层验收（App 实际调用的那一层）
+#   appcheck    打包产物验收：动态库解析、部署目标、签名、真实启动
+#               （`make check` 之前跑这个，它能挡住"库改了但包没更新"、
+#                install_name 与文件名不一致这类只在运行期暴露的问题）
+# ---------------------------------------------------------------------------
+test:
+	@printf '==> 构建并运行桥接层验收\n'
+	sh '$(DIST)/tests/build_test.sh'
+	sh '$(DIST)/tests/verify_engine.sh'
+
+objc-test: bridge
+	@printf '==> 构建并运行 ObjC 适配层验收\n'
+	sh '$(DIST)/tests/build_objc_test.sh'
+	WORK="$$(mktemp -d "$${TMPDIR:-/tmp}/z7objc.XXXXXX")" && \
+	    '$(DIST)/tests/objc_test' "$$WORK"; st=$$?; rm -rf "$$WORK"; exit $$st
+
+appcheck:
+	@printf '==> 应用包验收\n'
+	sh '$(DIST)/tests/verify_app.sh' '$(APP)'
 
 # ---------------------------------------------------------------------------
 # pkg — integrated installer, disk image, CLI archive and checksums
@@ -125,12 +170,15 @@ check: verify
 # clean / distclean
 # ---------------------------------------------------------------------------
 clean:
-	rm -rf '$(BUILD)/7zz' '$(BUILD)/.installer' \
+	rm -rf '$(BUILD)/7zz' '$(BUILD)/.installer' '$(BUILD)/.selfcheck' \
 	       '$(DIST)/app-src/.build' '$(DIST)/ql-src/.build' \
+	       '$(DIST)/engine/.build' '$(DIST)/tests/.build' \
+	       '$(DIST)/lib' \
 	       '$(DIST)/pack' '$(DIST)/payload' '$(DIST)/dmg-src' '$(DIST)/tar-src' \
 	       '$(APP)'
 	rm -f '$(DIST)'/*.pkg '$(DIST)'/*.dmg '$(DIST)'/*.tar.xz '$(DIST)'/*.tar.gz \
-	      '$(DIST)'/*.tar.gz.sha256
+	      '$(DIST)'/*.tar.gz.sha256 '$(DIST)/engine'/.build_*.log \
+	      '$(DIST)/tests/engine_test' '$(DIST)/tests/objc_test'
 	@echo '   已删除构建产物'
 
 # Also removes the upstream compile directory. Use this whenever a rebuild
@@ -143,13 +191,18 @@ distclean: clean
 help:
 	@printf '7-Zip %s macOS port\n\n' '$(VERSION)'
 	@printf '用法: make [目标]\n\n'
-	@printf '  all         默认：engine → universal → app → pkg\n'
+	@printf '  all         默认：engine → universal → bridge → app → pkg\n'
 	@printf '  engine      编译 arm64 与 x86_64 两个切片\n'
 	@printf '  universal   合并为通用二进制并 ad-hoc 签名 → dist/build/7zz\n'
+	@printf '  dylib       构建内嵌引擎动态库 → dist/lib/lib7z.dylib\n'
+	@printf '  bridge      构建桥接层 → dist/lib/lib7zbridge*.a\n'
 	@printf '  app         组装 7-Zip.app（含 Quick Look 扩展）\n'
 	@printf '  ql          仅重建 Quick Look 扩展\n'
 	@printf '  pkg         生成 .pkg / .dmg / .tar.xz / checksums.txt\n'
 	@printf '  tarball     生成 Homebrew 分发包\n'
+	@printf '  test        桥接层验收（对照官方 7zz）\n'
+	@printf '  objc-test   ObjC 适配层验收\n'
+	@printf '  appcheck    应用包验收（依赖解析 / 部署目标 / 签名 / 真实启动）\n'
 	@printf '  verify      离线校验脚本逻辑与公式一致性\n'
 	@printf '  check        verify + 产物校验和、DMG 完整性、应用签名\n'
 	@printf '  clean       删除构建产物\n'

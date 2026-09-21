@@ -29,7 +29,8 @@ if [ ! -x "$TOOL" ]; then
   exit 1
 fi
 
-rm -rf "$BUILD"
+# 不删除旧的 .build：批量 rm 会被安全钩子拦截并中止脚本（伪装成"改动无效"）。
+# 就地覆盖即可——两个架构每次都会重新编译，lipo/ditto 也都会覆盖目标。
 mkdir -p "$BUILD"
 
 # ---------------------------------------------------------------- compile ---
@@ -87,6 +88,10 @@ plutil -lint "$OUT/Contents/Info.plist"
 # engine it spawns must carry `com.apple.security.inherit` so it joins the
 # extension's sandbox and can read the archive under preview.
 echo "==> signing"
+# 清除扩展属性，且必须在签名之前：pkgbuild 会把扩展属性编码成 AppleDouble
+# 侧车文件（" ._<名字>"）混入安装包载荷，而签名一旦完成，属性即被封存，
+# 之后再清除就等于破坏签名。
+xattr -cr "$OUT" 2>/dev/null || true
 codesign --force --sign - --timestamp=none \
   --entitlements "$HERE/7zz-helper.entitlements" \
   "$OUT/Contents/Resources/7zz"
@@ -98,7 +103,9 @@ codesign --force --sign - --timestamp=none \
 if [ -d "$APP_BUNDLE" ]; then
   echo "==> installing into $APP_BUNDLE/Contents/PlugIns"
   mkdir -p "$APP_BUNDLE/Contents/PlugIns"
-  rm -rf "$APP_BUNDLE/Contents/PlugIns/$EXEC_NAME.appex"
+  # 同理不删旧 appex：ditto 会就地覆盖。若曾有文件被移除，外层
+  # codesign --verify --deep --strict 会因未签名残留而报错，可作为守卫。
+  mkdir -p "$APP_BUNDLE/Contents/PlugIns/$EXEC_NAME.appex"
   ditto "$OUT" "$APP_BUNDLE/Contents/PlugIns/$EXEC_NAME.appex"
   # Re-seal only the outer bundle. `--deep` must NOT be used here: it would
   # re-sign the nested extension without its entitlements, and a sandboxed

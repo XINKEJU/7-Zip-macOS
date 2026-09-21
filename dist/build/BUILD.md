@@ -58,6 +58,11 @@ otool -arch arm64 -l 7zz | grep -A4 LC_BUILD_VERSION | grep minos
 # 期望输出：minos 11.0
 ```
 
+**上游的 `CPP/7zip/var_mac_*.mak` 只设置 `-arch`，不含最低系统版本**，因此
+内嵌引擎库 `lib7z.dylib` 同样会继承 SDK 默认值。`build_dylib.sh` 已导出该变量，
+但如果手工编译 dylib，务必自己加上，否则会产出 minos=26.1 的库——它在
+macOS < 26.1 上会被 dyld **直接拒绝加载**，而 `7zz` 却是 11.0，两边不一致极难察觉。
+
 ### 坑点 3：改动源码后需强制重建
 
 `rm -rf b/m_arm64` 之类的批量删除可能被安全策略拦截；若删除未生效，
@@ -67,7 +72,27 @@ otool -arch arm64 -l 7zz | grep -A4 LC_BUILD_VERSION | grep minos
 make -B -j8 -f ../../cmpl_mac_arm64.mak
 ```
 
-### 坑点 4：zsh 变量名不能以数字开头
+同一现象也会伪装成"脚本改了但产物没变"：`build_engine.sh` / `build_dylib.sh`
+原先都先 `rm -f` 再重建，删除被拦截后脚本**提前中止**，旧产物原地不动。
+现在两个脚本都不再依赖删除（`lipo` 直接覆盖、`ar` 写临时文件再 `mv`），
+从根上避免这个陷阱。
+
+### 坑点 4：dylib 的 install_name 必须与文件名一致
+
+dyld 按 `@rpath/<install_name 的末段>` 查找依赖。若 `install_name` 写成
+`@rpath/7z.dylib` 而文件名为 `lib7z.dylib`，会出现：
+
+```
+dyld: Library not loaded: @rpath/7z.dylib
+  Reason: tried: '.../Contents/Frameworks/7z.dylib' (no such file)
+```
+
+`otool -L` 只能证明"引用了某个 rpath 依赖"，**不能证明该依赖能被解析**——
+这条命令曾经是通过的，而应用一启动就崩。因此 `build_app.sh` 与
+`verify_app.sh` 都会把每个 `@rpath`/`@executable_path` 依赖**真正解析成磁盘
+路径并断言文件存在**，同时校验 install_name 末段与文件名一致。
+
+### 坑点 5：zsh 变量名不能以数字开头
 
 ```bash
 # ✗ 报错 no such file or directory
@@ -76,6 +101,33 @@ make -B -j8 -f ../../cmpl_mac_arm64.mak
 # ✓
 SZ=/path/to/7zz && $SZ
 ```
+
+### 坑点 6：C 关键字不能用作局部变量名
+
+`short`、`long`、`signed` 等在 Objective-C 里仍是关键字，
+`NSString *short = ...` 会报 `expected identifier or '('`。
+
+## 二·补：内嵌引擎库的构建顺序
+
+应用依赖三个产物，顺序固定：
+
+```bash
+sh dist/engine/build_dylib.sh     # 1. lib7z.dylib（Format7zF Bundle）
+sh dist/engine/build_engine.sh    # 2. lib7zbridge.a + lib7zbridgeobjc.a
+sh dist/app-src/build_app.sh ...  # 3. 组装 7-Zip.app
+```
+
+或直接用 `make`（已编码该依赖关系）：
+
+```bash
+make dylib      # 仅引擎库
+make bridge     # 引擎库 + 桥接层
+make app        # 全部 + 应用包
+make appcheck   # 应用包验收（依赖解析 / 部署目标 / 签名 / 真实启动）
+```
+
+`build_app.sh` 会把 `lib7z.dylib` 放进 `Contents/Frameworks/`，并把主程序的
+`LC_RPATH` 设为 `@executable_path/../Frameworks`。
 
 ---
 
@@ -123,13 +175,21 @@ root-cli/usr/local/                    组件包 com.7-zip.7zz   → /usr/local
 ├── share/zsh/site-functions/_7zz      (644)
 ├── share/bash-completion/completions/7zz
 ├── share/fish/vendor_completions.d/7zz.fish
-└── share/doc/7zip/                    (许可证、格式规范、readme、卸载脚本)
+└── share/doc/7zip/                    (许可证、格式规范、readme、卸载脚本、THIRD_PARTY.md)
 
 root-app/Applications/7-Zip.app/       组件包 com.7-zip.7zip  → /Applications
-├── Contents/MacOS/7-Zip               (755)
-├── Contents/Resources/7zz             (755, 与应用内嵌引擎同源)
+├── Contents/MacOS/7-Zip               (755, 前端；链接桥接层)
+├── Contents/Frameworks/lib7z.dylib    (755, 内嵌引擎；LGPL 可替换库)
+├── Contents/Resources/7zz             (755, 供沙盒 Quick Look 扩展作为 helper 调用)
+├── Contents/Resources/THIRD_PARTY.md  (第三方归属与许可)
 └── Contents/PlugIns/7ZipQuickLook.appex   (Quick Look 预览扩展)
 ```
+
+> **为什么既内嵌 `lib7z.dylib` 又保留 `7zz`？**
+> 前端自身的归档操作全部通过 `lib7z.dylib` 在**进程内**完成（技术方案 §1.3），
+> 不再派生 `7zz`。但 Quick Look 扩展运行在 App Sandbox 中，无法加载应用包的
+> 动态库，因此它按设计改为调用 `7zz` 作为 helper（见 `ql-src/7zz-helper.entitlements`）。
+> 两者不可互相替代，缺一都会导致相应功能失效。
 
 ```bash
 # 一条命令完成全部打包
@@ -171,6 +231,48 @@ tar -cJf 7-Zip-26.03-macOS-universal.tar.xz -C root-cli/usr/local .
 （已用 `co.effie.ios.bom` 及本机既有安装实证）。以 root 运行 `pkgbuild` 时
 该告警消失。
 
+实测补充（26.03 起）：
+
+| 结论 | 验证方式 |
+|---|---|
+| 该属性**由内核在文件创建时自动附加**，无法规避 | `cp -X`、`ditto --noextattr` 产出的副本同样带上它 |
+| 在受沙箱约束的环境里**无法移除** | `xattr -d com.apple.provenance` 返回 0 但属性仍在；`xattr -cr` 亦然 |
+| 载荷中的 `._` 条目**不会落成实体文件** | 解包 `Payload` 后 `find -name '._*'` 计数为 0（libarchive 将其合并回属性） |
+
+因此三个构建脚本都在**签名之前**执行 `xattr -cr`（`build_app.sh`、
+`build_ql.sh`、`make_installer.sh`）：在正常终端里这会把载荷清干净；在无法
+移除属性的环境里它退化为无操作，`make_installer.sh` 会如实报告受影响条目
+数，由第 10 节的产物自检断言"解包后无 `._*` 实体文件"。
+
+> **顺序不可颠倒。** 代码签名会把扩展属性纳入封存，签名之后再清除属性等于
+> 破坏签名。这正是 `make_installer.sh` 第 10 节要额外做一次
+> `codesign --verify` 的原因：它专抓"清属性与签名顺序写反"这类错误。
+
+### 关于可复现归档
+
+Homebrew 公式里钉住的是分发包的 sha256，`homebrew/verify_formula.sh` 会断言
+该值等于磁盘上分发包的实际哈希。若用 `/usr/bin/tar` 打包，这个断言**每次
+重建都会失败**，原因有两条且相互独立：
+
+1. tar 记录每个条目的 mtime，而 `install` 会把 mtime 设为"此刻"；
+2. tar 按 readdir 顺序输出条目，该顺序在不同文件系统之间甚至同一文件系统的
+   不同次运行之间都不保证一致。
+
+macOS 自带的是 bsdtar 3.5.3，GNU tar 的 `--sort=name` 与 `--mtime` **都不
+支持**，因此常见的 `tar --sort=name --mtime=...` 配方在这里用不了。归档改由
+`build/mk_tarball.py` 完成：显式按名称字节序排序、mtime 固定（默认
+`2025-01-01T00:00:00Z`，可用 `SOURCE_DATE_EPOCH` 覆盖）、uid/gid 归零、
+uname/gname 清空、权限归一化为 0755/0644、gzip 头 mtime 置 0。
+
+结果是归档只取决于文件名集合与文件内容：**只要二进制没变，sha256 就不变**，
+公式里的值因此是可复算的，而不是每次构建都要手工打补丁的。
+
+```bash
+# 连续两次打包应得到同一个哈希
+sh dist/build/package.sh && shasum -a 256 dist/7zip-macos-26.03-macos-universal.tar.gz
+sh dist/build/package.sh && shasum -a 256 dist/7zip-macos-26.03-macos-universal.tar.gz
+```
+
 ### 关于文档目录命名
 
 文档目录统一为 `/usr/local/share/doc/7zip`（小写、无连字符）。**不要**在其中
@@ -189,17 +291,38 @@ tar -cJf 7-Zip-26.03-macOS-universal.tar.xz -C root-cli/usr/local .
 | 签名有效 | `codesign --verify --strict 7zz` | 通过 |
 | 动态依赖 | `otool -L 7zz` | 仅 `libSystem` / `libc++` |
 | 负载路径 | `lsbom -s .../7-Zip-cli.pkg/Bom` | 含 `bin/7z` 符号链接与全部补全脚本 |
+| 引擎库部署目标 | `otool -l Contents/Frameworks/lib7z.dylib \| grep -A4 LC_BUILD_VERSION` | `minos 11.0`（不是 SDK 版本） |
+| 依赖可解析 | `sh dist/tests/verify_app.sh` | 每个 `@rpath` 项都解析到实际存在的文件 |
+| 引擎在进程内 | `vmmap <pid> \| grep lib7z` 且 `pgrep -P <pid>` | 已映射；**无 7zz 子进程** |
 | 应用签名 | `codesign --verify --deep --strict 7-Zip.app` | 通过 |
 | 扩展沙箱 | `codesign -d --entitlements - .../7ZipQuickLook.appex` | 含 `com.apple.security.app-sandbox` |
 | 脚本逻辑 | `sh build/verify_scripts.sh` | 全部通过 |
 | 公式一致性 | `sh homebrew/verify_formula.sh` | 全部通过 |
+| 许可完整性 | `make pkg` 第 10 节产物自检 | 两类载荷均含 `THIRD_PARTY.md` |
+| 载荷无垃圾 | 同上 | 解包后 `._*` 实体文件计数为 0 |
+| 载荷内应用签名 | 同上 | `codesign --verify --deep --strict` 通过 |
+| 分发包可复现 | 连续两次 `sh build/package.sh` | 两次 sha256 一致 |
 | 包完整性 | `pkgutil --check-signature pkg` | 未签名（预期，见下） |
 | DMG 完整 | `hdiutil verify x.dmg` | checksum VALID |
 | 功能往返 | `7zz a -mx=9` → `t` → `x` → `diff` | 逐字节一致 |
 
+自动化入口：
+
+```bash
+make test        # 桥接层验收，对照官方 7zz 逐项比对（85 个用例）
+make objc-test   # ObjC 适配层验收（App 实际调用的那一层，41 个用例）
+make appcheck    # 应用包验收（含真实启动与进程模型检查，21 个用例）
+make verify      # 离线校验：安装/卸载脚本逻辑 + Homebrew 公式一致性
+make check       # verify + 产物校验和 + DMG 完整性 + 应用签名
+make tarball     # Homebrew 分发包（可复现，见上）
+```
+
 > `installer` 与 `pkgbuild`（无 root 时）无法在本机直接完整演练安装流程：
 > `installer` 强制要求 root。因此 `verify_scripts.sh` 采用「解包真实负载 →
 > 在临时前缀上重放安装/卸载逻辑」的方式验证脚本，无需提权。
+>
+> `make appcheck` 会**真实启动**应用一次（约 4 秒）并检查进程模型，
+> 因此需要图形会话；在无窗口服务的环境（如纯 SSH）中该步骤会失败。
 
 ---
 

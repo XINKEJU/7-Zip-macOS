@@ -42,9 +42,32 @@ __MACOSX/
 # --- port: command line engine --------------------------------------------
 dist/build/7zz
 
+# --- port: embedded engine and bridge layer --------------------------------
+# lib7z.dylib is the LGPL replaceable library and lib7zbridge*.a the glue the
+# app links against. Both are rebuilt by `make dylib` / `make bridge` from the
+# sources under dist/engine/, so only those sources are versioned. The symlink
+# dist/lib/7z.dylib is a build-time convenience alias and equally derived.
+dist/lib/
+
+# --- port: engine build intermediates -------------------------------------
+# Logs of the two architecture slices plus the per-slice object trees. Kept
+# out of the repository because the upstream tree already carries b/, and a
+# stale intermediate here is what makes an edit look like it had no effect.
+dist/engine/.build/
+dist/engine/.build_*.log
+
+# --- port: test binaries ---------------------------------------------------
+# verify_engine.sh and objc_test are produced by build_test.sh /
+# build_objc_test.sh; verify_scripts.sh and verify_app.sh are the sources of
+# truth and are versioned instead.
+dist/tests/.build/
+dist/tests/engine_test
+dist/tests/objc_test
+
 # --- port: installer work area and release artifacts ----------------------
 # Release binaries are published as GitHub Release assets, not committed.
 dist/build/.installer/
+dist/build/.selfcheck/
 dist/*.pkg
 dist/*.dmg
 dist/*.tar.gz
