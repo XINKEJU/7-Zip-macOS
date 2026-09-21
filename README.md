@@ -80,8 +80,9 @@
 
 ### 3.1 安装包（推荐）
 
-从 [Releases](../../releases) 下载 `7-Zip-26.03-macOS.dmg`，挂载后双击其中的
-`.pkg`。安装器提供两个可独立勾选的组件：命令行工具与应用。
+从 [Releases](https://github.com/XINKEJU/7-Zip-macOS/releases) 下载
+`7-Zip-26.03-macOS.dmg`，挂载后双击其中的 `.pkg`。安装器提供两个可独立勾选的
+组件：命令行工具与应用。
 
 > 当前产物为 **ad-hoc 签名**，安装包本身**未经 Apple 公证**。首次打开时若被
 > Gatekeeper 拦截，请右键 `.pkg` → **打开**，或在「系统设置 → 隐私与安全性」
