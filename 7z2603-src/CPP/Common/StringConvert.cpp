@@ -259,18 +259,79 @@ static void MultiByteToUnicodeString2_Native(UString &dest, const AString &src)
 
 bool g_ForceToUTF8 = true; // false;
 
+#ifdef __APPLE__
+#include <CoreFoundation/CoreFoundation.h>
+
+/*
+macOS 引擎补充：将非 UTF-8 字节串按 GB18030（GBK 的超集）解码。
+中文 Windows 系统创建的 zip 不带 UTF-8 标志位（NFlags::kUtf8），
+文件名为 GBK 编码；原逻辑在 g_ForceToUTF8 下强制按 UTF-8 转义，
+非法字节变成 escape 序列，列表里全是乱码。
+解出的文本若含 U+FFFD（CFString 对不可解码字节的占位），视为
+非 GBK 文本，返回 false 交由调用方回退，避免二次破坏。
+*/
+static bool ConvertFromGB18030_Apple(const AString &src, UString &dest)
+{
+  CFStringRef cs = CFStringCreateWithBytes(
+      kCFAllocatorDefault, (const UInt8 *)src.Ptr(), (CFIndex)src.Len(),
+      kCFStringEncodingGB_18030_2000, false);
+  if (!cs)
+    return false;
+  const CFIndex n = CFStringGetMaximumSizeForEncoding(
+      CFStringGetLength(cs), kCFStringEncodingUTF8) + 1;
+  char *buf = new char[n];
+  const bool got = CFStringGetCString(cs, buf, n, kCFStringEncodingUTF8) != 0;
+  CFRelease(cs);
+  if (!got) { delete[] buf; return false; }
+  AString utf8(buf);
+  delete[] buf;
+  if (!Convert_UTF8_Buf_To_Unicode(utf8, utf8.Len(), dest, 0))
+    return false;
+  if (dest.IsEmpty())
+    return false;
+  for (unsigned i = 0; i < dest.Len(); i++)
+    if (dest[i] == (wchar_t)0xFFFD)
+      return false;
+  return true;
+}
+#endif
+
 void MultiByteToUnicodeString2(UString &dest, const AString &src, UINT codePage)
 {
   dest.Empty();
   if (src.IsEmpty())
     return;
 
-  if (codePage == CP_UTF8 || g_ForceToUTF8)
+  if (codePage == CP_UTF8)
   {
-#if 1
     ConvertUTF8ToUnicode(src, dest);
     return;
+  }
+
+  // 非 UTF-8 代码页（CP_ACP / CP_OEMCP，典型来源：Windows 打包的 zip）：
+  // 1) 先按严格 UTF-8 尝试——Unix/macOS 打包的 zip 常不带 UTF-8 标志位；
+  //    但务必排除含 U+FFFD 的结果：flags=0 是宽松解码，遇到非法字节会静默
+  //    替换成 U+FFFD 并仍然返回 true，GBK 字节就会被判成"假 UTF-8"而错返。
+  // 2) 再按 GB18030（GBK 超集）解码——覆盖中文 Windows 打包的 zip；
+  // 3) 都失败才回退到原有的强制 UTF-8 escape 路径（原行为）。
+  {
+    UString u;
+    if (ConvertUTF8ToUnicode_Flags(src, u, 0) && u.Len() != 0)
+    {
+      bool clean = true;
+      for (unsigned i = 0; i < u.Len(); i++)
+        if (u[i] == (wchar_t)0xFFFD) { clean = false; break; }
+      if (clean) { dest = u; return; }
+    }
+  }
+#ifdef __APPLE__
+  if (ConvertFromGB18030_Apple(src, dest))
+    return;
 #endif
+  if (g_ForceToUTF8)
+  {
+    ConvertUTF8ToUnicode(src, dest);
+    return;
   }
 
   const size_t limit = ((size_t)src.Len() + 1) * 2;

@@ -686,7 +686,11 @@ static NSImage *FileIcon(NSString *name, BOOL isDir, BOOL isLink)
         img = ext.length ? [ws iconForFileType:ext] : [ws iconForFileType:NSFileTypeRegular];
     }
     if (!img) img = Symbol(@"doc", 13.0);
-    if (img) cache[key] = img;
+    if (img) {
+        // iconForFileType: 返回 32x32 位图，行内按 16x16 渲染与 Finder 一致
+        img.size = NSMakeSize(16, 16);
+        cache[key] = img;
+    }
     return img;
 }
 
@@ -1209,7 +1213,9 @@ static NSImage *FileIcon(NSString *name, BOOL isDir, BOOL isLink)
     // 显式指定 .fullWidth：默认的"自动"样式在本机会解析为 .inset，于是空表被
     // 渲染成一叠带圆角的空白行块（旧界面截图里那一片灰条就是这么来的）。
     self.outline.style = NSTableViewStyleFullWidth;
-    self.outline.usesAlternatingRowBackgroundColors = YES;
+    // 斑马纹在本机（FullWidth 样式 + 新版 AppKit）会一直画到最后一行之外的
+    // 空白区域，Finder 列表视图实为无条纹纯色底，故关闭。
+    self.outline.usesAlternatingRowBackgroundColors = NO;
     self.outline.allowsMultipleSelection = YES;
     self.outline.allowsColumnReordering = YES;
     self.outline.allowsColumnResizing = YES;
