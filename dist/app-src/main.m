@@ -2117,6 +2117,9 @@ static BOOL ParseVolumeSize(NSString *t, unsigned long long *out)
 - (void)extractNodes:(NSArray<Z7Node *> *)nodes
 {
     if (!self.archivePath) return;
+    // 全选解压：用当前已过滤的条目树（self.roots 不含 macOS 元数据垃圾项），
+    // 而非传 nil 触发引擎全量解压——否则别人 macOS 打的 zip 里的 __MACOSX/._* 会被写出。
+    if (!nodes) nodes = self.roots;
     NSOpenPanel *p = [NSOpenPanel openPanel];
     p.canChooseFiles = NO;
     p.canChooseDirectories = YES;

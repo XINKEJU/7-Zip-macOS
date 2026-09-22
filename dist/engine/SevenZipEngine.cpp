@@ -1175,10 +1175,56 @@ Z7_COM7F_IMF(CUpdateCallback::CryptoGetTextPassword2(Int32 *passwordIsDefined,
 // 目录遍历（符号链接存为链接条目，不跟随、不递归，天然无环）
 // ---------------------------------------------------------------------------
 
+// macOS / Windows 系统元数据垃圾文件：压缩与列表时默认排除，避免污染归档。
+// 覆盖 .DS_Store、__MACOSX（Apple 的 zip 资源派生容器）、._*（AppleDouble 资源文件）、
+// .AppleDouble、.Spotlight-V100、.Trashes 等 macOS 产物，以及 Thumbs.db / Desktop.ini 等 Windows 产物。
+static bool IsMacJunkComponent(const std::string &name) {
+  if (name.empty()) return false;
+  if (name == ".DS_Store") return true;
+  if (name == "__MACOSX") return true;
+  if (name == ".AppleDouble") return true;
+  if (name == ".VolumeIcon.icns") return true;
+  if (name == ".Spotlight-V100") return true;
+  if (name == ".Trashes") return true;
+  if (name == ".fseventsd") return true;
+  if (name == ".TemporaryItems") return true;
+  if (name == ".apdisk") return true;
+  if (name == ".DocumentRevisions-V100") return true;
+  if (name == ".metadata_never_index") return true;
+  if (name == "Thumbs.db") return true;
+  if (name == "Desktop.ini") return true;
+  if (name == "ehthumbs.db") return true;
+  if (name == "Network Trash Folder") return true;
+  if (name == "Temporary Items") return true;
+  if (name.size() >= 2 && name[0] == '.' && name[1] == '_') return true; // AppleDouble: ._xxx
+  return false;
+}
+
+// 路径的任意分段命中垃圾名则返回 true（用于归档内条目，例如 __MACOSX/._foo）。
+static bool IsMacJunkPath(const std::string &path) {
+  size_t start = 0;
+  while (start < path.size()) {
+    size_t slash = path.find('/', start);
+    std::string comp = (slash == std::string::npos)
+        ? path.substr(start)
+        : path.substr(start, slash - start);
+    if (IsMacJunkComponent(comp)) return true;
+    if (slash == std::string::npos) break;
+    start = slash + 1;
+  }
+  return false;
+}
+
 static void CollectItems(const FString &diskPath, const UString &arcPath,
                          std::vector<SDirItem> &out, Callback *cb, unsigned depth) {
   if (depth > 128) {
     if (cb) cb->OnLog(LogLevel::Warning, "目录层级过深，已停止递归：" + ToUtf8(arcPath));
+    return;
+  }
+
+  // 排除 macOS/Windows 系统元数据垃圾文件（.DS_Store / __MACOSX / ._* / ...）
+  if (IsMacJunkComponent(ToUtf8(arcPath))) {
+    if (cb) cb->OnLog(LogLevel::Warning, "已跳过系统元数据文件：" + ToUtf8(arcPath));
     return;
   }
 
@@ -1233,6 +1279,11 @@ static void CollectItems(const FString &diskPath, const UString &arcPath,
     while ((ent = readdir(d)) != NULL) {
       const char *nm = ent->d_name;
       if (strcmp(nm, ".") == 0 || strcmp(nm, "..") == 0) continue;
+      // 跳过 macOS/Windows 系统元数据垃圾文件，避免污染归档
+      if (IsMacJunkComponent(std::string(nm))) {
+        if (cb) cb->OnLog(LogLevel::Warning, "已跳过系统元数据文件：" + JoinPath(dirUtf8, std::string(nm)));
+        continue;
+      }
       const std::string childUtf8 = JoinPath(dirUtf8, std::string(nm));
       UString childArc = arcPath;
       childArc += L'/';
@@ -1563,6 +1614,8 @@ bool Archive::getAllItems(std::vector<ItemInfo> &out) const {
   for (UInt32 i = 0; i < m_impl->numItems; i++) {
     ItemInfo info;
     if (!getItem(i, info)) return false;
+    // 排除 macOS/Windows 系统元数据垃圾项（__MACOSX / ._xxx / .DS_Store 等）
+    if (IsMacJunkPath(info.path)) continue;
     out.push_back(info);
   }
   return true;
