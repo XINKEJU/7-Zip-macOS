@@ -60,7 +60,7 @@ static NSString *DateText(NSDate *d)
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         fmt = [[NSDateFormatter alloc] init];
-        fmt.dateFormat = @"yyyy-MM-dd HH:mm:ss";
+        fmt.dateFormat = @"yyyy-MM-dd HH:mm";
     });
     return [fmt stringFromDate:d];
 }
@@ -661,6 +661,35 @@ static NSImage *Symbol(NSString *name, CGFloat pointSize)
     return [img imageWithSymbolConfiguration:c];
 }
 
+/// 真实文件类型图标：复用系统 Finder 图标，按目录/链接/扩展名取，并做缓存，
+/// 避免逐格逐帧重复向 NSWorkspace 取图。返回全彩色图标（非 template），
+/// 名称列图像视图无需着色，深浅色均自适应。
+static NSImage *FileIcon(NSString *name, BOOL isDir, BOOL isLink)
+{
+    static NSMutableDictionary<NSString *, NSImage *> *cache = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ cache = [NSMutableDictionary dictionary]; });
+    NSString *key;
+    if (isLink) key = @"\x01symlink";
+    else if (isDir) key = @"\x01directory";
+    else {
+        NSString *ext = name.pathExtension.lowercaseString;
+        key = ext.length ? ext : @"\x01file";
+    }
+    NSImage *img = cache[key];
+    if (img) return img;
+    NSWorkspace *ws = [NSWorkspace sharedWorkspace];
+    if (isLink)      img = [ws iconForFileType:NSFileTypeSymbolicLink];
+    else if (isDir)  img = [ws iconForFileType:NSFileTypeDirectory];
+    else {
+        NSString *ext = name.pathExtension;
+        img = ext.length ? [ws iconForFileType:ext] : [ws iconForFileType:NSFileTypeRegular];
+    }
+    if (!img) img = Symbol(@"doc", 13.0);
+    if (img) cache[key] = img;
+    return img;
+}
+
 #pragma mark - 透明容器
 
 /// 空状态容器：layer 承载，底色为文档区的 textBackgroundColor。
@@ -1185,7 +1214,7 @@ static NSImage *Symbol(NSString *name, CGFloat pointSize)
     self.outline.allowsColumnReordering = YES;
     self.outline.allowsColumnResizing = YES;
     self.outline.columnAutoresizingStyle = NSTableViewUniformColumnAutoresizingStyle;
-    self.outline.rowHeight = 22;
+    self.outline.rowHeight = 24;
     self.outline.indentationPerLevel = 14;
     self.outline.autosaveExpandedItems = NO;
     self.outline.autoresizesOutlineColumn = YES;
@@ -1195,28 +1224,34 @@ static NSImage *Symbol(NSString *name, CGFloat pointSize)
     [self.outline setDraggingSourceOperationMask:NSDragOperationCopy forLocal:NO];
     [self.outline registerForDraggedTypes:@[NSPasteboardTypeFileURL]];
 
-    // §6.2 八列
+    // §6.2 列：默认只展示 Finder 风格三列（名称/大小/修改时间），其余开发向
+    // 技术列（压缩后/压缩率/CRC/方法/属性）默认隐藏，可在列头右键菜单中开启。
+    // 每项 = @[标题, 宽度, 默认可见]
     NSArray *cols = @[
         @[@"名称", @340, @YES],
-        @[@"大小", @90, @YES],
-        @[@"压缩后", @90, @YES],
-        @[@"压缩率", @80, @YES],
+        @[@"大小", @90,  @YES],
+        @[@"压缩后", @90, @NO],
+        @[@"压缩率", @80, @NO],
         @[@"修改时间", @160, @YES],
-        @[@"CRC", @100, @YES],
-        @[@"方法", @100, @YES],
-        @[@"属性", @90, @YES],
+        @[@"CRC", @100, @NO],
+        @[@"方法", @100, @NO],
+        @[@"属性", @90,  @NO],
     ];
     for (NSArray *c in cols) {
         NSTableColumn *col = [[NSTableColumn alloc] initWithIdentifier:c[0]];
         col.title = c[0];
         col.width = [c[1] doubleValue];
         col.minWidth = 60;
+        col.hidden = ![c[2] boolValue];
         col.sortDescriptorPrototype = [NSSortDescriptor sortDescriptorWithKey:c[0]
                                                                    ascending:YES
                                                                     selector:@selector(localizedStandardCompare:)];
         [self.outline addTableColumn:col];
     }
     self.outline.outlineTableColumn = self.outline.tableColumns.firstObject;
+
+    // 列头右键菜单：勾选切换各列可见性（「名称」为大纲列，始终显示、不可隐藏）。
+    [self buildColumnHeaderMenu];
 
     // 内容区的两个成员（表格与空状态）由 viewDidLayout 直接给定 frame，不走
     // Auto Layout —— 原因见 assembleContent 的说明。
@@ -1276,6 +1311,33 @@ static NSImage *Symbol(NSString *name, CGFloat pointSize)
         [stack.trailingAnchor constraintLessThanOrEqualToAnchor:self.emptyState.trailingAnchor
                                                        constant:-24],
     ]];
+}
+
+#pragma mark 列头右键菜单（切换列可见性）
+
+- (void)buildColumnHeaderMenu
+{
+    NSMenu *menu = [[NSMenu alloc] initWithTitle:@"列"];
+    for (NSTableColumn *col in self.outline.tableColumns) {
+        if ([col.identifier isEqualToString:@"名称"]) continue;   // 名称不可隐藏
+        NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:col.title
+                                                      action:@selector(toggleColumn:)
+                                               keyEquivalent:@""];
+        item.target = self;
+        item.representedObject = col;
+        item.state = col.hidden ? NSControlStateValueOff : NSControlStateValueOn;
+        [menu addItem:item];
+    }
+    self.outline.headerView.menu = menu;
+}
+
+- (void)toggleColumn:(NSMenuItem *)sender
+{
+    NSTableColumn *col = sender.representedObject;
+    if (!col || [col.identifier isEqualToString:@"名称"]) return;
+    col.hidden = !col.hidden;
+    sender.state = col.hidden ? NSControlStateValueOff : NSControlStateValueOn;
+    [self.outline.headerView setNeedsDisplay:YES];
 }
 
 /// 自下而上分配：状态栏 30 → 分隔线 1 →（展开时）日志抽屉 132 + 分隔线 1 → 内容区。
@@ -2365,12 +2427,8 @@ static BOOL ParseVolumeSize(NSString *t, unsigned long long *out)
     NSString *ident2 = col.identifier;
     if ([ident2 isEqualToString:@"名称"]) {
         cell.textField.stringValue = [n displayName];
-        // SF Symbols 自 macOS 11.0 起可用，正好覆盖本移植的最低部署目标
-        // SF Symbols 自 macOS 11.0 起可用，正好覆盖本移植的最低部署目标。
-        // 按 13pt 配置后放进 16×16 的图标位，视觉重量与 12pt 正文匹配。
-        NSString *sym = n.isSymLink ? @"link" : (n.isDirectory ? @"folder" : @"doc");
-        NSImage *icon = Symbol(sym, 13.0);
-        icon.template = YES;
+        // 真实文件类型图标：复用系统 Finder 图标，按扩展名取，深浅色自适应。
+        NSImage *icon = FileIcon(n.name, n.isDirectory, n.isSymLink);
         cell.imageView.image = icon;
         cell.imageView.hidden = (icon == nil);
         cell.textField.textColor = [NSColor labelColor];
