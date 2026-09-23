@@ -54,6 +54,7 @@
 | 日志 | 默认收起，出错或出现告警时自动展开；也可由工具栏按钮或 ⌘L 开关 |
 | 状态栏 | 底部通栏，左侧为当前状态（就绪 / 已载入 N 项 / 进度），右侧为当前压缩参数摘要 |
 | 外观 | 全部使用语义色（`labelColor`、`secondaryLabelColor`、`windowBackgroundColor`、`controlAccentColor`、`textBackgroundColor`），浅色与深色外观下自动适配 |
+| 窗口尺寸 | 紧凑窗体：内容区默认 560×420、最小 460×320。窄窗下工具栏把放不下的按钮自动收进 `>>` 溢出菜单，仍在可滚动范围内保留完整列 |
 
 > 内容区（表格与空状态）与日志抽屉的 frame 由代码直接计算而非 Auto Layout
 > 约束——这是实测踩坑后的约定（`NSScrollView` 由约束定位时会被 AppKit 跳过

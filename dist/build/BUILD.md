@@ -142,8 +142,26 @@ SZ=/path/to/7zz && $SZ
    全部集中在 `layoutContentFrames` 一个方法内，`viewDidLayout` 与
    `setLogVisible:` 都调它，切换抽屉时不必等下一次布局循环；
 2. 内容区不再参与约束后窗口的内容自适应尺寸会变得很小（实测宽度被压到
-   145pt），故 `main.m` 中为 `drop` 补了一条最小宽度约束（880），并在
-   `setFrameAutosaveName:` 返回 `NO`（首次运行）时显式给回 1040×700。
+   145pt），故 `main.m` 中为 `drop` 补了一条最小宽度约束（460），并在
+   `setFrameAutosaveName:` 返回 `NO`（首次运行）时显式给回 560×420。
+
+**窗口尺寸（2026-09-24 收紧为 Keka 风格小窗）**：内容区默认 560×420、最小
+460×320，`drop` 的最小宽度约束（460）与之取齐。实测两种尺寸下工具栏、空状态、
+状态栏、列表均正常绘制。两点容易踩空：
+
+1. **改默认尺寸必须同时给 `setFrameAutosaveName:` 换键名。** 该键一旦写进
+   defaults（`NSWindow Frame 7ZipMainWindow = "341 136 1040 732 …"`），旧框架
+   就会在每次启动时覆盖新默认值——只改 `setContentSize:` 的数字是改不动的，
+   界面看起来像"改了没生效"。当前键名 `7ZipMainWindow2`。
+2. 窄窗下工具栏会把放不下的按钮自动收进 `>>` 溢出菜单（560pt 下常驻
+   `打开归档 / 新建归档 / 解压到… / 添加文件…`），这是 `NSToolbar` 行为，
+   不需要手工裁剪 `toolbarDefaultItemIdentifiers`；溢出菜单里的自定义
+   `NSButton` 项按 `label` 正常显示，功能可达。
+
+验证窗口尺寸不必改源码重建：直接写
+`defaults write org.7-zip.macos.app "NSWindow Frame 7ZipMainWindow2" "200 220 460 404 0 0 1470 923 "`
+后重启应用即可（字符串末尾的空格与屏幕矩形字段是 AppKit 的格式要求），
+验完记得 `defaults delete ... "NSWindow Frame 7ZipMainWindow2"` 还原。
 
 若日后要改回约束布局，请先把上面 7 项变量逐一对齐到「能显示」的那一组，并
 用 `screencapture` 实测，不要只凭 `frame` 数值判断正确性——**布局数值正确与

@@ -1196,7 +1196,7 @@ static NSImage *FileIcon(NSString *name, BOOL isDir, BOOL isLink)
 
 - (void)loadView
 {
-    self.drop = [[DropView alloc] initWithFrame:NSMakeRect(0, 0, 1040, 700)];
+    self.drop = [[DropView alloc] initWithFrame:NSMakeRect(0, 0, 560, 420)];
     self.drop.dropDelegate = self;
     self.view = self.drop;
 
@@ -2373,7 +2373,7 @@ static NSString *LevelNameForTick(NSInteger tick)
 
     // 内容区（表格/空状态/日志）用显式 frame，窗口的内容自适应尺寸会因此变得
     // 很小、开窗即被压成一条。补一条最小宽度约束，等价于声明内容区的最小尺寸。
-    [[self.drop.widthAnchor constraintGreaterThanOrEqualToConstant:880] setActive:YES];
+    [[self.drop.widthAnchor constraintGreaterThanOrEqualToConstant:460] setActive:YES];
 
 
     // 右键菜单（§6.4）
@@ -3805,7 +3805,7 @@ static NSString *UniqueArchivePath(NSString *dir, NSString *base, NSString *ext)
 - (instancetype)init
 {
     // 尺寸只是初值：紧接着的 setFrameAutosaveName: 会用上次保存的框架覆盖它。
-    NSRect frame = NSMakeRect(0, 0, 1040, 700);
+    NSRect frame = NSMakeRect(0, 0, 560, 420);
     NSWindow *w = [[NSWindow alloc] initWithContentRect:frame
         styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
                    NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable)
@@ -3819,8 +3819,8 @@ static NSString *UniqueArchivePath(NSString *dir, NSString *base, NSString *ext)
     w.toolbarStyle = NSWindowToolbarStyleUnified;
     // 先钉下最小尺寸，再挂 contentViewController：否则窗口会按内容的自适应尺寸
     // 收缩（内容区是显式 frame，不参与约束，窗口宽度无从约束）。
-    w.contentMinSize = NSMakeSize(880, 560);
-    w.minSize = NSMakeSize(880, 560);
+    w.contentMinSize = NSMakeSize(460, 320);
+    w.minSize = NSMakeSize(460, 320);
     w.tabbingIdentifier = @"7ZipArchive";
     w.delegate = self;
 
@@ -3830,8 +3830,10 @@ static NSString *UniqueArchivePath(NSString *dir, NSString *base, NSString *ext)
 
     // setFrameAutosaveName: 返回是否恢复了上次保存的框架；首次运行没有记录时窗口
     // 会停在内容自适应得到的最小尺寸上，这里显式给回默认尺寸。
-    if (![w setFrameAutosaveName:@"7ZipMainWindow"]) {
-        [w setContentSize:NSMakeSize(1040, 700)];
+    // 键名带版本后缀：早先的版本已把 1040×700 写进 @"7ZipMainWindow"，沿用旧名会
+    // 让新默认尺寸被那份历史记录永久盖掉（改尺寸时必须一并换名）。
+    if (![w setFrameAutosaveName:@"7ZipMainWindow2"]) {
+        [w setContentSize:NSMakeSize(560, 420)];
         [w center];
     }
     return self;
