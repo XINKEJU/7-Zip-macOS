@@ -2,7 +2,10 @@
 #
 # build_app.sh — assembles 7-Zip.app from the sources in this directory.
 #
-# Produces a universal (arm64 + x86_64) application bundle:
+# Produces an arm64-only (Apple Silicon) application bundle. The bundle used to
+# ship arm64 + x86_64 slices; Intel support was dropped on 2026-09-24 because
+# the x86_64 slice accounted for nearly half of every executable while no
+# Intel Macs remain on sale. Rationale and how to restore it: Makefile header.
 #   * the front end links the in-process engine bridge
 #     (lib7zbridgeobjc.a + lib7zbridge.a) and loads lib7z.dylib from
 #     Contents/Frameworks, so archive work runs inside the app process
@@ -46,25 +49,30 @@ BUILD="$HERE/.build"
 echo "== 1. 校验 Info.plist =="
 plutil -lint "$HERE/Info.plist"
 
-echo "== 2. 编译两个架构（部署目标 11.0）=="
+echo "== 2. 编译 arm64（部署目标 11.0）=="
 mkdir -p "$BUILD"
 export MACOSX_DEPLOYMENT_TARGET=11.0
-for arch in arm64 x86_64; do
-    clang -fobjc-arc -fmodules -Wall -O2 \
-          -arch "$arch" -mmacosx-version-min=11.0 \
-          -I"$ENG_DIR" -I"$LIB" \
-          -framework AppKit -framework Foundation -framework QuickLookUI -framework CoreFoundation \
-          -framework UserNotifications \
-          -o "$BUILD/app-$arch" "$HERE/main.m" \
-          "$LIB/lib7zbridgeobjc.a" "$LIB/lib7zbridge.a" \
-          -L"$LIB" -l7z -lc++ \
-          -Wl,-rpath,@executable_path/../Frameworks
-    printf "   %-8s %s bytes\n" "$arch" "$(stat -f%z "$BUILD/app-$arch")"
-done
+clang -fobjc-arc -fmodules -Wall -O2 \
+      -arch arm64 -mmacosx-version-min=11.0 \
+      -I"$ENG_DIR" -I"$LIB" \
+      -framework AppKit -framework Foundation -framework QuickLookUI -framework CoreFoundation \
+      -framework UserNotifications \
+      -o "$BUILD/app-arm64" "$HERE/main.m" \
+      "$LIB/lib7zbridgeobjc.a" "$LIB/lib7zbridge.a" \
+      -L"$LIB" -l7z -lc++ \
+      -Wl,-rpath,@executable_path/../Frameworks
+printf "   %-8s %s bytes\n" arm64 "$(stat -f%z "$BUILD/app-arm64")"
 
-echo "== 3. 合并通用二进制 =="
-lipo -create "$BUILD/app-arm64" "$BUILD/app-x86_64" -output "$BUILD/app-universal"
-lipo -archs "$BUILD/app-universal" | sed 's/^/   架构: /'
+echo "== 3. 校验架构 =="
+# 防止将来某次改动把 x86_64 悄悄带回来：这里正反都断言，只认 arm64 单架构。
+APP_ARCHS="$(lipo -archs "$BUILD/app-arm64")"
+case "$APP_ARCHS" in
+    *x86_64*) echo "   产物含 x86_64 切片！本构建只发行 arm64。" >&2; exit 1 ;;
+esac
+case "$APP_ARCHS" in
+    *arm64*) echo "   架构: $APP_ARCHS（仅 Apple Silicon）" ;;
+    *) echo "   产物不含 arm64 切片！" >&2; exit 1 ;;
+esac
 
 echo "== 4. 组装 .app 包 =="
 # 不整体删除旧包：批量 rm 会被安全钩子拦截并使脚本中止（表现为"改了脚本但产物
@@ -72,7 +80,7 @@ echo "== 4. 组装 .app 包 =="
 # 若历史布局留下过陈旧文件，末尾的 codesign --verify --deep --strict 会因为
 # 该文件未被签名而失败，因此这一步本身就是"无残留"的守卫。
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Frameworks"
-cp -f "$BUILD/app-universal"     "$APP/Contents/MacOS/7-Zip"
+cp -f "$BUILD/app-arm64"        "$APP/Contents/MacOS/7-Zip"
 cp -f "$HERE/Info.plist"         "$APP/Contents/Info.plist"
 cp -f "$ICNS"                    "$APP/Contents/Resources/7zip.icns"
 cp -f "$LIB/lib7z.dylib"         "$APP/Contents/Frameworks/lib7z.dylib"

@@ -25,12 +25,9 @@ if [ ! -f "$LIB/lib7z.dylib" ]; then
     exit 2
 fi
 
-BUILD="$HERE/.build"
-mkdir -p "$BUILD"
-
 build_arch() {
     arch="$1"
-    out="$BUILD/objc_test-$arch"
+    out="$HERE/objc_test"
     clang -fobjc-arc -fmodules -Wall -O2 \
           -arch "$arch" -mmacosx-version-min=11.0 \
           -I"$ENGINE" -I"$LIB" \
@@ -42,12 +39,8 @@ build_arch() {
     printf "   %-8s %s bytes\n" "$arch" "$(stat -f%z "$out")"
 }
 
+# 只构建 arm64：必须与所链接的桥接层/引擎同架构。
 echo "== 编译 arm64 =="
 build_arch arm64
-echo "== 编译 x86_64 =="
-build_arch x86_64
-
-echo "== 合并通用二进制 =="
-lipo -create "$BUILD/objc_test-arm64" "$BUILD/objc_test-x86_64" -output "$HERE/objc_test"
 lipo -archs "$HERE/objc_test" | sed 's/^/   架构: /'
 echo "完成：$HERE/objc_test"

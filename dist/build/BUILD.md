@@ -1,4 +1,4 @@
-# 7-Zip 26.03 macOS 通用二进制与安装包 — 可复现构建说明
+# 7-Zip 26.03 macOS 原生构建与安装包 — 可复现构建说明
 
 本文档记录从官方源码到 macOS 安装包的完整构建流程，含实测发现的坑点。
 所有命令均在 Apple Silicon + macOS 26.1 SDK + Apple clang 17.0.0 环境实测通过。
@@ -34,8 +34,8 @@ make -f ../../cmpl_clang.mak
 # cross-compilation [-Wpoison-system-directories]
 
 # ✓ 正确
-make -f ../../cmpl_mac_arm64.mak      # arm64
-make -f ../../cmpl_mac_x64.mak        # x86_64
+make -f ../../cmpl_mac_arm64.mak      # arm64（本项目当前唯一构建的架构）
+make -f ../../cmpl_mac_x64.mak        # x86_64（上游提供，本项目已不再编译）
 ```
 
 原因：`cmpl_clang.mak` 引用 `warn_clang.mak`，其中缺少 `-Wno-poison-system-directories`。
@@ -173,33 +173,35 @@ make appcheck   # 应用包验收（依赖解析 / 部署目标 / 签名 / 真�
 
 ---
 
-## 三、构建两个切片
+## 三、构建引擎（arm64）
 
 ```bash
 cd 7z2603-src/CPP/7zip/Bundles/Alone2
 export MACOSX_DEPLOYMENT_TARGET=11.0
 
 make -B -j8 -f ../../cmpl_mac_arm64.mak     # → b/m_arm64/7zz
-make -B -j8 -f ../../cmpl_mac_x64.mak       # → b/m_x64/7zz
 ```
 
 说明：
 - 编译告警等级为 `-Wall -Wextra -Weverything -Werror -Wfatal-errors`，源码零告警通过。
-- arm64 目标含手写汇编（`Asm/arm64/LzmaDecOpt.S`），x86_64 目标 `USE_ASM=` 为空（不依赖外部汇编器）。
-- 若想为 x86_64 启用汇编优化，需安装 Asmc / UASM 并改用 `cmpl_gcc_x64.mak`。
+- arm64 目标含手写汇编（`Asm/arm64/LzmaDecOpt.S`）。
+- **不再编译 x86_64。** 2026-09-24 起本项目只发行 arm64：x86_64 切片占每个
+  可执行体体积的近一半，而 Intel Mac 已无在售机型。上游 `cmpl_mac_x64.mak`
+  原样保留在源码树里，只是不再被调用；恢复方式见仓库 Makefile 文件头。
 
-## 四、合并为通用二进制
+## 四、取出引擎可执行体并签名
 
 ```bash
 cd dist && mkdir -p build
-lipo -create <src>/b/m_arm64/7zz <src>/b/m_x64/7zz -output build/7zz
+cp -f <src>/b/m_arm64/7zz build/7zz
 codesign --force --sign - --timestamp=none build/7zz
 
-lipo -archs build/7zz          # → x86_64 arm64
+lipo -archs build/7zz          # → arm64
 codesign --verify --strict build/7zz
 ```
 
-`lipo` 合并后原签名失效，必须重新 ad-hoc 签名，否则 arm64 切片可能被内核拒绝执行。
+签名必须做：未签名的 arm64 可执行体会被内核直接拒绝执行。此前这一步还包含
+`lipo -create`（把 arm64 与 x86_64 两个切片合成通用二进制），单架构后不再需要。
 
 ---
 
@@ -210,7 +212,7 @@ codesign --verify --strict build/7zz
 
 ```
 root-cli/usr/local/                    组件包 com.7-zip.7zz   → /usr/local
-├── bin/7zz                            (755, 通用二进制)
+├── bin/7zz                            (755, arm64)
 ├── bin/7z -> 7zz                      (符号链接)
 ├── share/man/man1/7zz.1               (644)
 ├── share/man/man1/7z.1                (644)
@@ -268,7 +270,7 @@ hdiutil create -volname "7-Zip 26.03" -srcfolder dmg \
                -fs HFS+ -format UDZO -ov 7-Zip-26.03-macOS.dmg
 
 # 4) 免安装归档（仅命令行工具）
-tar -cJf 7-Zip-26.03-macOS-universal.tar.xz -C root-cli/usr/local .
+tar -cJf 7-Zip-26.03-macOS-arm64.tar.xz -C root-cli/usr/local .
 ```
 
 ### 关于扩展属性与 `._` 条目
@@ -319,8 +321,8 @@ uname/gname 清空、权限归一化为 0755/0644、gzip 头 mtime 置 0。
 
 ```bash
 # 连续两次打包应得到同一个哈希
-sh dist/build/package.sh && shasum -a 256 dist/7zip-macos-26.03-macos-universal.tar.gz
-sh dist/build/package.sh && shasum -a 256 dist/7zip-macos-26.03-macos-universal.tar.gz
+sh dist/build/package.sh && shasum -a 256 dist/7zip-macos-26.03-macos-arm64.tar.gz
+sh dist/build/package.sh && shasum -a 256 dist/7zip-macos-26.03-macos-arm64.tar.gz
 ```
 
 ### 关于文档目录命名
@@ -336,7 +338,7 @@ sh dist/build/package.sh && shasum -a 256 dist/7zip-macos-26.03-macos-universal.
 
 | 检查项 | 命令 | 期望 |
 |---|---|---|
-| 架构完整 | `lipo -archs 7zz` | `x86_64 arm64` |
+| 架构 | `lipo -archs 7zz` | `arm64`（**不含** `x86_64`） |
 | 部署目标 | `otool -arch arm64 -l 7zz \| grep -A4 LC_BUILD_VERSION` | `minos 11.0` |
 | 签名有效 | `codesign --verify --strict 7zz` | 通过 |
 | 动态依赖 | `otool -L 7zz` | 仅 `libSystem` / `libc++` |

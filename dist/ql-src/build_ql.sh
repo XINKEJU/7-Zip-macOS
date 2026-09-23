@@ -2,9 +2,11 @@
 #
 # build_ql.sh — Build the 7-Zip Quick Look preview extension (.appex)
 #
-# Produces a universal (arm64 + x86_64) Quick Look preview extension and,
+# Produces an arm64-only (Apple Silicon) Quick Look preview extension and,
 # when APP_BUNDLE is set, installs it into the host application's PlugIns
 # directory so Finder can offer Space-bar previews for archive files.
+# (The extension was a universal binary until 2026-09-24, when the x86_64 slice
+# was dropped project-wide — see the Makefile header.)
 #
 # The extension lists archives in-process (see ArchiveReader.c). It deliberately
 # does NOT embed the `7zz` console engine any more.
@@ -49,7 +51,7 @@ echo "    source : $HERE"
 echo "    output : $OUT"
 
 # 不删除旧的 .build：批量 rm 会被安全钩子拦截并中止脚本（伪装成"改动无效"）。
-# 就地覆盖即可——两个架构每次都会重新编译，lipo/ditto 也都会覆盖目标。
+# 就地覆盖即可——每次都会重新编译，ditto 也会覆盖目标。
 mkdir -p "$BUILD"
 
 # ---------------------------------------------------------------- compile ---
@@ -72,19 +74,14 @@ compile_slice() {
     -framework Foundation \
     -framework QuickLookUI \
     -framework UniformTypeIdentifiers \
-    -o "$BUILD/$EXEC_NAME.$arch" \
+    -o "$BUILD/$EXEC_NAME" \
     "$HERE/SevenZipPreviewProvider.m" \
     "$HERE/ArchiveReader.c"
 }
 
+# 单架构，无需 lipo 合并。保留 arch 参数的函数形态，将来加回 x86_64 时只需
+# 再调一次 compile_slice 并把输出换成 lipo。
 compile_slice arm64
-compile_slice x86_64
-
-echo "==> creating universal binary"
-lipo -create \
-  "$BUILD/$EXEC_NAME.arm64" \
-  "$BUILD/$EXEC_NAME.x86_64" \
-  -output "$BUILD/$EXEC_NAME"
 
 # ---------------------------------------------------------------- bundle ----
 echo "==> assembling bundle"

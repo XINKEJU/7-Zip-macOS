@@ -3,7 +3,10 @@
   <title>7-Zip 26.03</title>
   <organization>com.7-zip</organization>
   <domains enable_localSystem="true" enable_anywhere="false" enable_currentUserHome="false"/>
-  <options customize="allow" require-scripts="false" hostArchitectures="x86_64,arm64"/>
+  <!-- arm64 only: the payload has no x86_64 slice (dropped 2026-09-24, see
+       BUILD.md). Declaring it here makes Installer refuse the package on an
+       Intel Mac upfront, instead of installing binaries that cannot launch. -->
+  <options customize="allow" require-scripts="false" hostArchitectures="arm64"/>
   <welcome file="welcome.html"/>
   <readme file="readme.html"/>
   <license file="License.txt"/>

@@ -3,9 +3,10 @@
 <p>This package installs a native macOS build of the official 7-Zip archiver,
 compiled from the unmodified 7-Zip 26.03 source release (2026-09-03) by
 Igor Pavlov.</p>
-<p>Every executable is a universal binary containing both native slices, so it
-runs natively on Apple Silicon and on Intel Macs. Minimum system version is
-macOS 11.0 (Big Sur).</p>
+<p>Every executable is a native arm64 binary, so it runs natively on Apple
+Silicon. Minimum system version is macOS 11.0 (Big Sur).</p>
+<p><b>This build does not run on Intel Macs.</b> The x86_64 slice was dropped
+because it accounted for nearly half of the size of every executable.</p>
 <p>The installer offers two components: the command line tools, and the
 7-Zip application that provides the Finder context menu and the Quick Look
 archive preview. You can deselect either one on the next screen.</p>

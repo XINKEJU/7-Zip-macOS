@@ -2,8 +2,11 @@
 #
 # build_dylib.sh — 由上游源码构建 7z.dylib 引擎动态库（技术方案 §3.3 表 4）
 #
-# 使用 Format7zF Bundle 构建全部格式的共享库，双架构 lipo 合成通用二进制。
+# 使用 Format7zF Bundle 构建全部格式的共享库，arm64 单架构（Apple Silicon）。
 # 该库是整个内嵌路线的引擎核心，也是 LGPL 合规中"可被用户替换的那一个库"。
+#
+# 此前这里是 arm64 + x86_64 双架构 lipo 合成；2026-09-24 起放弃 Intel 支持，
+# 理由与恢复方式见仓库 Makefile 文件头。
 #
 # 产出：dist/lib/lib7z.dylib（install_name = @rpath/7z.dylib）
 #
@@ -46,13 +49,9 @@ make -B -j"$(sysctl -n hw.ncpu)" -f ../../cmpl_mac_arm64.mak > "$DIST/engine/.bu
     || { tail -30 "$DIST/engine/.build_dylib_arm64.log" >&2; exit 1; }
 ls -la b/m_arm64/7z.so
 
-echo "== 编译 x86_64 =="
-make -B -j"$(sysctl -n hw.ncpu)" -f ../../cmpl_mac_x64.mak > "$DIST/engine/.build_dylib_x64.log" 2>&1 \
-    || { tail -30 "$DIST/engine/.build_dylib_x64.log" >&2; exit 1; }
-ls -la b/m_x64/7z.so
-
-echo "== 合成通用二进制 =="
-lipo -create b/m_arm64/7z.so b/m_x64/7z.so -output "$OUT"
+echo "== 取出编译产物 =="
+# 单架构，无需 lipo（lipo 对单输入也只是复制）。
+cp -f b/m_arm64/7z.so "$OUT"
 # install_name 必须与文件名一致：dyld 按 "@rpath/<install_name 的末段>" 查找，
 # 若写成 @rpath/7z.dylib 而文件叫 lib7z.dylib，加载时会直接报
 # "Library not loaded: @rpath/7z.dylib"。

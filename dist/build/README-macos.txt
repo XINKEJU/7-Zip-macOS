@@ -1,5 +1,5 @@
-7-Zip 26.03 for macOS — universal build (arm64 + x86_64)
-========================================================
+7-Zip 26.03 for macOS — Apple Silicon build (arm64)
+==================================================
 
 Built from the unmodified official 7-Zip 26.03 source release
 (released 2026-09-03) by Igor Pavlov.
@@ -26,7 +26,7 @@ WHAT THE INSTALLER PUTS ON DISK
 The installer offers two components. Both are selected by default.
 
   Command line tools
-    /usr/local/bin/7zz                              the archiver (universal)
+    /usr/local/bin/7zz                              the archiver (arm64)
     /usr/local/bin/7z                               symlink to 7zz
     /usr/local/share/man/man1/7zz.1                 manual page
     /usr/local/share/man/man1/7z.1                  same page, for the alias
@@ -72,8 +72,8 @@ You should see:
 
   7-Zip (z) 26.03 (arm64) : Copyright (c) 1999-2026 Igor Pavlov : 2026-09-03
 
-On an Intel Mac the architecture reported will be x64 instead of arm64.
-Both are the same universal binary; macOS picks the native slice.
+The "(arm64)" tag confirms you are running the native Apple Silicon code.
+This build contains no Intel slice; see "ARCHITECTURE SUPPORT" below.
 
 Quick functional test:
 
@@ -101,18 +101,26 @@ any archive or file you created.
 ARCHITECTURE SUPPORT
 --------------------
 
-Every executable in this distribution contains two native Mach-O slices:
+Every executable in this distribution contains a single native Mach-O
+slice:
 
   arm64   — Apple Silicon (M1 and later)
-  x86_64  — Intel Macs
 
-Minimum system version is macOS 11.0 (Big Sur) for both slices, which is
-the first release to support Apple Silicon. The build sets an explicit
-deployment target rather than inheriting the build host's SDK default, so
-the binary is not restricted to the newest macOS.
+**There is no x86_64 slice, so this build does not run on Intel Macs.** The
+Intel slice was dropped on 2026-09-24: it accounted for nearly half of the
+size of every executable in the package, while no Intel Macs remain on sale.
+An Intel Mac will refuse to launch these binaries ("bad CPU type in
+executable"); Rosetta 2 translates x86_64 code to arm64, not the other way
+around, so it cannot help here either.
 
-Therefore no Rosetta 2 is required on Apple Silicon, and no emulation is
-used on Intel. Codecs compiled into this build:
+On Apple Silicon no Rosetta 2 is used — everything runs natively.
+
+Minimum system version is macOS 11.0 (Big Sur), the first release to support
+Apple Silicon. The build sets an explicit deployment target rather than
+inheriting the build host's SDK default, so the binary is not restricted to
+the newest macOS.
+
+Codecs compiled into this build:
 
   LZMA, LZMA2, PPMd, BZip2, Deflate, Deflate64, Zstd, XZ, LZFSE
   RAR 1/2/3/5 (extraction only)

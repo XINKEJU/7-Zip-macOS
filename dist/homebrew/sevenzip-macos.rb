@@ -35,24 +35,28 @@
 # For that to work the `url` must be reachable. To test the packaging locally,
 # point it at the tarball produced by dist/build/package.sh:
 #
-#     url "file:///path/to/7zip-macos-26.03-macos-universal.tar.gz"
+#     url "file:///path/to/7zip-macos-26.03-macos-arm64.tar.gz"
 #
-# The checksum below is the authoritative hash of the published artefact and
-# covers both CPU architectures, so no per-architecture bottle is required.
+# The checksum below is the authoritative hash of the published artefact. The
+# payload is arm64-only, so a single download serves every supported machine
+# and no per-architecture bottle is required.
 #
 class SevenzipMacos < Formula
   desc "File archiver with a high compression ratio (native macOS build)"
   homepage "https://www.7-zip.org/"
-  url "https://github.com/XINKEJU/7-Zip-macOS/releases/download/v26.03/7zip-macos-26.03-macos-universal.tar.gz"
-  sha256 "1aadf109c4260edbc4287b328e46ea6f7eb41cfa7a7fd46cfe311a872193b3ba"
+  url "https://github.com/XINKEJU/7-Zip-macOS/releases/download/v26.03/7zip-macos-26.03-macos-arm64.tar.gz"
+  sha256 "f5148207551d67698e00ce10f6652cf8ea674ed6f53edcacfb0252aa556f1107"
   version "26.03"
   license "LGPL-2.1-or-later"
 
   # The command line engine is built with a deployment target of macOS 11.
   depends_on macos: ">= :big_sur"
 
-  # The archive is a single universal binary (arm64 + x86_64), so both
-  # architectures are served by the same download.
+  # Apple Silicon only: the x86_64 slice was dropped on 2026-09-24 (it accounted
+  # for nearly half of every executable's size). Declaring it here turns an
+  # otherwise baffling "bad CPU type in executable" at run time into an upfront,
+  # explicit refusal at install time.
+  depends_on arch: :arm64
 
   def install
     bin.install "bin/7zz"

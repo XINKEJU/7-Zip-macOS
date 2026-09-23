@@ -1,12 +1,12 @@
 # 7-Zip 26.03 · macOS 原生移植
 
 [![平台](https://img.shields.io/badge/macOS-11.0%2B-lightgrey)](#八已知限制)
-[![架构](https://img.shields.io/badge/arch-arm64%20%7C%20x86__64-green)](#八已知限制)
+[![架构](https://img.shields.io/badge/arch-arm64-green)](#八已知限制)
 [![上游](https://img.shields.io/badge/7--Zip-26.03-orange)](https://www.7-zip.org/)
 [![许可证](https://img.shields.io/badge/license-LGPL--2.1--orlater-blue)](./LICENSE)
 
-> **English** — A macOS-native port of 7-Zip 26.03. Universal binaries
-> (arm64 + x86_64) built from the official upstream source, plus an AppKit GUI,
+> **English** — A macOS-native port of 7-Zip 26.03. Apple Silicon binaries
+> (arm64 only) built from the official upstream source, plus an AppKit GUI,
 > a Quick Look preview extension, Finder services, shell completions, man pages
 > and a Homebrew formula. Licensed LGPL-2.1-or-later with the unRAR restriction.
 
@@ -24,7 +24,7 @@
 
 | 组件 | 内容 | 安装位置 |
 |---|---|---|
-| **命令行引擎** | `7zz` 通用二进制（arm64 + x86_64），含 7z / XZ / BZip2 / GZip / TAR / ZIP / WIM / RAR 解压等全部上游能力，AES-256 加密，多线程 | `/usr/local/bin/7zz` |
+| **命令行引擎** | `7zz`（arm64，仅 Apple Silicon），含 7z / XZ / BZip2 / GZip / TAR / ZIP / WIM / RAR 解压等全部上游能力，AES-256 加密，多线程 | `/usr/local/bin/7zz` |
 | **命令别名** | `7z` → `7zz` 符号链接 | `/usr/local/bin/7z` |
 | **手册页** | `man 7zz`（完整命令与开关说明）、`man 7z`（别名页） | `/usr/local/share/man/man1/` |
 | **命令补全** | zsh / bash / fish 三套，按子命令区分可用开关 | `/usr/local/share/{zsh,bash-completion,fish}/` |
@@ -124,14 +124,14 @@
 ### 3.2 免安装命令行包
 
 ```bash
-curl -LO https://github.com/XINKEJU/7-Zip-macOS/releases/download/v26.03/7-Zip-26.03-macOS-universal.tar.xz
-sudo tar -xJf 7-Zip-26.03-macOS-universal.tar.xz -C /usr/local
+curl -LO https://github.com/XINKEJU/7-Zip-macOS/releases/download/v26.03/7-Zip-26.03-macOS-arm64.tar.xz
+sudo tar -xJf 7-Zip-26.03-macOS-arm64.tar.xz -C /usr/local
 ```
 
 ### 3.3 Homebrew
 
 公式位于 `dist/homebrew/sevenzip-macos.rb`。它消费的是 3.2 之外的
-`7zip-macos-*-universal.tar.gz` 分发包（由 `make tarball` 生成）：
+`7zip-macos-*-arm64.tar.gz` 分发包（由 `make tarball` 生成）：
 
 ```bash
 brew install --formula https://raw.githubusercontent.com/XINKEJU/7-Zip-macOS/main/dist/homebrew/sevenzip-macos.rb
@@ -143,7 +143,7 @@ brew install --formula https://raw.githubusercontent.com/XINKEJU/7-Zip-macOS/mai
 ### 3.4 安装了什么
 
 ```
-/usr/local/bin/7zz                          命令行引擎（通用二进制）
+/usr/local/bin/7zz                          命令行引擎（arm64）
 /usr/local/bin/7z                           符号链接 → 7zz
 /usr/local/share/man/man1/7zz.1             手册页
 /usr/local/share/man/man1/7z.1              别名手册页
@@ -170,7 +170,7 @@ brew install --formula https://raw.githubusercontent.com/XINKEJU/7-Zip-macOS/mai
 ### 4.2 一条命令
 
 ```bash
-make            # engine → universal → app → pkg
+make            # engine → enginebin → app → pkg
 ```
 
 产物写入 `dist/`：
@@ -179,15 +179,15 @@ make            # engine → universal → app → pkg
 |---|---|
 | `7-Zip-26.03-macOS.pkg` | 集成安装包（命令行 + 应用，可勾选） |
 | `7-Zip-26.03-macOS.dmg` | 磁盘映像（含安装包、README、卸载脚本） |
-| `7-Zip-26.03-macOS-universal.tar.xz` | 仅命令行的免安装包 |
-| `7zip-macos-26.03-macos-universal.tar.gz` | Homebrew 分发包（`make tarball`） |
+| `7-Zip-26.03-macOS-arm64.tar.xz` | 仅命令行的免安装包 |
+| `7zip-macos-26.03-macos-arm64.tar.gz` | Homebrew 分发包（`make tarball`） |
 | `checksums.txt` | 上述产物的 SHA-256 |
 
 ### 4.3 分步
 
 ```bash
-make engine      # 编译 arm64 与 x86_64 两个切片（上游 Alone2 目标）
-make universal   # lipo 合并 + ad-hoc 签名 → dist/build/7zz
+make engine      # 编译 arm64 引擎（上游 Alone2 目标）
+make enginebin   # 取出可执行体 + ad-hoc 签名 → dist/build/7zz
 make dylib       # 构建内嵌引擎动态库 → dist/lib/lib7z.dylib
 make bridge      # 构建桥接层 → dist/lib/lib7zbridge*.a
 make app         # 组装 7-Zip.app，并构建内嵌 Quick Look 扩展
@@ -284,10 +284,12 @@ pkgutil --expand-full dist/7-Zip-26.03-macOS.pkg /tmp/exp    # 检查载荷与�
    正式分发须自备 Apple Developer ID，步骤见 `BUILD.md`。
 2. **Quick Look 的 7z 完整列表**需要正式签名（见第六节）；当前对 7z 给出容器
    概要而非文件清单。ZIP / TAR / GZIP 不受影响，均为完整列表。
-3. **x86_64 切片不带汇编优化。** arm64 使用手写汇编（`Asm/arm64/LzmaDecOpt.S`）；
-   x86_64 需要 Asmc / UASM 才能启用，故以 `USE_ASM=` 编译，性能略低于 Windows 版。
+3. **只支持 Apple Silicon。** 2026-09-24 起不再构建 x86_64 切片——它占每个
+   可执行体体积的近一半，而 Intel Mac 已无在售机型。Intel 机器会直接报
+   「bad CPU type in executable」（Rosetta 2 是把 x86_64 翻译成 arm64，方向相反，
+   帮不上忙）。上游源码未改，恢复 x86_64 只需把各构建脚本里的分支加回来。
 4. **最低系统版本 11.0**（首个支持 Apple Silicon 的版本）；应用扩展为 12.0。
-5. **不提供 32 位或 Intel 10.x 支持。**
+5. **不提供 32 位支持。**
 
 ---
 

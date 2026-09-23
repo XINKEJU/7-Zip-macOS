@@ -3,8 +3,8 @@
 # build_engine.sh — 构建 7-Zip 引擎内嵌桥接层静态库（技术方案 §3.3 / §4.1）
 #
 # 产出：
-#   dist/lib/lib7zbridge.a      C++ 桥接层 + 上游规定的客户端辅助对象（通用）
-#   dist/lib/lib7zbridgeobjc.a  Objective-C++ 适配层（通用，依赖 Foundation）
+#   dist/lib/lib7zbridge.a      C++ 桥接层 + 上游规定的客户端辅助对象（arm64）
+#   dist/lib/lib7zbridgeobjc.a  Objective-C++ 适配层（arm64，依赖 Foundation）
 #
 # 两个库有意分离：纯 C++ 的桥接层可被命令行测试程序单独链接，
 # 不会把 Foundation/AppKit 依赖带给非 GUI 调用方。
@@ -73,9 +73,22 @@ mkdir -p "$BUILD" "$OUT"
 #   * ar 改为"先写临时文件再 mv 覆盖"，既避免在已存在的归档里残留陈旧成员，
 #     也不必执行任何批量删除（批量删除会被安全钩子拦截并静默中止构建，
 #     表现出来是"改了脚本但产物没变"，非常难查）。
-ARCHS="arm64 x86_64"
+# 只构建 arm64（Apple Silicon）。此前这里是 "arm64 x86_64" 双切片再 lipo 合成；
+# 2026-09-24 起放弃 Intel 支持，理由与恢复方式见仓库 Makefile 文件头。
+ARCHS="arm64"
 BUILT_ARCHS=""
 BUILT_ARCHS_OBJC=""
+
+# 把若干单架构产物合成最终文件。当前只有一个切片，lipo 只是绕一圈的复制，
+# 直接 cp 反而更直白；保留分支是为了将来加回 x86_64 时无需改动调用点。
+combine() {
+    out="$1"; shift
+    if [ "$#" -eq 1 ]; then
+        cp -f "$1" "$out"
+    else
+        lipo -create "$@" -output "$out"
+    fi
+}
 
 for ARCH in $ARCHS; do
     ADIR="$BUILD/$ARCH"
@@ -119,12 +132,12 @@ for ARCH in $ARCHS; do
     BUILT_ARCHS_OBJC="$BUILT_ARCHS_OBJC $ARCH_LIB_OBJC"
 done
 
-echo "== 合并通用二进制 =="
-lipo -create $BUILT_ARCHS -output "$TARGET"
+echo "== 合成最终产物 =="
+combine "$TARGET" $BUILT_ARCHS
 echo "   -> $TARGET"
 lipo -archs "$TARGET" | sed 's/^/   架构: /'
 
-lipo -create $BUILT_ARCHS_OBJC -output "$TARGET_OBJC"
+combine "$TARGET_OBJC" $BUILT_ARCHS_OBJC
 echo "   -> $TARGET_OBJC"
 lipo -archs "$TARGET_OBJC" | sed 's/^/   架构: /'
 

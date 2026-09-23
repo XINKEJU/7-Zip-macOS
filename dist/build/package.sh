@@ -3,7 +3,7 @@
 # package.sh — assemble the redistributable macOS distribution tree.
 #
 # Inputs (all produced by the earlier build steps):
-#   build/7zz                        universal CLI engine (arm64 + x86_64)
+#   build/7zz                        CLI engine (arm64, Apple Silicon)
 #   build/7zz.1, build/7z.1          manual pages
 #   build/README-macos.txt           this port's end-user readme
 #   build/BUILD.md                   how the port was built
@@ -19,8 +19,8 @@
 #
 # Outputs, written to the directory containing this script's parent:
 #   pack/7zip-macos-26.03/           staged FHS-style tree
-#   7zip-macos-26.03-macos-universal.tar.gz
-#   7zip-macos-26.03-macos-universal.tar.gz.sha256
+#   7zip-macos-26.03-macos-arm64.tar.gz
+#   7zip-macos-26.03-macos-arm64.tar.gz.sha256
 #
 # The staged tree is what an installer package (pkgbuild) and the Homebrew
 # formula both consume, so the two stay byte-for-byte consistent.
@@ -33,7 +33,7 @@ SRC="$DIST/../7z2603-src"
 VERSION="26.03"
 NAME="7zip-macos-$VERSION"
 STAGE="$DIST/pack/$NAME"
-TARBALL="$DIST/$NAME-macos-universal.tar.gz"
+TARBALL="$DIST/$NAME-macos-arm64.tar.gz"
 
 echo "== 1. 校验输入 =="
 for f in "$HERE/7zz" "$HERE/7zz.1" "$HERE/7z.1" "$HERE/README-macos.txt" \

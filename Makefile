@@ -1,8 +1,14 @@
 # ===========================================================================
 # 7-Zip 26.03 macOS port — top level build
 #
-#   make            engine -> universal -> app -> pkg     (default)
+#   make            engine -> enginebin -> app -> pkg     (default)
 #   make help       list every target
+#
+# 架构：**只构建 arm64**（Apple Silicon）。此前是 arm64 + x86_64 双切片 lipo
+# 合成的通用二进制，2026-09-24 起放弃 Intel 支持——两个切片里 x86_64 那一半
+# 占了可执行体体积的近一半，而 Intel Mac 已无在售机型。上游源码保持原样，
+# 只是不再编译 cmpl_mac_x64.mak。若要恢复，把下面各步的 x86_64 分支加回来即可
+# （git 历史里有原样实现）。
 #
 # Every step reproduces exactly what dist/build/BUILD.md documents. Read that
 # file before changing anything here: it records the pitfalls that make the
@@ -36,7 +42,7 @@ DEPLOY  ?= 11.0
 VERSION := 26.03
 
 .DEFAULT_GOAL := all
-.PHONY: all engine universal dylib bridge app ql pkg tarball test objc-test appcheck verify check clean distclean help
+.PHONY: all engine enginebin dylib bridge app ql pkg tarball test objc-test appcheck verify check clean distclean help
 
 # ---------------------------------------------------------------------------
 # all — the default pipeline
@@ -44,7 +50,7 @@ VERSION := 26.03
 all: pkg
 
 # ---------------------------------------------------------------------------
-# engine — compile both architecture slices from the vendored upstream source
+# engine — compile the upstream engine executable for arm64
 #
 # NOTE: upstream's makefiles use plain timestamp rules. If a stale object file
 # survives a deletion (macOS security policy can block bulk rm), make will
@@ -52,21 +58,24 @@ all: pkg
 # seems to have no effect, run `make distclean` first, or add -B below.
 # ---------------------------------------------------------------------------
 engine:
-	@printf '==> 1/4 编译 arm64 切片\n'
+	@printf '==> 1/4 编译 arm64 引擎\n'
 	cd '$(BUNDLE)' && MACOSX_DEPLOYMENT_TARGET=$(DEPLOY) $(MAKE) -j$(JOBS) -f ../../cmpl_mac_arm64.mak
-	@printf '==> 1/4 编译 x86_64 切片\n'
-	cd '$(BUNDLE)' && MACOSX_DEPLOYMENT_TARGET=$(DEPLOY) $(MAKE) -j$(JOBS) -f ../../cmpl_mac_x64.mak
 
 # ---------------------------------------------------------------------------
-# universal — lipo the slices together and ad-hoc sign the result
+# enginebin — stage the compiled engine as dist/build/7zz and ad-hoc sign it
 #
-# lipo invalidates the signatures of its inputs, and the kernel refuses to
-# execute an unsigned arm64 slice, so the re-sign is mandatory.
+# This target used to be called `universal`: the engine was a fat binary lipo'd
+# from arm64 + x86_64 slices. Now that only arm64 is shipped there is nothing to
+# lipo — the step degenerates to copy + sign — and the old name would keep
+# claiming a fact that is no longer true.
+#
+# The re-sign is mandatory, not cosmetic: the kernel refuses to execute an
+# unsigned arm64 binary.
 # ---------------------------------------------------------------------------
-universal: engine
-	@printf '==> 2/4 合并通用二进制\n'
+enginebin: engine
+	@printf '==> 2/4 取出引擎可执行体\n'
 	@mkdir -p '$(BUILD)'
-	lipo -create '$(BUNDLE)/b/m_arm64/7zz' '$(BUNDLE)/b/m_x64/7zz' -output '$(ENGINE)'
+	cp -f '$(BUNDLE)/b/m_arm64/7zz' '$(ENGINE)'
 	codesign --force --sign - --timestamp=none '$(ENGINE)'
 	@lipo -archs '$(ENGINE)' | sed 's/^/   架构: /'
 	@codesign --verify --strict '$(ENGINE)' && echo '   签名校验通过'
@@ -99,12 +108,12 @@ bridge: dylib
 # build, because --deep would otherwise strip the extension's sandbox
 # entitlement and ExtensionKit would refuse to register it.
 # ---------------------------------------------------------------------------
-app: universal bridge
+app: enginebin bridge
 	@printf '==> 3/4 组装应用与 Quick Look 扩展\n'
 	sh '$(DIST)/app-src/build_app.sh' '$(ICNS)' '$(DIST)'
 
 # Rebuild the extension alone, against an already assembled application.
-ql: universal
+ql: enginebin
 	APP_BUNDLE='$(APP)' sh '$(DIST)/ql-src/build_ql.sh'
 
 # ---------------------------------------------------------------------------
@@ -141,7 +150,7 @@ pkg: app
 # ---------------------------------------------------------------------------
 # tarball — the distribution tree consumed by the Homebrew formula
 # ---------------------------------------------------------------------------
-tarball: universal
+tarball: enginebin
 	sh '$(BUILD)/package.sh'
 
 # ---------------------------------------------------------------------------
@@ -191,9 +200,9 @@ distclean: clean
 help:
 	@printf '7-Zip %s macOS port\n\n' '$(VERSION)'
 	@printf '用法: make [目标]\n\n'
-	@printf '  all         默认：engine → universal → bridge → app → pkg\n'
-	@printf '  engine      编译 arm64 与 x86_64 两个切片\n'
-	@printf '  universal   合并为通用二进制并 ad-hoc 签名 → dist/build/7zz\n'
+	@printf '  all         默认：engine → enginebin → bridge → app → pkg\n'
+	@printf '  engine      编译 arm64 引擎（上游 Alone2 目标）\n'
+	@printf '  enginebin   取出引擎可执行体并 ad-hoc 签名 → dist/build/7zz\n'
 	@printf '  dylib       构建内嵌引擎动态库 → dist/lib/lib7z.dylib\n'
 	@printf '  bridge      构建桥接层 → dist/lib/lib7zbridge*.a\n'
 	@printf '  app         组装 7-Zip.app（含 Quick Look 扩展）\n'

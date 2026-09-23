@@ -36,7 +36,7 @@ __MACOSX/
 
 # --- upstream build output ------------------------------------------------
 # Upstream keeps compiler products in <target>/b/. One was produced locally
-# while building the universal engine; it must never enter the repository.
+# while building the engine; it must never enter the repository.
 7z2603-src/**/b/
 
 # --- port: command line engine --------------------------------------------

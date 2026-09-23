@@ -29,7 +29,7 @@ NAME="sevenzip-macos"
 VERSION="26.03"
 
 PREFIX="$(mktemp -d)/prefix"
-TARBALL="$DIST/7zip-macos-$VERSION-macos-universal.tar.gz"
+TARBALL="$DIST/7zip-macos-$VERSION-macos-arm64.tar.gz"
 CHECKSUM_FILE="$TARBALL.sha256"
 FAIL=0
 
@@ -55,7 +55,7 @@ echo "  tarball version : $VERSION"
     && ok "version 与 tarball 一致" \
     || bad "version 不一致"
 case "$FORMULA_URL" in
-    *"v$VERSION/7zip-macos-$VERSION-macos-universal.tar.gz") ok "url 指向 v$VERSION 下的同名产物" ;;
+    *"v$VERSION/7zip-macos-$VERSION-macos-arm64.tar.gz") ok "url 指向 v$VERSION 下的同名产物" ;;
     *) bad "url 与产物文件名不符: $FORMULA_URL" ;;
 esac
 [ "$(cat "$CHECKSUM_FILE")" = "$ACTUAL_SHA" ] \

@@ -9,7 +9,7 @@
 #   com.7-zip.7zip   7-Zip application  -> /Applications
 #
 # Inputs (produced by the earlier build steps):
-#   build/7zz                      universal CLI engine
+#   build/7zz                      CLI engine (arm64)
 #   build/7zz.1, build/7z.1        manual pages
 #   build/README-macos.txt         end-user readme
 #   build/BUILD.md                 build notes
@@ -21,7 +21,7 @@
 # Outputs, written to the dist directory:
 #   7-Zip-26.03-macOS.pkg                    integrated installer
 #   7-Zip-26.03-macOS.dmg                    disk image wrapping the installer
-#   7-Zip-26.03-macOS-universal.tar.xz       command line tools only
+#   7-Zip-26.03-macOS-arm64.tar.xz       command line tools only
 #   *.sha256                                 checksums for the above
 #
 set -e
@@ -44,7 +44,7 @@ DMGSTAGE="$WORK/dmg"
 
 PKG="$DIST/7-Zip-$VERSION-macOS.pkg"
 DMG="$DIST/7-Zip-$VERSION-macOS.dmg"
-TARXZ="$DIST/7-Zip-$VERSION-macOS-universal.tar.xz"
+TARXZ="$DIST/7-Zip-$VERSION-macOS-arm64.tar.xz"
 
 APP_SRC="$DIST/7-Zip.app"
 APPEX="$APP_SRC/Contents/PlugIns/7ZipQuickLook.appex"

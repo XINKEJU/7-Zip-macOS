@@ -1,6 +1,6 @@
 #!/bin/sh
 #
-# build_test.sh — 构建桥接层验收测试程序 engine_test（通用二进制）
+# build_test.sh — 构建桥接层验收测试程序 engine_test（arm64）
 #
 # 依赖：
 #   dist/lib/lib7zbridge.a   桥接层（build_engine.sh 产出）
@@ -15,7 +15,6 @@ set -e
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 DIST="$(cd "$HERE/.." && pwd)"
-BUILD="$HERE/.build"
 LIB="$DIST/lib"
 
 for f in "$LIB/lib7zbridge.a" "$LIB/lib7z.dylib" "$HERE/engine_test.cpp"; do
@@ -26,24 +25,18 @@ for f in "$LIB/lib7zbridge.a" "$LIB/lib7z.dylib" "$HERE/engine_test.cpp"; do
     fi
 done
 
-mkdir -p "$BUILD"
 export MACOSX_DEPLOYMENT_TARGET=11.0
 
-for ARCH in arm64 x86_64; do
-    clang++ -std=c++11 -O2 -Wall -w \
-        -arch "$ARCH" -mmacosx-version-min=11.0 \
-        -I"$DIST/engine" \
-        -o "$BUILD/engine_test-$ARCH" \
-        "$HERE/engine_test.cpp" \
-        "$LIB/lib7zbridge.a" \
-        -L"$LIB" -l7z \
-        -Wl,-rpath,"$LIB" \
-        -framework CoreFoundation
-    printf '   %-8s %s bytes\n' "$ARCH" "$(stat -f%z "$BUILD/engine_test-$ARCH")"
-done
-
-lipo -create "$BUILD/engine_test-arm64" "$BUILD/engine_test-x86_64" \
-     -output "$HERE/engine_test"
+# 只构建 arm64：测试程序与它链接的桥接层/引擎必须同架构，否则链接即失败。
+clang++ -std=c++11 -O2 -Wall -w \
+    -arch arm64 -mmacosx-version-min=11.0 \
+    -I"$DIST/engine" \
+    -o "$HERE/engine_test" \
+    "$HERE/engine_test.cpp" \
+    "$LIB/lib7zbridge.a" \
+    -L"$LIB" -l7z \
+    -Wl,-rpath,"$LIB" \
+    -framework CoreFoundation
 chmod 755 "$HERE/engine_test"
 
 echo "   -> $HERE/engine_test"

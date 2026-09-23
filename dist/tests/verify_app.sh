@@ -123,12 +123,24 @@ else
     bad "主程序 minos = $BMIN，高于 11.0"
 fi
 
-for SLICE in arm64 x86_64; do
-    if lipo -archs "$BIN" | grep -qw "$SLICE"; then
-        ok "主程序包含 $SLICE 切片"
-    else
-        bad "主程序缺少 $SLICE 切片"
-    fi
+# 架构回归守卫。2026-09-24 起本项目只发行 arm64（Apple Silicon）：x86_64 切片
+# 曾占每个可执行体体积的近一半，而 Intel Mac 已无在售机型。这里正反都断言——
+# 少一个 arm64 切片是「发布物装不上」，多一个 x86_64 切片是「体积悄悄涨回去」，
+# 两者都是回归。三处可执行体逐一检查（主程序 / 引擎动态库 / QL 扩展）。
+ARCH_TARGETS="$BIN
+$DYLIB
+$APP/Contents/PlugIns/7ZipQuickLook.appex/Contents/MacOS/7ZipQuickLook"
+for T in $ARCH_TARGETS; do
+    [ -f "$T" ] || { bad "缺少可执行体 $T"; continue; }
+    SLICES="$(lipo -archs "$T" 2>/dev/null)"
+    case "$SLICES" in
+        *arm64*) : ;;
+        *) bad "$(basename "$T") 缺少 arm64 切片" ; continue ;;
+    esac
+    case "$SLICES" in
+        *x86_64*) bad "$(basename "$T") 含 x86_64 切片（本项目只发行 arm64）" ;;
+        *) ok "$(basename "$T") 架构 = $SLICES（仅 Apple Silicon）" ;;
+    esac
 done
 
 # ---------------------------------------------------------------------------
