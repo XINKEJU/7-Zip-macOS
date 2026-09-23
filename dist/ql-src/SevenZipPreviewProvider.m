@@ -109,9 +109,15 @@ static void SevenZipDebugForce(NSString *format, ...)
 
 #pragma mark - Tool discovery
 
-// Locate the 7zz engine. The extension bundle is self-contained, so the
-// embedded copy is authoritative; system locations are only a fallback for
-// development builds where the engine was not embedded.
+// Locate the 7zz engine inside this extension bundle.
+//
+// NOTE: the engine is no longer embedded — it cannot be executed under an
+// ad-hoc signature, because `com.apple.security.inherit` is a restricted
+// entitlement. See the header of ql-src/build_ql.sh for the measurement.
+// This lookup therefore returns nil in the shipped configuration and the
+// in-process reader serves every preview. The lookup and the runner below are
+// kept intact so the full-engine path comes back the moment the project moves
+// to a Developer ID signature and re-embeds the engine.
 //
 // Bundle lookup inside an extension executable is not as reliable as in an
 // app, so several independent strategies are tried and `gProbeLog` records
@@ -145,11 +151,11 @@ static NSString *SevenZipFindTool(void)
         [candidates addObject:[contents stringByAppendingPathComponent:@"Resources/7zz"]];
     }
 
-    [candidates addObjectsFromArray:@[
-        @"/usr/local/libexec/7zip/7zz",
-        @"/usr/local/bin/7zz",
-        @"/opt/homebrew/bin/7zz",
-    ]];
+    // System-wide locations are deliberately NOT probed. The extension runs
+    // sandboxed and cannot execute a binary outside its own bundle, so such a
+    // probe only ever turned up a path that then failed to spawn with EPERM —
+    // and it made preview behaviour depend on whatever the host machine
+    // happened to have installed.
 
     NSMutableString *probe = [NSMutableString string];
     [probe appendFormat:@"mainBundle=%@\nclassBundle=%@\n",

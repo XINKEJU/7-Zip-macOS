@@ -7,13 +7,15 @@
 #     (lib7zbridgeobjc.a + lib7zbridge.a) and loads lib7z.dylib from
 #     Contents/Frameworks, so archive work runs inside the app process
 #     (no 7zz child process for the app's own operations);
-#   * no 7zz is shipped in the application bundle itself. The Quick Look
-#     extension is self-contained: ql-src/build_ql.sh places its own copy at
-#     Contents/PlugIns/7ZipQuickLook.appex/Contents/Resources/7zz and signs it
-#     with the helper entitlements (7zz-helper.entitlements) that the sandbox
-#     requires. See ql-src/SevenZipPreviewProvider.m — SevenZipFindTool() only
-#     ever resolves inside that appex, never in the host application, so an
-#     extra copy here would be 6 MB of dead payload (audit 2026-09-22).
+#   * no 7zz is shipped anywhere in the application bundle — not even in the
+#     Quick Look extension. The extension parses archives in-process
+#     (ql-src/ArchiveReader.c). Earlier builds embedded a 6 MB copy of the
+#     engine in the appex and signed it with `com.apple.security.inherit`, but
+#     that entitlement is restricted and never takes effect under the ad-hoc
+#     signature this project ships with: measured 2026-09-24, every spawn was
+#     refused with EPERM and the engine produced 0 bytes. The embedded copy was
+#     dead payload. See the header of ql-src/build_ql.sh for the evidence and
+#     for how to restore the path under a Developer ID signature.
 #
 # Usage:  sh build_app.sh <path-to-7zip.icns> <output-dir>
 

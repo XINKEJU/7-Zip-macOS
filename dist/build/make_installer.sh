@@ -73,15 +73,15 @@ check "$APP_SRC/Contents/MacOS/7-Zip" "7-Zip.app executable"
 check "$APPEX/Contents/MacOS/7ZipQuickLook" "Quick Look appex executable"
 check "$SRC/DOC/License.txt"          "upstream License.txt"
 
-# The Quick Look extension must carry its own 7zz helper — it is the only copy
-# the sandbox can execute (SevenZipFindTool() never resolves into the host app,
-# and only an inherit-entitled helper may be spawned). The application bundle
-# itself deliberately ships no 7zz (audit 2026-09-22: it was 6.01 MB of dead
-# payload).
-if [ -f "$APPEX/Contents/Resources/7zz" ]; then
-    printf '   ok      embedded 7zz helper in Quick Look appex\n'
-else
-    printf '   MISSING embedded 7zz helper in Quick Look appex\n' >&2
+# The Quick Look extension no longer embeds a 7zz helper (removed 2026-09-24).
+# It parses archives in-process (ql-src/ArchiveReader.c) because the sandboxed
+# helper could never actually run: `com.apple.security.inherit` is a restricted
+# entitlement and an ad-hoc signed helper is refused with EPERM. Measured on the
+# shipped bundle — posix_spawn returned "Operation not permitted", the engine
+# produced 0 bytes, and every preview came from the in-process reader. Any 7zz
+# inside the shipped bundles is therefore a regression.
+if [ -e "$APPEX/Contents/Resources/7zz" ]; then
+    printf '   UNEXPECTED 7zz in Quick Look appex (removed 2026-09-24)\n' >&2
     missing=1
 fi
 if [ -e "$APP_SRC/Contents/Resources/7zz" ]; then

@@ -31,7 +31,7 @@ fi
 
 BIN="$APP/Contents/MacOS/7-Zip"
 DYLIB="$APP/Contents/Frameworks/lib7z.dylib"
-QLTOOL="$APP/Contents/PlugIns/7ZipQuickLook.appex/Contents/Resources/7zz"
+APPEX_7ZZ="$APP/Contents/PlugIns/7ZipQuickLook.appex/Contents/Resources/7zz"
 
 # ---------------------------------------------------------------------------
 head1 "1. 包结构"
@@ -42,16 +42,17 @@ head1 "1. 包结构"
 [ -f "$APP/Contents/Resources/THIRD_PARTY.md" ] \
     && ok "第三方归属文档已随包分发" || bad "缺少 THIRD_PARTY.md（应用内许可入口会回退到内置摘要）"
 
-# 应用级 7zz 已于 2026-09-22 审计中移除：SevenZipFindTool() 的候选列表只解析到
-# appex 自身，且沙盒只允许执行带 com.apple.security.inherit 的助手（宿主应用那份
-# 无任何 entitlement），运行时实测其日志亦落在 appex 内。因此这里反过来守卫：
-# 真正的助手在 appex 里且带权限，应用包里不该再有第二份 6 MB 副本。
-[ -x "$QLTOOL" ] \
-    && ok "Quick Look 扩展自带 7zz 助手" || bad "缺少 appex 内的 7zz（Quick Look 预览会失效）"
-if [ -f "$QLTOOL" ]; then
-    codesign -d --entitlements - "$QLTOOL" 2>/dev/null | grep -q "com.apple.security.inherit" \
-        && ok "助手带 inherit 权限（沙盒可执行）" || bad "助手缺少 inherit 权限，沙盒下无法启动"
-fi
+# 7zz 已全面移除（2026-09-24）。此前 appex 内嵌了一份 7zz 并签以
+# com.apple.security.inherit，但该权限属**受限权限**，ad-hoc 签名（本项目的
+# 分发方式，TeamIdentifier=not set）无法使其生效。实测扩展自身日志：
+#   engine unavailable: posix_spawn 失败：Operation not permitted (errno 1)
+#   engine run: raw=0 bytes
+#   native reader: recognised=1 format=ZIP complete=1 count=4
+# 即引擎从未产出过一个字节，全部预览内容由进程内 reader 给出。那份 6,012,576 B
+# （占整个 .app 的 48%）因此是纯死载荷。扩展现改为进程内解析
+# （ql-src/ArchiveReader.c）。下面反向守卫：任何位置再出现 7zz 副本都算回归。
+[ ! -e "$APPEX_7ZZ" ] \
+    && ok "appex 内无 7zz（预览由进程内 reader 解析）" || bad "appex 内仍有 7zz，属已移除的死载荷"
 [ ! -e "$APP/Contents/Resources/7zz" ] \
     && ok "应用包内无冗余 7zz（不复刻 6 MB 死载荷）" || bad "应用包内仍有冗余 Resources/7zz"
 

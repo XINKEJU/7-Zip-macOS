@@ -224,17 +224,22 @@ root-app/Applications/7-Zip.app/       组件包 com.7-zip.7zip  → /Applicatio
 ├── Contents/Frameworks/lib7z.dylib    (755, 内嵌引擎；LGPL 可替换库)
 ├── Contents/Resources/THIRD_PARTY.md  (第三方归属与许可)
 └── Contents/PlugIns/7ZipQuickLook.appex   (Quick Look 预览扩展)
-    └── Contents/Resources/7zz         (755, 沙盒扩展自带的 helper；带 inherit 权限)
+    └── Contents/MacOS/7ZipQuickLook   (扩展可执行体；进程内解析归档)
 
-> **为什么内嵌 `lib7z.dylib`、而 `7zz` 只出现在 Quick Look 扩展里？**
+> **为什么应用包里一份 `7zz` 都没有？**
 > 前端自身的归档操作全部通过 `lib7z.dylib` 在**进程内**完成（技术方案 §1.3），
 > 不再派生 `7zz`。Quick Look 扩展运行在 App Sandbox 中，无法加载应用包的
-> 动态库，因此由 `ql-src/build_ql.sh` 把**自己的一份** `7zz` 放进 appex 并配以
-> `7zz-helper.entitlements`（含 `com.apple.security.inherit`）再签名；
-> `SevenZipFindTool()` 的候选列表只解析到 appex 自身（见 `ql-src/SevenZipPreviewProvider.m`），
-> 从不指向宿主应用。因此宿主应用包**不再**携带 `7zz`——审计（2026-09-22）确认
-> 那份 6.01 MB 的副本从不参与运行，属纯死载荷，移除后预览能力不受影响。
-> 若日后要在应用内也派生 `7zz`，必须连同 helper 权限一起重新评估，不能简单复制。
+> 动态库，因此扩展改为**进程内解析**（`ql-src/ArchiveReader.c`：ZIP/ZIP64、
+> TAR、GZIP 给出完整条目列表，BZIP2/XZ/ZSTD/7z/RAR/CAB/ISO 识别容器并给出摘要）。
+> 早期版本曾把一份 `7zz`（6,012,576 B）放进 appex 并签以
+> `com.apple.security.inherit`；但该权限属**受限权限**，**ad-hoc 签名
+> （`codesign --sign -`，`TeamIdentifier=not set`，本项目的分发方式）
+> 无法使其生效**。2026-09-24 实测扩展自身日志：
+> `posix_spawn 失败：Operation not permitted (errno 1)`、`engine run: raw=0 bytes`、
+> 内容全部来自 `native reader`——即引擎**从未成功执行过一次**，那份占整个
+> `.app` 48% 的副本属纯死载荷，已移除（`.app` 由 12.58 MB 降至 6.57 MB）。
+> 证据：`~/Library/Containers/org.7-zip.macos.quicklook/Data/tmp/7zip-quicklook.log`。
+> 若日后改用 Developer ID 签名，可按 `ql-src/build_ql.sh` 头部注释恢复该路径。
 
 ```bash
 # 一条命令完成全部打包
@@ -388,7 +393,9 @@ xcrun stapler staple 7-Zip-26.03-macOS-signed.pkg
 
 - 应用包本身也需先用 Developer ID Application 证书签名，再构建安装包，
   否则嵌套的 Quick Look 扩展无法通过 `com.apple.security.inherit` 获得团队身份，
-  也就无法派生辅助进程（当前实现因此改为扩展内直接解析归档，见 README）。
+  也就无法派生辅助进程。当前实现因此改为**扩展内直接解析归档**
+  （`ql-src/ArchiveReader.c`），不再依赖任何子进程——好处是 ad-hoc 签名的分发
+  版本同样能正常预览（2026-09-24 实测确认，见上文"为什么应用包里一份 7zz 都没有"）。
 - 本机仅存在 `IBOS Local Signing` 身份，与 7-Zip 无关，不应挪用签名。
 
 ---
