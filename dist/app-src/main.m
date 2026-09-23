@@ -2417,10 +2417,13 @@ static NSString *LevelNameForTick(NSInteger tick)
 
 - (NSArray<NSToolbarItemIdentifier> *)toolbarDefaultItemIdentifiers:(NSToolbar *)tb
 {
-    return @[@"open", @"new", NSToolbarSpaceItemIdentifier,
+    // 顺序即溢出优先级：窗口是固定的紧凑尺寸，排在后面的项会被收进「>>」。
+    // 压缩选项是高频入口（也是 ⌘, 的落点），与「新建归档」成对放在常驻区，
+    // 不留在溢出菜单里。
+    return @[@"open", @"new", @"options", NSToolbarSpaceItemIdentifier,
              @"extract", @"add", @"delete", @"test",
              NSToolbarFlexibleSpaceItemIdentifier,
-             @"search", @"options", @"log"];
+             @"search", @"log"];
 }
 
 - (NSArray<NSToolbarItemIdentifier> *)toolbarAllowedItemIdentifiers:(NSToolbar *)tb
@@ -2456,12 +2459,20 @@ static NSString *LevelNameForTick(NSInteger tick)
     };
     NSArray *spec = map[ident];
     if (!spec) return nil;
+    NSButton *btn = spec[0];
 
     NSToolbarItem *it = [[NSToolbarItem alloc] initWithItemIdentifier:ident];
-    it.view = spec[0];
+    it.view = btn;
     it.label = spec[1];
     it.paletteLabel = spec[1];
     it.toolTip = spec[1];
+    // 窗口变窄时 AppKit 会把放不下的 item 收进「>>」溢出菜单，而菜单项执行的是
+    // **item 自己**的 target/action —— 自定义 view 不参与菜单。只设 view 会让那些
+    // 被收起来的按钮在菜单里灰着、点了毫无反应。把按钮的 target/action/image
+    // 原样转给 item：工具栏内仍由按钮视图响应，溢出菜单项也能正常工作。
+    it.target = btn.target;
+    it.action = btn.action;
+    it.image = btn.image;
     return it;
 }
 
