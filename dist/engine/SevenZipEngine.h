@@ -133,6 +133,11 @@ struct CompressionOptions {
   bool hasCompressHeader = false; // -mhc（7z）
   bool compressHeader = true;
 
+  // 压缩时是否排除 macOS/Windows 系统元数据垃圾（.DS_Store / __MACOSX / ._* /
+  // Thumbs.db …）。默认开启；关闭后这些文件会按普通文件写入归档。
+  // 注意：归档「列表」侧的同类过滤始终生效，不受本开关影响。
+  bool excludeMacJunk = true;
+
   bool storeAltStreams = false;
 };
 

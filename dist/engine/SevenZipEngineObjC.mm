@@ -353,6 +353,7 @@ z7::CompressionOptions OptionsToCxx(Z7CompressionOptions *o) {
     c.encryptHeader = o.encryptHeader;
     c.hasCompressHeader = o.hasCompressHeader;
     c.compressHeader = o.compressHeader;
+    c.excludeMacJunk = o.excludeMacJunk;
     return c;
 }
 
@@ -616,6 +617,7 @@ z7::CompressionOptions OptionsToCxx(Z7CompressionOptions *o) {
         _password = @"";
         _encryptHeader = YES;
         _compressHeader = YES;
+        _excludeMacJunk = YES;
     }
     return self;
 }
@@ -647,6 +649,7 @@ z7::CompressionOptions OptionsToCxx(Z7CompressionOptions *o) {
     c.encryptHeader = self.encryptHeader;
     c.hasCompressHeader = self.hasCompressHeader;
     c.compressHeader = self.compressHeader;
+    c.excludeMacJunk = self.excludeMacJunk;
     return c;
 }
 

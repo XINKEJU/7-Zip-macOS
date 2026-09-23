@@ -1176,6 +1176,8 @@ Z7_COM7F_IMF(CUpdateCallback::CryptoGetTextPassword2(Int32 *passwordIsDefined,
 // ---------------------------------------------------------------------------
 
 // macOS / Windows 系统元数据垃圾文件：压缩与列表时默认排除，避免污染归档。
+// 压缩侧是否排除由 CompressionOptions::excludeMacJunk 决定（面板上的
+// 「排除 Mac 资源文件」开关）；列表侧（getAllItems）始终排除。
 // 覆盖 .DS_Store、__MACOSX（Apple 的 zip 资源派生容器）、._*（AppleDouble 资源文件）、
 // .AppleDouble、.Spotlight-V100、.Trashes 等 macOS 产物，以及 Thumbs.db / Desktop.ini 等 Windows 产物。
 static bool IsMacJunkComponent(const std::string &name) {
@@ -1216,14 +1218,15 @@ static bool IsMacJunkPath(const std::string &path) {
 }
 
 static void CollectItems(const FString &diskPath, const UString &arcPath,
-                         std::vector<SDirItem> &out, Callback *cb, unsigned depth) {
+                         std::vector<SDirItem> &out, Callback *cb, unsigned depth,
+                         bool excludeJunk) {
   if (depth > 128) {
     if (cb) cb->OnLog(LogLevel::Warning, "目录层级过深，已停止递归：" + ToUtf8(arcPath));
     return;
   }
 
   // 排除 macOS/Windows 系统元数据垃圾文件（.DS_Store / __MACOSX / ._* / ...）
-  if (IsMacJunkComponent(ToUtf8(arcPath))) {
+  if (excludeJunk && IsMacJunkComponent(ToUtf8(arcPath))) {
     if (cb) cb->OnLog(LogLevel::Warning, "已跳过系统元数据文件：" + ToUtf8(arcPath));
     return;
   }
@@ -1280,7 +1283,7 @@ static void CollectItems(const FString &diskPath, const UString &arcPath,
       const char *nm = ent->d_name;
       if (strcmp(nm, ".") == 0 || strcmp(nm, "..") == 0) continue;
       // 跳过 macOS/Windows 系统元数据垃圾文件，避免污染归档
-      if (IsMacJunkComponent(std::string(nm))) {
+      if (excludeJunk && IsMacJunkComponent(std::string(nm))) {
         if (cb) cb->OnLog(LogLevel::Warning, "已跳过系统元数据文件：" + JoinPath(dirUtf8, std::string(nm)));
         continue;
       }
@@ -1288,7 +1291,7 @@ static void CollectItems(const FString &diskPath, const UString &arcPath,
       UString childArc = arcPath;
       childArc += L'/';
       childArc += ToUString(std::string(nm));
-      CollectItems(ToFString(childUtf8), childArc, out, cb, depth + 1);
+      CollectItems(ToFString(childUtf8), childArc, out, cb, depth + 1, excludeJunk);
     }
     closedir(d);
   } else {
@@ -1961,7 +1964,7 @@ bool create(const std::vector<std::string> &utf8InputPaths,
       error = "无法从路径得到名称：" + base;
       return false;
     }
-    CollectItems(ToFString(base), name, items, cb, 0);
+    CollectItems(ToFString(base), name, items, cb, 0, options.excludeMacJunk);
   }
   if (items.empty()) {
     error = "没有可压缩的条目";
@@ -2088,7 +2091,7 @@ bool Archive::addItems(const std::vector<std::string> &utf8InputPaths,
       error = "无法从路径得到名称：" + base;
       return false;
     }
-    CollectItems(ToFString(base), name, newItems, cb, 0);
+    CollectItems(ToFString(base), name, newItems, cb, 0, options.excludeMacJunk);
   }
   if (newItems.empty()) {
     error = "没有可添加的条目";

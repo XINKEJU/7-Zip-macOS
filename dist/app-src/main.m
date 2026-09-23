@@ -313,6 +313,8 @@ typedef NS_ENUM(NSInteger, Z7TaskKind) {
 @property (nonatomic, assign) BOOL replaceExisting;
 @property (nonatomic, assign) BOOL testMode;
 @property (nonatomic, assign) BOOL overwrite;
+/// 建包成功后立即用同一个引擎回读校验一遍（面板上的「验证压缩完整性」）
+@property (nonatomic, assign) BOOL verifyAfterCreate;
 
 /// 打开 / 列表类任务的结果回传
 @property (nonatomic, strong) NSArray<Z7Item *> *openedItems;
@@ -513,11 +515,34 @@ typedef NS_ENUM(NSInteger, Z7TaskKind) {
 
 - (BOOL)runCreate:(NSError **)error
 {
-    return [Z7Engine createArchive:self.archivePath
-                         fromPaths:self.inputPaths
-                           options:self.options
-                          callback:self
-                             error:error];
+    if (![Z7Engine createArchive:self.archivePath
+                       fromPaths:self.inputPaths
+                         options:self.options
+                        callback:self
+                           error:error]) {
+        return NO;
+    }
+    if (!self.verifyAfterCreate) return YES;
+
+    // 「验证压缩完整性」：用同一个引擎把刚建好的包回读校验一遍（testMode，不写盘）。
+    NSError *verr = nil;
+    Z7Archive *a = [Z7Archive openPath:self.archivePath
+                              password:(self.options.password.length ? self.options.password : nil)
+                              callback:self
+                                 error:&verr];
+    if (!a) {
+        if (error) *error = verr ?: [NSError errorWithDomain:Z7ErrorDomain code:-1 userInfo:
+                                     @{NSLocalizedDescriptionKey: @"归档已生成，但无法重新打开校验"}];
+        return NO;
+    }
+    self.archive = a;
+    if (![a extractItems:nil to:@"" testMode:YES overwrite:NO atomicFiles:NO
+             createLinks:NO callback:self error:&verr]) {
+        if (error) *error = verr ?: [NSError errorWithDomain:Z7ErrorDomain code:-1 userInfo:
+                                     @{NSLocalizedDescriptionKey: @"完整性校验未通过"}];
+        return NO;
+    }
+    return YES;
 }
 
 - (BOOL)runAdd:(NSError **)error
@@ -745,6 +770,61 @@ static NSImage *FileIcon(NSString *name, BOOL isDir, BOOL isLink)
 
 @end
 
+#pragma mark - 分组卡片（Keka 风格压缩面板的分组容器）
+
+/// 浅色下是一张白色卡片，深色下比弹层底色略亮，圆角 10。语义色在深色下没有
+/// 「比弹层更亮」的档位（controlBackgroundColor 反而更暗），故按外观解析后
+/// 自己给一层白，保证两种外观下都是「卡片浮在底色之上」的层次。
+@interface Z7CardView : NSView
+@end
+
+@implementation Z7CardView
+
+- (instancetype)initWithFrame:(NSRect)frame
+{
+    if ((self = [super initWithFrame:frame])) {
+        self.wantsLayer = YES;
+        self.layer.cornerRadius = 10;
+        self.layer.masksToBounds = YES;
+        [self z7_applyFill];
+    }
+    return self;
+}
+
+- (void)viewDidChangeEffectiveAppearance
+{
+    [super viewDidChangeEffectiveAppearance];
+    [self z7_applyFill];
+}
+
+- (void)z7_applyFill
+{
+    NSAppearanceName name = [self.effectiveAppearance bestMatchFromAppearancesWithNames:
+                             @[NSAppearanceNameAqua, NSAppearanceNameDarkAqua]];
+    BOOL dark = [name isEqualToString:NSAppearanceNameDarkAqua];
+    NSColor *fill = dark ? [NSColor colorWithSRGBRed:1.0 green:1.0 blue:1.0 alpha:0.07]
+                         : [NSColor whiteColor];
+    self.layer.backgroundColor = fill.CGColor;
+}
+
+@end
+
+/// 面板底色。与状态栏同一取舍：不用弹层自带的玻璃材质——材质会透出弹层背后的
+/// 窗口与桌面，浅色外观下前景文字的对比度不可控；直接用 windowBackgroundColor
+/// 绘制，浅色/深色下都与系统窗口背景一致（弹层会把内容裁进自己的圆角里）。
+@interface Z7PanelView : NSView
+@end
+
+@implementation Z7PanelView
+
+- (void)drawRect:(NSRect)dirty
+{
+    [[NSColor windowBackgroundColor] setFill];
+    NSRectFill(dirty);
+}
+
+@end
+
 #pragma mark - 主控制器
 
 @interface MainViewController : NSViewController
@@ -782,12 +862,32 @@ static NSImage *FileIcon(NSString *name, BOOL isDir, BOOL isLink)
 @property (nonatomic, strong) NSPopUpButton *solidBlockPop;
 @property (nonatomic, strong) NSButton *autoThreadsCheck;
 @property (nonatomic, strong) NSTextField *threadsField;
-@property (nonatomic, strong) NSPopUpButton *volumePop;
+@property (nonatomic, strong) NSComboBox *volumeCombo;      // 分卷（可编辑，占位「例如： 5 MB」）
 @property (nonatomic, strong) NSPopUpButton *encryptMethPop;
-@property (nonatomic, strong) NSSecureTextField *password;
-@property (nonatomic, strong) NSButton *encryptHeaderCheck;
-@property (nonatomic, strong) NSButton *compressHeaderCheck;
-@property (nonatomic, strong) NSButton *fullPathsCheck;
+@property (nonatomic, strong) NSSecureTextField *password;      // 密码（掩码态）
+@property (nonatomic, strong) NSTextField *passwordPlain;       // 密码（明文回显态，与上一个同框互斥）
+@property (nonatomic, strong) NSSecureTextField *passwordRepeat; // 重复（掩码态）
+@property (nonatomic, strong) NSTextField *passwordRepeatPlain;  // 重复（明文回显态）
+@property (nonatomic, strong) NSButton *passwordLockBtn;         // 锁：切换密码字段可编辑性
+@property (nonatomic, strong) NSButton *passwordEyeBtn;          // 眼睛：切换明文回显
+@property (nonatomic, assign) BOOL passwordRevealed;
+@property (nonatomic, assign) BOOL passwordLocked;
+
+@property (nonatomic, strong) NSButton *encryptHeaderCheck;     // 分组内：加密文件名
+@property (nonatomic, strong) NSButton *sfxCheck;               // 分组内：Windows 自解压文件
+@property (nonatomic, strong) NSButton *compressHeaderCheck;     // 折叠区：压缩头
+@property (nonatomic, strong) NSButton *fullPathsCheck;          // 折叠区：保存完整路径
+@property (nonatomic, strong) NSButton *excludeJunkCheck;        // 排除 Mac 资源文件
+@property (nonatomic, strong) NSButton *verifyAfterCheck;        // 验证压缩完整性
+@property (nonatomic, strong) NSButton *deleteSourceCheck;       // 压缩完成后删除源文件
+@property (nonatomic, strong) NSButton *separateCheck;           // 分别压缩每个文件
+
+@property (nonatomic, strong) NSButton *advancedToggle;          // 「高级参数」折叠开关
+@property (nonatomic, strong) NSView *advancedBox;               // 折叠区内容
+@property (nonatomic, assign) BOOL advancedExpanded;
+@property (nonatomic, strong) NSLayoutConstraint *advancedZeroHeight; // 收起时把折叠区压成 0 高
+@property (nonatomic, strong) NSArray<NSLayoutConstraint *> *advancedContentConstraints;
+
 @property (nonatomic, strong) NSPopUpButton *updateModePop;
 @property (nonatomic, strong) NSPopover *optionsPopover;
 
@@ -852,6 +952,15 @@ static NSImage *FileIcon(NSString *name, BOOL isDir, BOOL isLink)
 - (void)showStatus:(NSString *)s;
 - (void)appendLog:(NSString *)s;
 - (void)appendLog:(NSString *)s reveal:(BOOL)reveal;
+- (void)syncPasswordFieldState;
+- (void)syncOptionsPopoverSize;
+- (NSString *)passwordText;
+- (BOOL)validatePasswordMatch:(NSString **)message;
+- (void)runCreateBatch:(NSArray<NSArray *> *)batch
+                 index:(NSUInteger)idx
+               options:(Z7CompressionOptions *)opts;
+- (void)trashPaths:(NSArray<NSString *> *)paths;
+- (void)updateAdvancedToggleStyle;
 @end
 
 @implementation MainViewController
@@ -940,6 +1049,57 @@ static NSImage *FileIcon(NSString *name, BOOL isDir, BOOL isLink)
     return b;
 }
 
+/// 无边框图标按钮（用于密码行的锁 / 眼睛）。SF Symbol 缺失时退化为文字，
+/// 与 toolbarButton 同一策略：宁可显示文字，也不要出现空白按钮。
+- (NSButton *)iconButton:(NSString *)symbol fallback:(NSString *)text action:(SEL)sel
+{
+    NSImage *img = Symbol(symbol, 13.0);
+    NSButton *b = img ? [NSButton buttonWithImage:img target:self action:sel]
+                      : [NSButton buttonWithTitle:text target:self action:sel];
+    b.bordered = NO;
+    b.bezelStyle = NSBezelStyleRegularSquare;
+    if (img) b.imagePosition = NSImageOnly;
+    b.contentTintColor = [NSColor secondaryLabelColor];
+    b.refusesFirstResponder = YES;
+    b.translatesAutoresizingMaskIntoConstraints = NO;
+    return b;
+}
+
+#pragma mark 压缩方式档位（Keka 面板的 6 档滑杆）
+
+/// 滑杆有 6 个刻度位，对应 7-Zip 的 -mx = 0/1/3/5/7/9。
+/// 面板上只给 0/1/5/9 四档加文字（存储 快速 正常 慢速），与参考面板一致。
+static const NSInteger kLevelTickValues[6] = {0, 1, 3, 5, 7, 9};
+
+static NSInteger LevelForTick(NSInteger tick)
+{
+    if (tick < 0) tick = 0;
+    if (tick > 5) tick = 5;
+    return kLevelTickValues[tick];
+}
+
+static NSInteger TickForLevel(NSInteger level)
+{
+    NSInteger best = 3, bestDelta = 99;
+    for (NSInteger i = 0; i < 6; i++) {
+        NSInteger d = labs(kLevelTickValues[i] - level);
+        if (d < bestDelta) { bestDelta = d; best = i; }
+    }
+    return best;
+}
+
+static NSString *LevelNameForTick(NSInteger tick)
+{
+    switch (tick) {
+        case 0: return @"存储";
+        case 1: return @"快速";
+        case 2: return @"较快";
+        case 3: return @"正常";
+        case 4: return @"较好";
+        default: return @"慢速";
+    }
+}
+
 #pragma mark 压缩选项控件（§5.1）
 
 - (void)buildCompressionControls
@@ -958,13 +1118,16 @@ static NSImage *FileIcon(NSString *name, BOOL isDir, BOOL isLink)
 
     self.levelSlider = [[NSSlider alloc] initWithFrame:NSZeroRect];
     self.levelSlider.translatesAutoresizingMaskIntoConstraints = NO;
-    self.levelSlider.minValue = 0; self.levelSlider.maxValue = 9;
-    self.levelSlider.integerValue = 5;
+    // 6 档（0/1/3/5/7/9），与 Keka 压缩方式滑杆一致；面板只给 4 个档位加标签。
+    self.levelSlider.minValue = 0; self.levelSlider.maxValue = 5;
+    self.levelSlider.numberOfTickMarks = 6;
+    self.levelSlider.allowsTickMarkValuesOnly = YES;
+    self.levelSlider.integerValue = TickForLevel(5);
     self.levelSlider.continuous = YES;
     self.levelSlider.target = self;
     self.levelSlider.action = @selector(levelChanged:);
-    self.levelLabel = [self label:@"等级 5"];
-    self.levelLabel.font = [NSFont systemFontOfSize:12];
+    self.levelLabel = [self label:@"正常"];
+    self.levelLabel.font = [NSFont systemFontOfSize:13 weight:NSFontWeightMedium];
     self.levelLabel.textColor = [NSColor labelColor];
 
     // 方法 / 字典 / 字长 / 快速字节 / 匹配查找器
@@ -985,7 +1148,7 @@ static NSImage *FileIcon(NSString *name, BOOL isDir, BOOL isLink)
                          action:@selector(updateOptionsSummary:)];
 
     // 固实
-    self.solidCheck = [NSButton checkboxWithTitle:@"固实" target:self action:@selector(solidChanged:)];
+    self.solidCheck = [NSButton checkboxWithTitle:@"固实归档" target:self action:@selector(solidChanged:)];
     self.solidCheck.translatesAutoresizingMaskIntoConstraints = NO;
     self.solidCheck.state = NSControlStateValueOn;
     self.solidBlockPop = [self popup:@[@"分块不限", @"10 MB", @"64 MB", @"256 MB", @"1 GB"]
@@ -1003,22 +1166,64 @@ static NSImage *FileIcon(NSString *name, BOOL isDir, BOOL isLink)
     self.threadsField.target = self;
     self.threadsField.action = @selector(updateOptionsSummary:);
 
-    // 分卷
-    self.volumePop = [self popup:@[@"不分卷", @"1 MB", @"10 MB", @"100 MB", @"1 GB"]
-                          action:@selector(updateOptionsSummary:)];
+    // 分卷：可编辑组合框，既能选预设也能直接敲「5 MB」这类自定义容量
+    self.volumeCombo = [[NSComboBox alloc] initWithFrame:NSZeroRect];
+    self.volumeCombo.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.volumeCombo addItemsWithObjectValues:@[@"不分卷", @"1 MB", @"5 MB", @"10 MB",
+                                                 @"100 MB", @"700 MB", @"1 GB", @"4 GB"]];
+    self.volumeCombo.placeholderString = @"例如： 5 MB";
+    self.volumeCombo.completes = YES;
+    self.volumeCombo.numberOfVisibleItems = 8;
+    self.volumeCombo.stringValue = @"";   // 空 = 不分卷，界面上显示占位提示
+    self.volumeCombo.target = self;
+    self.volumeCombo.action = @selector(updateOptionsSummary:);
 
     // 加密
     self.encryptMethPop = [self popup:@[@"AES256", @"AES128", @"ZipCrypto"]
                                action:@selector(updateOptionsSummary:)];
     self.password = [[NSSecureTextField alloc] initWithFrame:NSZeroRect];
     self.password.translatesAutoresizingMaskIntoConstraints = NO;
-    self.password.placeholderString = @"新建归档的密码（可选）";
     self.password.target = self;
-    self.password.action = @selector(updateOptionsSummary:);
+    self.password.action = @selector(passwordEdited:);
+
+    // 明文回显态：NSSecureTextField 无法在运行期切换掩码，故用一个同位置的
+    // 普通文本框与之互斥显示（眼睛按钮），两者始终同步取值。
+    self.passwordPlain = [[NSTextField alloc] initWithFrame:NSZeroRect];
+    self.passwordPlain.translatesAutoresizingMaskIntoConstraints = NO;
+    self.passwordPlain.hidden = YES;
+    self.passwordPlain.target = self;
+    self.passwordPlain.action = @selector(passwordEdited:);
+
+    self.passwordRepeat = [[NSSecureTextField alloc] initWithFrame:NSZeroRect];
+    self.passwordRepeat.translatesAutoresizingMaskIntoConstraints = NO;
+    self.passwordRepeat.target = self;
+    self.passwordRepeat.action = @selector(passwordEdited:);
+
+    self.passwordRepeatPlain = [[NSTextField alloc] initWithFrame:NSZeroRect];
+    self.passwordRepeatPlain.translatesAutoresizingMaskIntoConstraints = NO;
+    self.passwordRepeatPlain.hidden = YES;
+    self.passwordRepeatPlain.target = self;
+    self.passwordRepeatPlain.action = @selector(passwordEdited:);
+
+    self.passwordLockBtn = [self iconButton:@"lock.open" fallback:@"锁"
+                                     action:@selector(passwordLockClicked:)];
+    self.passwordLockBtn.toolTip = @"锁定密码栏，避免误改";
+    self.passwordEyeBtn = [self iconButton:@"eye" fallback:@"显示"
+                                    action:@selector(passwordEyeClicked:)];
+    self.passwordEyeBtn.toolTip = @"显示/隐藏密码";
+
     self.encryptHeaderCheck = [NSButton checkboxWithTitle:@"加密文件名" target:self
-                                                   action:@selector(updateOptionsSummary:)];
+                                                   action:@selector(optionsFlagChanged:)];
     self.encryptHeaderCheck.translatesAutoresizingMaskIntoConstraints = NO;
     self.encryptHeaderCheck.state = NSControlStateValueOn;
+    self.encryptHeaderCheck.toolTip = @"需要先设置密码；否则归档头不会被加密";
+
+    self.sfxCheck = [NSButton checkboxWithTitle:@"Windows 自解压文件" target:self
+                                         action:@selector(optionsFlagChanged:)];
+    self.sfxCheck.translatesAutoresizingMaskIntoConstraints = NO;
+    self.sfxCheck.enabled = NO;
+    self.sfxCheck.toolTip = @"自解压模块 7z.sfx 是 Windows 可执行文件，macOS 版不含该模块，暂不支持生成";
+
     self.compressHeaderCheck = [NSButton checkboxWithTitle:@"压缩头" target:self
                                                     action:@selector(updateOptionsSummary:)];
     self.compressHeaderCheck.translatesAutoresizingMaskIntoConstraints = NO;
@@ -1027,6 +1232,37 @@ static NSImage *FileIcon(NSString *name, BOOL isDir, BOOL isLink)
                                                action:@selector(updateOptionsSummary:)];
     self.fullPathsCheck.translatesAutoresizingMaskIntoConstraints = NO;
 
+    // 组外四个开关（Keka 面板的下半部分）
+    self.excludeJunkCheck = [NSButton checkboxWithTitle:@"排除 Mac 资源文件" target:self
+                                                 action:@selector(optionsFlagChanged:)];
+    self.excludeJunkCheck.translatesAutoresizingMaskIntoConstraints = NO;
+    self.excludeJunkCheck.state = NSControlStateValueOn;
+    self.excludeJunkCheck.toolTip = @"排除 .DS_Store / __MACOSX / ._* 等 macOS 元数据文件";
+
+    self.verifyAfterCheck = [NSButton checkboxWithTitle:@"验证压缩完整性" target:self
+                                                 action:@selector(optionsFlagChanged:)];
+    self.verifyAfterCheck.translatesAutoresizingMaskIntoConstraints = NO;
+    self.verifyAfterCheck.toolTip = @"建包完成后立即解压校验一遍（不写盘）";
+
+    self.deleteSourceCheck = [NSButton checkboxWithTitle:@"压缩完成后删除源文件" target:self
+                                                  action:@selector(optionsFlagChanged:)];
+    self.deleteSourceCheck.translatesAutoresizingMaskIntoConstraints = NO;
+    self.deleteSourceCheck.toolTip = @"源文件会被移到废纸篓，可从废纸篓恢复";
+
+    self.separateCheck = [NSButton checkboxWithTitle:@"分别压缩每个文件" target:self
+                                              action:@selector(optionsFlagChanged:)];
+    self.separateCheck.translatesAutoresizingMaskIntoConstraints = NO;
+    self.separateCheck.toolTip = @"每个输入项各建一个归档，而不是合并成一个";
+
+    // 折叠开关：NSBezelStyleDisclosure 会忽略标题（只画三角形），故改用
+    // 无边框按钮 + SF Symbol 箭头 + 自绘标题，展开/收起时换箭头方向。
+    self.advancedToggle = [self button:@"" action:@selector(toggleAdvanced:)];
+    self.advancedToggle.bordered = NO;
+    self.advancedToggle.buttonType = NSButtonTypePushOnPushOff;
+    self.advancedToggle.state = NSControlStateValueOff;
+    [self updateAdvancedToggleStyle];
+    self.advancedToggle.toolTip = @"方法 / 字典 / 字长 / 匹配查找器 / 线程 / 加密算法 等专家参数";
+
     // 更新模式（§5.1「更新模式」，作用于添加操作）
     self.updateModePop = [self popup:@[@"跳过同名", @"替换同名"]
                               action:@selector(updateOptionsSummary:)];
@@ -1034,125 +1270,331 @@ static NSImage *FileIcon(NSString *name, BOOL isDir, BOOL isLink)
 
 #pragma mark 「压缩选项」弹出面板
 
-/// 一行标签：右对齐、固定宽度，两列才能对齐。
+/// 面板里的行标签（左侧、次要色）。
 - (NSTextField *)optionsLabel:(NSString *)s
 {
     NSTextField *t = [self label:s];
-    t.font = [NSFont systemFontOfSize:12];
-    t.textColor = [NSColor secondaryLabelColor];
-    t.alignment = NSTextAlignmentRight;
-    [t.widthAnchor constraintEqualToConstant:70].active = YES;
+    t.font = [NSFont systemFontOfSize:13];
+    t.textColor = [NSColor labelColor];
+    t.lineBreakMode = NSLineBreakByTruncatingTail;
     return t;
 }
 
-/// 一个控件槽位：固定宽度，保证左右两列的控件边界严格对齐。
-- (NSStackView *)optionsSlot:(NSArray<NSView *> *)views
+/// 一行「标签 + 控件」：标签固定宽，控件铺满剩余宽度。
+/// 返回的行视图本身不带宽度，宽度由调用方给的左右约束决定。
+- (NSView *)optionsLineWithLabel:(NSString *)title
+                        control:(NSView *)control
+                     labelWidth:(CGFloat)labelWidth
 {
-    NSStackView *s = [NSStackView stackViewWithViews:views];
-    s.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-    s.alignment = NSLayoutAttributeCenterY;
-    s.spacing = 6;
-    s.translatesAutoresizingMaskIntoConstraints = NO;
-    [s.widthAnchor constraintEqualToConstant:142].active = YES;
-    return s;
+    NSView *row = [[NSView alloc] initWithFrame:NSZeroRect];
+    row.translatesAutoresizingMaskIntoConstraints = NO;
+    NSTextField *t = [self optionsLabel:title];
+    t.textColor = [NSColor secondaryLabelColor];
+    [row addSubview:t];
+    [row addSubview:control];
+    [NSLayoutConstraint activateConstraints:@[
+        [t.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
+        [t.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
+        [t.widthAnchor constraintEqualToConstant:labelWidth],
+        [control.leadingAnchor constraintEqualToAnchor:row.leadingAnchor
+                                              constant:labelWidth + 8],
+        [control.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
+        [control.topAnchor constraintEqualToAnchor:row.topAnchor],
+        [control.bottomAnchor constraintEqualToAnchor:row.bottomAnchor],
+    ]];
+    return row;
 }
 
-- (NSStackView *)optionsRow:(NSArray<NSView *> *)cols
+/// 折叠区里的「标签 + 开关 + 数值框」行（线程专用）。
+- (NSView *)optionsLineWithLabel:(NSString *)title
+                            toggle:(NSButton *)toggle
+                              field:(NSTextField *)field
+                         labelWidth:(CGFloat)labelWidth
+                           fieldWidth:(CGFloat)fieldWidth
 {
-    NSStackView *r = [NSStackView stackViewWithViews:cols];
-    r.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-    r.alignment = NSLayoutAttributeCenterY;
-    r.spacing = 8;
-    r.translatesAutoresizingMaskIntoConstraints = NO;
-    [r.widthAnchor constraintEqualToConstant:448].active = YES;
-    return r;
+    NSView *row = [[NSView alloc] initWithFrame:NSZeroRect];
+    row.translatesAutoresizingMaskIntoConstraints = NO;
+    NSTextField *t = [self optionsLabel:title];
+    t.textColor = [NSColor secondaryLabelColor];
+    [row addSubview:t];
+    [row addSubview:toggle];
+    [row addSubview:field];
+    [field.widthAnchor constraintEqualToConstant:fieldWidth].active = YES;
+    [NSLayoutConstraint activateConstraints:@[
+        [t.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
+        [t.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
+        [t.widthAnchor constraintEqualToConstant:labelWidth],
+        [toggle.leadingAnchor constraintEqualToAnchor:row.leadingAnchor
+                                            constant:labelWidth + 8],
+        [toggle.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
+        [field.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
+        [field.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
+        [field.leadingAnchor constraintGreaterThanOrEqualToAnchor:toggle.trailingAnchor
+                                                         constant:8],
+    ]];
+    return row;
 }
 
 - (NSView *)buildOptionsView
 {
-    // 控件宽度统一在这里给：单控件槽位直接铺满槽宽，多控件槽位按比例分配。
-    for (NSPopUpButton *p in @[self.formatPop, self.methodPop, self.dictPop, self.wordPop,
-                               self.matchPop, self.volumePop, self.encryptMethPop,
-                               self.updateModePop]) {
-        [p.widthAnchor constraintEqualToConstant:142].active = YES;
-    }
-    [self.solidBlockPop.widthAnchor constraintEqualToConstant:84].active = YES;
-    [self.levelSlider.widthAnchor constraintEqualToConstant:86].active = YES;
-    [self.levelLabel.widthAnchor constraintEqualToConstant:48].active = YES;
-    [self.fastBytesField.widthAnchor constraintEqualToConstant:100].active = YES;
-    [self.threadsField.widthAnchor constraintEqualToConstant:44].active = YES;
-    [self.password.widthAnchor constraintEqualToConstant:142].active = YES;
+    const CGFloat PAD   = 16;   // 面板左右内边距
+    const CGFloat PANEL = 340;  // 面板内容宽度（参考面板 320，本面板多一行头部）
+    const CGFloat LW    = 46;   // 分组内标签列宽
+    const CGFloat GX    = 12;   // 分组卡片内边距
+    const CGFloat ICO   = 22;   // 锁 / 眼睛按钮边长
+    const CGFloat IGAP  = 6;
+    const CGFloat ALW   = 76;   // 折叠区标签列宽
 
-    NSArray<NSArray *> *specs = @[
-        @[@"格式", @[self.formatPop],      @"等级",     @[self.levelSlider, self.levelLabel]],
-        @[@"方法", @[self.methodPop],      @"字典",     @[self.dictPop]],
-        @[@"字长", @[self.wordPop],        @"快速字节", @[self.fastBytesField]],
-        @[@"匹配查找器", @[self.matchPop], @"分卷",     @[self.volumePop]],
-        @[@"固实", @[self.solidCheck, self.solidBlockPop],
-          @"线程", @[self.autoThreadsCheck, self.threadsField]],
-        @[@"加密算法", @[self.encryptMethPop], @"密码", @[self.password]],
-        @[@"添加时", @[self.updateModePop], @"", @[]],
-    ];
+    Z7PanelView *box = [[Z7PanelView alloc] initWithFrame:NSZeroRect];
+    box.translatesAutoresizingMaskIntoConstraints = NO;
+    NSTextField *head = [self label:@"压缩选项"];
+    head.font = [NSFont systemFontOfSize:13 weight:NSFontWeightMedium];
+    head.textColor = [NSColor secondaryLabelColor];
 
-    NSMutableArray<NSView *> *rows = [NSMutableArray array];
-    for (NSArray *s in specs) {
-        NSMutableArray *cols = [NSMutableArray arrayWithObject:[self optionsLabel:s[0]]];
-        [cols addObject:[self optionsSlot:s[1]]];
-        if ([(NSString *)s[2] length]) {
-            [cols addObject:[self optionsLabel:s[2]]];
-            [cols addObject:[self optionsSlot:s[3]]];
-        }
-        [rows addObject:[self optionsRow:cols]];
-    }
+    NSTextField *fmtCap = [self label:@"格式"];
+    fmtCap.font = [NSFont systemFontOfSize:12];
+    fmtCap.textColor = [NSColor tertiaryLabelColor];
 
-    // 三个开关横跨整行——它们是"要不要做"的独立开关，不属于某个标签。
-    NSStackView *checks = [NSStackView stackViewWithViews:@[self.encryptHeaderCheck,
-                                                            self.compressHeaderCheck,
-                                                            self.fullPathsCheck]];
-    checks.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-    checks.alignment = NSLayoutAttributeCenterY;
-    checks.spacing = 14;
-    checks.translatesAutoresizingMaskIntoConstraints = NO;
-
-    NSTextField *hint = [self label:@"密码用于新建归档；打开加密归档时会单独询问。"];
-    hint.font = [NSFont systemFontOfSize:11];
-    hint.textColor = [NSColor tertiaryLabelColor];
-    hint.lineBreakMode = NSLineBreakByWordWrapping;
-    hint.maximumNumberOfLines = 2;
-    [hint.widthAnchor constraintEqualToConstant:300].active = YES;
+    [self.formatPop.widthAnchor constraintEqualToConstant:82].active = YES;
+    [self.formatPop.heightAnchor constraintEqualToConstant:24].active = YES;
 
     NSButton *done = [self button:@"完成" action:@selector(closeOptions:)];
-    NSStackView *footer = [NSStackView stackViewWithViews:@[hint, done]];
-    footer.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-    footer.alignment = NSLayoutAttributeCenterY;
-    footer.spacing = 12;
-    footer.translatesAutoresizingMaskIntoConstraints = NO;
-    [footer.widthAnchor constraintEqualToConstant:448].active = YES;
-    [hint setContentHuggingPriority:NSLayoutPriorityDefaultLow - 1
-                     forOrientation:NSLayoutConstraintOrientationHorizontal];
+    done.bezelStyle = NSBezelStyleRounded;
+    done.controlSize = NSControlSizeSmall;
+    done.font = [NSFont systemFontOfSize:11];
 
-    NSMutableArray<NSView *> *column = [NSMutableArray array];
-    [column addObjectsFromArray:rows];
-    [column addObject:[self separator]];
-    [column addObject:checks];
-    [column addObject:footer];
+    // ── 压缩方式（滑杆 + 刻度文字）────────────────────────────────
+    NSTextField *cap = [self label:@"压缩方式："];
+    cap.font = [NSFont systemFontOfSize:13];
+    cap.textColor = [NSColor secondaryLabelColor];
 
-    NSStackView *stack = [NSStackView stackViewWithViews:column];
-    stack.orientation = NSUserInterfaceLayoutOrientationVertical;
-    stack.alignment = NSLayoutAttributeLeading;
-    stack.spacing = 9;
-    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    NSStackView *capRow = [NSStackView stackViewWithViews:@[cap, self.levelLabel]];
+    capRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    capRow.alignment = NSLayoutAttributeCenterY;
+    capRow.spacing = 6;
+    capRow.translatesAutoresizingMaskIntoConstraints = NO;
 
-    NSView *box = [[NSView alloc] initWithFrame:NSZeroRect];
-    [box addSubview:stack];
+    // 6 等分格，只在 0/1/3/5 号格放字 —— 存储 快速 正常 慢速（另两档无标签）
+    NSArray<NSString *> *tickNames = @[@"存储", @"快速", @"", @"正常", @"", @"慢速"];
+    NSMutableArray<NSView *> *cells = [NSMutableArray array];
+    for (NSString *nm in tickNames) {
+        NSTextField *t = [self label:nm];
+        t.font = [NSFont systemFontOfSize:11];
+        t.textColor = [NSColor tertiaryLabelColor];
+        t.alignment = NSTextAlignmentCenter;
+        [cells addObject:t];
+    }
+    NSStackView *ticks = [NSStackView stackViewWithViews:cells];
+    ticks.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    ticks.alignment = NSLayoutAttributeCenterY;
+    ticks.distribution = NSStackViewDistributionFillEqually;
+    ticks.spacing = 0;
+    ticks.translatesAutoresizingMaskIntoConstraints = NO;
+
+    // ── 分组卡片：分卷 / 密码 / 重复 + 三个开关 ────────────────────
+    Z7CardView *card = [[Z7CardView alloc] initWithFrame:NSZeroRect];
+    card.translatesAutoresizingMaskIntoConstraints = NO;
+
+    NSTextField *volL = [self optionsLabel:@"分卷"];
+    NSTextField *pwL  = [self optionsLabel:@"密码"];
+    NSTextField *rpL  = [self optionsLabel:@"重复"];
+
+    for (NSTextField *f in @[self.password, self.passwordPlain,
+                             self.passwordRepeat, self.passwordRepeatPlain]) {
+        [f.heightAnchor constraintEqualToConstant:24].active = YES;
+    }
+    [self.volumeCombo.heightAnchor constraintEqualToConstant:24].active = YES;
+    for (NSButton *b in @[self.passwordLockBtn, self.passwordEyeBtn]) {
+        [b.widthAnchor constraintEqualToConstant:ICO].active = YES;
+        [b.heightAnchor constraintEqualToConstant:ICO].active = YES;
+    }
+
+    for (NSView *v in @[volL, self.volumeCombo, pwL, self.password, self.passwordPlain,
+                        self.passwordLockBtn, self.passwordEyeBtn, rpL,
+                        self.passwordRepeat, self.passwordRepeatPlain,
+                        self.encryptHeaderCheck, self.solidCheck, self.sfxCheck]) {
+        [card addSubview:v];
+    }
+
+    const CGFloat CONTENT_X = GX + LW + 8;              // 控件列起点
+    const CGFloat ICON_INSET = GX + ICO * 2 + IGAP * 2; // 密码行右侧给图标留的宽度
+
     [NSLayoutConstraint activateConstraints:@[
-        [stack.topAnchor constraintEqualToAnchor:box.topAnchor constant:18],
-        [stack.leadingAnchor constraintEqualToAnchor:box.leadingAnchor constant:18],
-        [stack.trailingAnchor constraintEqualToAnchor:box.trailingAnchor constant:-18],
-        [stack.bottomAnchor constraintEqualToAnchor:box.bottomAnchor constant:-16],
-        [box.widthAnchor constraintEqualToConstant:484],
+        // 分卷（铺满整行，含图标列）
+        [volL.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:GX],
+        [volL.widthAnchor constraintEqualToConstant:LW],
+        [volL.centerYAnchor constraintEqualToAnchor:self.volumeCombo.centerYAnchor],
+        [self.volumeCombo.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:CONTENT_X],
+        [self.volumeCombo.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-GX],
+        [self.volumeCombo.topAnchor constraintEqualToAnchor:card.topAnchor constant:GX],
+
+        // 密码（掩码态与明文态同框，眼睛按钮切换显示哪一个）
+        [pwL.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:GX],
+        [pwL.widthAnchor constraintEqualToConstant:LW],
+        [pwL.centerYAnchor constraintEqualToAnchor:self.password.centerYAnchor],
+        [self.password.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:CONTENT_X],
+        [self.password.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-ICON_INSET],
+        [self.password.topAnchor constraintEqualToAnchor:self.volumeCombo.bottomAnchor constant:8],
+        [self.passwordPlain.leadingAnchor constraintEqualToAnchor:self.password.leadingAnchor],
+        [self.passwordPlain.trailingAnchor constraintEqualToAnchor:self.password.trailingAnchor],
+        [self.passwordPlain.centerYAnchor constraintEqualToAnchor:self.password.centerYAnchor],
+        [self.passwordLockBtn.leadingAnchor constraintEqualToAnchor:self.password.trailingAnchor
+                                                          constant:IGAP],
+        [self.passwordLockBtn.centerYAnchor constraintEqualToAnchor:self.password.centerYAnchor],
+        [self.passwordEyeBtn.leadingAnchor constraintEqualToAnchor:self.passwordLockBtn.trailingAnchor
+                                                         constant:IGAP],
+        [self.passwordEyeBtn.centerYAnchor constraintEqualToAnchor:self.password.centerYAnchor],
+
+        // 重复（与密码同左边界、同右边界）
+        [rpL.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:GX],
+        [rpL.widthAnchor constraintEqualToConstant:LW],
+        [rpL.centerYAnchor constraintEqualToAnchor:self.passwordRepeat.centerYAnchor],
+        [self.passwordRepeat.leadingAnchor constraintEqualToAnchor:self.password.leadingAnchor],
+        [self.passwordRepeat.trailingAnchor constraintEqualToAnchor:self.password.trailingAnchor],
+        [self.passwordRepeat.topAnchor constraintEqualToAnchor:self.password.bottomAnchor constant:8],
+        [self.passwordRepeatPlain.leadingAnchor constraintEqualToAnchor:self.passwordRepeat.leadingAnchor],
+        [self.passwordRepeatPlain.trailingAnchor constraintEqualToAnchor:self.passwordRepeat.trailingAnchor],
+        [self.passwordRepeatPlain.centerYAnchor constraintEqualToAnchor:self.passwordRepeat.centerYAnchor],
+
+        // 卡片内三个开关
+        [self.encryptHeaderCheck.leadingAnchor constraintEqualToAnchor:card.leadingAnchor
+                                                             constant:CONTENT_X],
+        [self.encryptHeaderCheck.topAnchor constraintEqualToAnchor:self.passwordRepeat.bottomAnchor
+                                                         constant:10],
+        [self.solidCheck.leadingAnchor constraintEqualToAnchor:self.encryptHeaderCheck.leadingAnchor],
+        [self.solidCheck.topAnchor constraintEqualToAnchor:self.encryptHeaderCheck.bottomAnchor constant:5],
+        [self.sfxCheck.leadingAnchor constraintEqualToAnchor:self.encryptHeaderCheck.leadingAnchor],
+        [self.sfxCheck.topAnchor constraintEqualToAnchor:self.solidCheck.bottomAnchor constant:5],
+        [self.sfxCheck.bottomAnchor constraintEqualToAnchor:card.bottomAnchor constant:-GX],
     ]];
+
+    // ── 卡片外四个开关 ────────────────────────────────────────────
+    NSArray<NSButton *> *outer = @[self.excludeJunkCheck, self.verifyAfterCheck,
+                                   self.deleteSourceCheck, self.separateCheck];
+
+    // ── 高级参数折叠区（专家参数，默认收起）────────────────────────
+    NSView *advBox = [self buildAdvancedOptionsView:ALW];
+    self.advancedBox = advBox;
+    advBox.hidden = YES;
+    self.advancedZeroHeight = [advBox.heightAnchor constraintEqualToConstant:0];
+
+    for (NSView *v in @[head, fmtCap, self.formatPop, done, capRow, self.levelSlider,
+                        ticks, card, self.advancedToggle, advBox]) {
+        [box addSubview:v];
+    }
+    for (NSButton *c in outer) [box addSubview:c];
+    self.advancedZeroHeight.active = YES;
+
+    NSMutableArray<NSLayoutConstraint *> *cs = [NSMutableArray arrayWithArray:@[
+        // 头部
+        [head.leadingAnchor constraintEqualToAnchor:box.leadingAnchor constant:PAD],
+        [head.topAnchor constraintEqualToAnchor:box.topAnchor constant:14],
+        [done.trailingAnchor constraintEqualToAnchor:box.trailingAnchor constant:-PAD],
+        [done.centerYAnchor constraintEqualToAnchor:head.centerYAnchor],
+        [self.formatPop.trailingAnchor constraintEqualToAnchor:done.leadingAnchor constant:-8],
+        [self.formatPop.centerYAnchor constraintEqualToAnchor:head.centerYAnchor],
+        [fmtCap.trailingAnchor constraintEqualToAnchor:self.formatPop.leadingAnchor constant:-6],
+        [fmtCap.centerYAnchor constraintEqualToAnchor:head.centerYAnchor],
+
+        // 压缩方式
+        [capRow.leadingAnchor constraintEqualToAnchor:box.leadingAnchor constant:PAD],
+        [capRow.topAnchor constraintEqualToAnchor:head.bottomAnchor constant:12],
+        [self.levelSlider.leadingAnchor constraintEqualToAnchor:box.leadingAnchor constant:PAD],
+        [self.levelSlider.trailingAnchor constraintEqualToAnchor:box.trailingAnchor constant:-PAD],
+        [self.levelSlider.topAnchor constraintEqualToAnchor:capRow.bottomAnchor constant:8],
+
+        // 刻度文字：与滑杆轨道对齐（轨道两端各内缩约一个滑块半径）
+        [ticks.leadingAnchor constraintEqualToAnchor:self.levelSlider.leadingAnchor constant:11],
+        [ticks.trailingAnchor constraintEqualToAnchor:self.levelSlider.trailingAnchor constant:-11],
+        [ticks.topAnchor constraintEqualToAnchor:self.levelSlider.bottomAnchor constant:3],
+
+        // 分组卡片
+        [card.leadingAnchor constraintEqualToAnchor:box.leadingAnchor constant:PAD],
+        [card.trailingAnchor constraintEqualToAnchor:box.trailingAnchor constant:-PAD],
+        [card.topAnchor constraintEqualToAnchor:ticks.bottomAnchor constant:12],
+
+        // 卡片外四个开关（比卡片左边界再缩进 6pt，与参考面板一致）
+        [self.excludeJunkCheck.leadingAnchor constraintEqualToAnchor:box.leadingAnchor
+                                                            constant:PAD + 6],
+        [self.excludeJunkCheck.topAnchor constraintEqualToAnchor:card.bottomAnchor constant:12],
+        [self.verifyAfterCheck.leadingAnchor constraintEqualToAnchor:self.excludeJunkCheck.leadingAnchor],
+        [self.verifyAfterCheck.topAnchor constraintEqualToAnchor:self.excludeJunkCheck.bottomAnchor
+                                                        constant:6],
+        [self.deleteSourceCheck.leadingAnchor constraintEqualToAnchor:self.excludeJunkCheck.leadingAnchor],
+        [self.deleteSourceCheck.topAnchor constraintEqualToAnchor:self.verifyAfterCheck.bottomAnchor
+                                                         constant:6],
+        [self.separateCheck.leadingAnchor constraintEqualToAnchor:self.excludeJunkCheck.leadingAnchor],
+        [self.separateCheck.topAnchor constraintEqualToAnchor:self.deleteSourceCheck.bottomAnchor
+                                                     constant:6],
+
+        // 高级参数
+        [self.advancedToggle.leadingAnchor constraintEqualToAnchor:box.leadingAnchor
+                                                          constant:PAD - 2],
+        [self.advancedToggle.topAnchor constraintEqualToAnchor:self.separateCheck.bottomAnchor
+                                                      constant:12],
+        [advBox.leadingAnchor constraintEqualToAnchor:box.leadingAnchor constant:PAD],
+        [advBox.trailingAnchor constraintEqualToAnchor:box.trailingAnchor constant:-PAD],
+        [advBox.topAnchor constraintEqualToAnchor:self.advancedToggle.bottomAnchor constant:8],
+        [advBox.bottomAnchor constraintEqualToAnchor:box.bottomAnchor constant:-14],
+
+        [box.widthAnchor constraintEqualToConstant:PANEL],
+    ]];
+    [NSLayoutConstraint activateConstraints:cs];
     return box;
+}
+
+/// 折叠区：专家参数，单列排布。视图始终在树中，但内部约束只在展开时激活——
+/// 收起时若让「高度 0」与内部约束链同时生效，二者必然冲突并打断其中一条。
+- (NSView *)buildAdvancedOptionsView:(CGFloat)ALW
+{
+    NSView *box = [[NSView alloc] initWithFrame:NSZeroRect];
+    box.translatesAutoresizingMaskIntoConstraints = NO;
+    box.wantsLayer = YES;
+    box.layer.masksToBounds = YES;
+
+    NSArray<NSView *> *rows = @[
+        [self optionsLineWithLabel:@"方法"       control:self.methodPop       labelWidth:ALW],
+        [self optionsLineWithLabel:@"字典"       control:self.dictPop         labelWidth:ALW],
+        [self optionsLineWithLabel:@"字长"       control:self.wordPop         labelWidth:ALW],
+        [self optionsLineWithLabel:@"快速字节"   control:self.fastBytesField  labelWidth:ALW],
+        [self optionsLineWithLabel:@"匹配查找器" control:self.matchPop        labelWidth:ALW],
+        [self optionsLineWithLabel:@"固实分块"   control:self.solidBlockPop   labelWidth:ALW],
+        [self optionsLineWithLabel:@"线程"       toggle:self.autoThreadsCheck
+                              field:self.threadsField labelWidth:ALW fieldWidth:44],
+        [self optionsLineWithLabel:@"加密算法"   control:self.encryptMethPop  labelWidth:ALW],
+        [self optionsLineWithLabel:@"添加时"     control:self.updateModePop   labelWidth:ALW],
+    ];
+    for (NSView *r in rows) [box addSubview:r];
+
+    NSMutableArray<NSLayoutConstraint *> *inner = [NSMutableArray array];
+    [inner addObjectsFromArray:@[
+        [rows.firstObject.topAnchor constraintEqualToAnchor:box.topAnchor],
+        [rows.firstObject.leadingAnchor constraintEqualToAnchor:box.leadingAnchor],
+        [rows.firstObject.trailingAnchor constraintEqualToAnchor:box.trailingAnchor],
+        [rows.firstObject.heightAnchor constraintEqualToConstant:24],
+    ]];
+    for (NSUInteger i = 1; i < rows.count; i++) {
+        [inner addObjectsFromArray:@[
+            [rows[i].topAnchor constraintEqualToAnchor:rows[i - 1].bottomAnchor constant:6],
+            [rows[i].leadingAnchor constraintEqualToAnchor:box.leadingAnchor],
+            [rows[i].trailingAnchor constraintEqualToAnchor:box.trailingAnchor],
+            [rows[i].heightAnchor constraintEqualToConstant:24],
+        ]];
+    }
+
+    NSView *prev = rows.lastObject;
+    for (NSButton *b in @[self.compressHeaderCheck, self.fullPathsCheck]) {
+        [box addSubview:b];
+        [inner addObjectsFromArray:@[
+            [b.leadingAnchor constraintEqualToAnchor:box.leadingAnchor constant:ALW + 8],
+            [b.topAnchor constraintEqualToAnchor:prev.bottomAnchor constant:8],
+        ]];
+        prev = b;
+    }
+    [inner addObject:[prev.bottomAnchor constraintEqualToAnchor:box.bottomAnchor]];
+
+    self.advancedContentConstraints = inner;
+    return box;   // 内部约束由 toggleAdvanced: 按展开状态激活，此处不激活
 }
 
 - (void)showOptions:(id)sender
@@ -1168,17 +1610,23 @@ static NSImage *FileIcon(NSString *name, BOOL isDir, BOOL isLink)
 
         NSSize fit = vc.view.fittingSize;
         self.optionsPopover.contentSize = (fit.width > 200 && fit.height > 80)
-            ? fit : NSMakeSize(484, 320);
+            ? fit : NSMakeSize(340, 430);
 
         [[NSNotificationCenter defaultCenter] addObserver:self
             selector:@selector(optionsPopoverDidClose:)
             name:NSPopoverDidCloseNotification
             object:self.optionsPopover];
     }
+    [self syncPasswordFieldState];
+    [self syncOptionsPopoverSize];
     NSView *anchor = [sender isKindOfClass:[NSView class]] ? (NSView *)sender : self.optionsBtn;
     [self.optionsPopover showRelativeToRect:anchor.bounds
                                      ofView:anchor
                              preferredEdge:NSRectEdgeMinY];
+    // 弹层出现后不要让第一个控件（分卷）自动获得焦点：面板是"看一眼/改一下"的
+    // 辅助界面，进场就带高亮框会让人以为要立刻输入。
+    NSWindow *pw = self.optionsPopover.contentViewController.view.window;
+    [pw performSelector:@selector(makeFirstResponder:) withObject:nil afterDelay:0];
 }
 
 - (void)closeOptions:(id)s
@@ -1191,13 +1639,146 @@ static NSImage *FileIcon(NSString *name, BOOL isDir, BOOL isLink)
     [self updateOptionsSummary];
 }
 
+#pragma mark 面板交互（密码锁/眼睛、开关、高级折叠）
+
+/// 密码行状态：掩码态与明文态互斥显示，锁按钮控制可编辑性，
+/// 「加密文件名」只有在设有密码时才有意义。
+- (void)syncPasswordFieldState
+{
+    BOOL revealed = self.passwordRevealed;
+    self.password.hidden = revealed;
+    self.passwordPlain.hidden = !revealed;
+    self.passwordRepeat.hidden = revealed;
+    self.passwordRepeatPlain.hidden = !revealed;
+    if (revealed) {
+        // 明文框当前可见 = 权威值，同步给隐藏的掩码框
+        self.password.stringValue = self.passwordPlain.stringValue;
+        self.passwordRepeat.stringValue = self.passwordRepeatPlain.stringValue;
+    } else {
+        // 掩码框当前可见 = 权威值，同步给隐藏的明文框
+        self.passwordPlain.stringValue = self.password.stringValue;
+        self.passwordRepeatPlain.stringValue = self.passwordRepeat.stringValue;
+    }
+
+    BOOL editable = !self.passwordLocked;
+    for (NSTextField *f in @[self.password, self.passwordPlain,
+                             self.passwordRepeat, self.passwordRepeatPlain]) {
+        f.editable = editable;
+        f.selectable = editable;
+    }
+    self.passwordLockBtn.image = Symbol(self.passwordLocked ? @"lock.fill" : @"lock.open", 13.0);
+    self.passwordLockBtn.toolTip = self.passwordLocked ? @"解锁密码栏" : @"锁定密码栏，避免误改";
+
+    BOOL hasPassword = self.passwordText.length > 0;
+    self.passwordEyeBtn.enabled = hasPassword;
+    self.passwordEyeBtn.contentTintColor = hasPassword ? [NSColor secondaryLabelColor]
+                                                       : [NSColor tertiaryLabelColor];
+
+    // 「加密文件名」需要密码；7z 之外的格式也不支持加密文件名
+    BOOL is7z = [[self selectedFormat] isEqualToString:@"7z"];
+    self.encryptHeaderCheck.enabled = hasPassword && is7z;
+}
+
+/// 当前密码（取可见的那个字段，两者已同步）。
+- (NSString *)passwordText
+{
+    return self.passwordRevealed ? self.passwordPlain.stringValue : self.password.stringValue;
+}
+
+- (NSString *)passwordRepeatText
+{
+    return self.passwordRevealed ? self.passwordRepeatPlain.stringValue
+                                 : self.passwordRepeat.stringValue;
+}
+
+- (void)passwordEdited:(id)s
+{
+    [self syncPasswordFieldState];
+    [self updateOptionsSummary];
+}
+
+- (void)passwordLockClicked:(id)s
+{
+    self.passwordLocked = !self.passwordLocked;
+    [self syncPasswordFieldState];
+}
+
+- (void)passwordEyeClicked:(id)s
+{
+    self.passwordRevealed = !self.passwordRevealed;
+    [self syncPasswordFieldState];
+}
+
+/// 哪个开关被拨动都只影响摘要与联动禁用态，真正的取值在 currentOptions 里读。
+- (void)optionsFlagChanged:(id)s
+{
+    // 「分别压缩每个文件」与「排除 Mac 资源文件」互不影响，仅刷新摘要。
+    [self updateOptionsSummary];
+}
+
+/// 折叠开关的箭头与标题（随展开状态切换）。无边框按钮的标题必须用
+/// attributedTitle 才能拿到次要色——contentTintColor 只作用于图像。
+- (void)updateAdvancedToggleStyle
+{
+    self.advancedToggle.image = Symbol(self.advancedExpanded ? @"chevron.down"
+                                                             : @"chevron.right", 11.0);
+    self.advancedToggle.imagePosition = NSImageLeft;
+    self.advancedToggle.contentTintColor = [NSColor secondaryLabelColor];
+    self.advancedToggle.attributedTitle =
+        [[NSAttributedString alloc] initWithString:@"高级参数"
+            attributes:@{NSFontAttributeName: [NSFont systemFontOfSize:12],
+                         NSForegroundColorAttributeName: [NSColor secondaryLabelColor]}];
+}
+
+- (void)toggleAdvanced:(id)s
+{
+    self.advancedExpanded = (self.advancedToggle.state == NSControlStateValueOn);
+    self.advancedBox.hidden = !self.advancedExpanded;
+    [self updateAdvancedToggleStyle];
+
+    // 两套约束互斥：展开时用内部尺寸，收起时用固定的 0 高度。
+    // 同时激活会让「0 高度」与内部约束链冲突，Auto Layout 会打断其中一条。
+    if (self.advancedExpanded) {
+        self.advancedZeroHeight.active = NO;
+        [NSLayoutConstraint activateConstraints:self.advancedContentConstraints];
+    } else {
+        [NSLayoutConstraint deactivateConstraints:self.advancedContentConstraints];
+        self.advancedZeroHeight.active = YES;
+    }
+    [self syncOptionsPopoverSize];
+}
+
+/// 面板高度随折叠区展开/收起变化，弹层尺寸必须跟着重算。
+- (void)syncOptionsPopoverSize
+{
+    NSView *root = self.optionsPopover.contentViewController.view;
+    if (!root) return;
+    [root layoutSubtreeIfNeeded];
+    NSSize fit = root.fittingSize;
+    if (fit.width > 200 && fit.height > 80) self.optionsPopover.contentSize = fit;
+}
+
+/// 密码一致性检查：两次输入不一致时给出行内提示并拒绝开始压缩。
+- (BOOL)validatePasswordMatch:(NSString **)message
+{
+    NSString *pw = [self passwordText];
+    NSString *rp = [self passwordRepeatText];
+    if (!pw.length || [pw isEqualToString:rp]) return YES;
+    if (message) *message = @"两次输入的密码不一致，请重新确认";
+    return NO;
+}
+
 /// 状态栏右侧的摘要：让用户不必展开面板就知道「新建归档」会用什么参数。
 - (void)updateOptionsSummary
 {
     Z7CompressionOptions *o = [self currentOptions];
     NSMutableArray *bits = [NSMutableArray arrayWithObject:(o.format.length ? o.format : @"7z")];
-    [bits addObject:[NSString stringWithFormat:@"等级 %ld", (long)o.level]];
+    [bits addObject:LevelNameForTick(self.levelSlider.integerValue)];
     if (o.password.length) [bits addObject:@"已设密码"];
+    if (o.hasVolumeSize) [bits addObject:[NSString stringWithFormat:@"分卷 %@", o.volumeSizeText]];
+    if (self.verifyAfterCheck.state == NSControlStateValueOn) [bits addObject:@"建包后校验"];
+    if (self.deleteSourceCheck.state == NSControlStateValueOn) [bits addObject:@"删源文件"];
+    if (self.separateCheck.state == NSControlStateValueOn) [bits addObject:@"逐个建包"];
     self.summaryLabel.stringValue = [NSString stringWithFormat:@"新建归档：%@",
                                      [bits componentsJoinedByString:@" · "]];
 }
@@ -1661,19 +2242,19 @@ static NSImage *FileIcon(NSString *name, BOOL isDir, BOOL isLink)
     self.matchPop.enabled = !single && !zipLike;
     self.solidCheck.enabled = !single;
     self.solidBlockPop.enabled = !single;
-    self.volumePop.enabled = !single;
+    self.volumeCombo.enabled = !single;
     self.encryptMethPop.enabled = zipLike || [f isEqualToString:@"7z"];
-    self.encryptHeaderCheck.enabled = [f isEqualToString:@"7z"];
     self.compressHeaderCheck.enabled = [f isEqualToString:@"7z"];
     self.fullPathsCheck.enabled = YES;
     self.updateModePop.enabled = !single;
+    // 「加密文件名」还要看是否设了密码，统一由密码行状态决定
+    [self syncPasswordFieldState];
     [self updateOptionsSummary];
 }
 
 - (void)levelChanged:(id)s
 {
-    self.levelLabel.stringValue = [NSString stringWithFormat:@"等级 %ld",
-                                   (long)self.levelSlider.integerValue];
+    self.levelLabel.stringValue = LevelNameForTick(self.levelSlider.integerValue);
     [self updateOptionsSummary];
 }
 
@@ -1745,7 +2326,8 @@ static BOOL ParseVolumeSize(NSString *t, unsigned long long *out)
 {
     Z7CompressionOptions *o = [[Z7CompressionOptions alloc] init];
     o.format = [self selectedFormat];
-    o.level = self.levelSlider.integerValue;
+    // 滑杆是 6 档（刻度位），换成 7-Zip 的 -mx 值
+    o.level = LevelForTick(self.levelSlider.integerValue);
 
     NSString *m = self.methodPop.titleOfSelectedItem;
     if (m && ![m isEqualToString:@"自动"]) o.method = m;
@@ -1778,19 +2360,25 @@ static BOOL ParseVolumeSize(NSString *t, unsigned long long *out)
     }
 
     unsigned long long vol = 0;
-    if (ParseVolumeSize(self.volumePop.titleOfSelectedItem, &vol)) {
+    // 分卷是可编辑组合框：既能选预设，也能直接敲「5 MB」「700m」这类自定义容量
+    NSString *volText = [self.volumeCombo.stringValue
+                         stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+    if (ParseVolumeSize(volText, &vol)) {
         o.hasVolumeSize = YES; o.volumeSize = vol;
-        o.volumeSizeText = self.volumePop.titleOfSelectedItem;
+        o.volumeSizeText = volText;
     }
 
     o.encryptMethod = self.encryptMethPop.titleOfSelectedItem ?: @"AES256";
-    o.password = self.password.stringValue ?: @"";
+    o.password = [self passwordText] ?: @"";
 
-    o.hasEncryptHeader = YES;
-    o.encryptHeader = (self.encryptHeaderCheck.state == NSControlStateValueOn);
+    // 没有密码时明确不设 -mhe：否则会向引擎传一个无意义的「加密头」开关
+    o.hasEncryptHeader = o.password.length > 0;
+    o.encryptHeader = o.hasEncryptHeader &&
+        (self.encryptHeaderCheck.state == NSControlStateValueOn);
     o.hasCompressHeader = YES;
     o.compressHeader = (self.compressHeaderCheck.state == NSControlStateValueOn);
     o.fullPaths = (self.fullPathsCheck.state == NSControlStateValueOn);
+    o.excludeMacJunk = (self.excludeJunkCheck.state == NSControlStateValueOn);
     return o;
 }
 
@@ -1834,7 +2422,7 @@ static BOOL ParseVolumeSize(NSString *t, unsigned long long *out)
 - (NSString *)archivePassword
 {
     if (self.openPassword.length) return self.openPassword;
-    return self.password.stringValue ?: @"";
+    return [self passwordText] ?: @"";
 }
 
 /// 标题栏的归档标识：窗口标题保持应用名，文件名放进副标题，并挂上代理图标
@@ -2306,47 +2894,142 @@ static BOOL ParseVolumeSize(NSString *t, unsigned long long *out)
     [self compressURLs:p.URLs];
 }
 
+/// 在目录下取一个不冲突的归档路径：name.7z / name 2.7z / name 3.7z …
+static NSString *UniqueArchivePath(NSString *dir, NSString *base, NSString *ext)
+{
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *cand = [dir stringByAppendingPathComponent:
+                      [NSString stringWithFormat:@"%@.%@", base, ext]];
+    NSInteger n = 2;
+    while ([fm fileExistsAtPath:cand]) {
+        cand = [dir stringByAppendingPathComponent:
+                [NSString stringWithFormat:@"%@ %ld.%@", base, (long)n++, ext]];
+    }
+    return cand;
+}
+
 - (void)compressURLs:(NSArray<NSURL *> *)urls
 {
     if (!urls.count) return;
+
+    // 密码不一致时不静默继续：弹回面板并说明原因
+    NSString *msg = nil;
+    if (![self validatePasswordMatch:&msg]) {
+        NSBeep();
+        [self showStatus:msg];
+        [self appendLog:[msg stringByAppendingString:@"\n"] reveal:YES];
+        [self showOptions:self.optionsBtn];
+        return;
+    }
+
     NSString *fmt = [self selectedFormat];
-    NSString *base = urls.count == 1 ? urls[0].lastPathComponent : @"归档";
-    NSString *dir  = urls[0].URLByDeletingLastPathComponent.path ?: NSHomeDirectory();
+    Z7CompressionOptions *opts = [self currentOptions];
+    BOOL separate = (self.separateCheck.state == NSControlStateValueOn);
 
-    NSSavePanel *sp = [NSSavePanel savePanel];
-    sp.message = @"保存归档";
-    sp.nameFieldStringValue = [NSString stringWithFormat:@"%@.%@", base, fmt];
-    sp.directoryURL = [NSURL fileURLWithPath:dir];
-    if ([sp runModal] != NSModalResponseOK) return;
+    // batch 每项 = @[目标归档路径, @[输入路径…]]；不勾「分别压缩」时只有一项。
+    NSMutableArray<NSArray *> *batch = [NSMutableArray array];
 
-    NSMutableArray<NSString *> *paths = [NSMutableArray array];
-    for (NSURL *u in urls) [paths addObject:u.path];
+    if (separate) {
+        // 每个顶层项各建一个包：只问一次输出目录，包名取自各项自身名称
+        NSOpenPanel *dp = [NSOpenPanel openPanel];
+        dp.canChooseFiles = NO;
+        dp.canChooseDirectories = YES;
+        dp.allowsMultipleSelection = NO;
+        dp.canCreateDirectories = YES;
+        dp.prompt = @"在此建包";
+        dp.message = @"选择输出目录（每个文件各建一个归档）";
+        dp.directoryURL = urls[0].URLByDeletingLastPathComponent;
+        if ([dp runModal] != NSModalResponseOK) return;
+        NSString *outDir = dp.URL.path;
+        for (NSURL *u in urls) {
+            [batch addObject:@[UniqueArchivePath(outDir, u.lastPathComponent, fmt), @[u.path]]];
+        }
+    } else {
+        NSString *base = urls.count == 1 ? urls[0].lastPathComponent : @"归档";
+        NSString *dir  = urls[0].URLByDeletingLastPathComponent.path ?: NSHomeDirectory();
+
+        NSSavePanel *sp = [NSSavePanel savePanel];
+        sp.message = @"保存归档";
+        sp.nameFieldStringValue = [NSString stringWithFormat:@"%@.%@", base, fmt];
+        sp.directoryURL = [NSURL fileURLWithPath:dir];
+        if ([sp runModal] != NSModalResponseOK) return;
+
+        NSMutableArray<NSString *> *paths = [NSMutableArray array];
+        for (NSURL *u in urls) [paths addObject:u.path];
+        [batch addObject:@[sp.URL.path, paths]];
+    }
+
+    [self runCreateBatch:batch index:0 options:opts];
+}
+
+/// 逐个建包。任务必须串行——引擎同一时刻只允许一个会话，
+/// 因此用「上一个结束回调里启动下一个」的方式排队。
+- (void)runCreateBatch:(NSArray<NSArray *> *)batch
+                 index:(NSUInteger)idx
+               options:(Z7CompressionOptions *)opts
+{
+    if (idx >= batch.count) return;
+
+    NSString *dest = batch[idx][0];
+    NSArray<NSString *> *inputs = batch[idx][1];
+    BOOL verify = (self.verifyAfterCheck.state == NSControlStateValueOn);
+    BOOL dropSource = (self.deleteSourceCheck.state == NSControlStateValueOn);
 
     Z7Task *t = [[Z7Task alloc] init];
     t.kind = Z7TaskKindCreate;
-    t.title = [NSString stringWithFormat:@"正在压缩 %lu 项", (unsigned long)paths.count];
-    t.archivePath = sp.URL.path;
-    t.inputPaths = paths;
-    t.options = [self currentOptions];
+    t.title = [NSString stringWithFormat:@"正在压缩 %lu 项", (unsigned long)inputs.count];
+    t.archivePath = dest;
+    t.inputPaths = inputs;
+    t.options = opts;
+    t.verifyAfterCreate = verify;
 
     __weak MainViewController *weakSelf = self;
-    NSString *dest = sp.URL.path;
     [self runTask:t after:^(BOOL ok, NSError *error) {
         MainViewController *me = weakSelf;
         if (!me) return;
         if (ok) {
+            [me appendLog:[NSString stringWithFormat:@"压缩完成：%@\n",
+                           dest.lastPathComponent]];
+            if (dropSource) [me trashPaths:inputs];
+        } else {
+            NSString *m = [NSString stringWithFormat:@"压缩失败（%@）：%@",
+                           dest.lastPathComponent, error.localizedDescription];
+            [me showStatus:m];
+            [me appendLog:[m stringByAppendingString:@"\n"] reveal:YES];
+        }
+
+        if (idx + 1 < batch.count) {
+            [me runCreateBatch:batch index:idx + 1 options:opts];
+            return;
+        }
+        if (ok) {
             [me showStatus:@"压缩完成"];
-            [me appendLog:@"压缩完成\n"];
             // 新归档用面板口令加密，因此直接把该口令交给打开流程，
             // 而不是让用户立刻为刚建的归档再输一次。
-            NSString *pw = me.password.stringValue.length ? me.password.stringValue : nil;
+            NSString *pw = opts.password.length ? opts.password : nil;
             [me openArchive:dest password:pw];
-        } else {
-            NSString *msg = [NSString stringWithFormat:@"压缩失败：%@", error.localizedDescription];
-            [me showStatus:msg];
-            [me appendLog:[msg stringByAppendingString:@"\n"]];
         }
     }];
+}
+
+/// 「压缩完成后删除源文件」：一律走废纸篓，绝不直接 unlink——可恢复、可撤销。
+- (void)trashPaths:(NSArray<NSString *> *)paths
+{
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSUInteger failed = 0;
+    for (NSString *p in paths) {
+        NSError *e = nil;
+        if (![fm trashItemAtURL:[NSURL fileURLWithPath:p] resultingItemURL:nil error:&e]) {
+            failed++;
+            NSString *m = [NSString stringWithFormat:@"无法移到废纸篓：%@（%@）",
+                           p.lastPathComponent, e.localizedDescription];
+            [self appendLog:[m stringByAppendingString:@"\n"] reveal:YES];
+        }
+    }
+    if (failed < paths.count) {
+        [self appendLog:[NSString stringWithFormat:@"已把 %lu 个源项目移到废纸篓\n",
+                         (unsigned long)(paths.count - failed)]];
+    }
 }
 
 #pragma mark 拖放

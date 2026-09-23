@@ -231,6 +231,11 @@ typedef NS_ENUM(NSInteger, Z7LogLevel) {
 @property (nonatomic) BOOL hasCompressHeader;
 @property (nonatomic) BOOL compressHeader;
 
+/// 压缩时排除 macOS/Windows 系统元数据垃圾（.DS_Store / __MACOSX / ._* /
+/// Thumbs.db …）。默认 YES。关闭后这些文件会按普通文件写入归档；
+/// 归档「列表」侧的同类过滤始终生效，不受本属性影响。
+@property (nonatomic) BOOL excludeMacJunk;
+
 @end
 
 #pragma mark - 引擎能力

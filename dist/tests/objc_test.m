@@ -220,6 +220,63 @@ int main(int argc, const char *argv[]) {
             ok(shouldFail == nil, @"加密归档删除后无密码仍无法打开");
         }
 
+        printf("\n== J. 压缩侧「排除 Mac 资源文件」开关 ==\n");
+        {
+            // 面板上的这个开关直通 CompressionOptions::excludeMacJunk。
+            // 判定方式：建包后把归档解回磁盘，看 .DS_Store / ._* 有没有落盘——
+            // 不能用 allItems 判定，因为列表侧始终过滤垃圾项（与压缩侧无关）。
+            NSString *junkRoot = [work stringByAppendingPathComponent:@"junk"];
+            NSString *srcDir = [junkRoot stringByAppendingPathComponent:@"src"];
+            [fm createDirectoryAtPath:[srcDir stringByAppendingPathComponent:@"sub"]
+          withIntermediateDirectories:YES attributes:nil error:NULL];
+            [@"hi" writeToFile:[srcDir stringByAppendingPathComponent:@"normal.txt"]
+                    atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+            [@"junk" writeToFile:[srcDir stringByAppendingPathComponent:@".DS_Store"]
+                      atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+            [@"ad" writeToFile:[srcDir stringByAppendingPathComponent:@"sub/._normal.txt"]
+                    atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+
+            TestCallback *jcb = [[TestCallback alloc] init];
+            BOOL (^junkLandsOnDisk)(BOOL, NSString *) = ^BOOL(BOOL exclude, NSString *tag) {
+                NSString *arc = [junkRoot stringByAppendingPathComponent:
+                                 [NSString stringWithFormat:@"%@.7z", tag]];
+                Z7CompressionOptions *o = [[Z7CompressionOptions alloc] init];
+                o.format = @"7z";
+                o.level = 1;
+                o.excludeMacJunk = exclude;
+                NSError *e = nil;
+                if (![Z7Engine createArchive:arc fromPaths:@[srcDir] options:o
+                                    callback:jcb error:&e]) {
+                    ok(NO, [NSString stringWithFormat:@"建包失败（%@）：%@", tag,
+                            e.localizedDescription]);
+                    return YES;
+                }
+                NSString *out = [junkRoot stringByAppendingPathComponent:
+                                 [NSString stringWithFormat:@"out-%@", tag]];
+                [fm createDirectoryAtPath:out withIntermediateDirectories:YES
+                               attributes:nil error:NULL];
+                Z7Archive *a = [Z7Archive openPath:arc password:nil callback:jcb error:&e];
+                if (!a) {
+                    ok(NO, [NSString stringWithFormat:@"打开失败（%@）", tag]);
+                    return YES;
+                }
+                [a extractItems:nil to:out testMode:NO overwrite:YES atomicFiles:YES
+                    createLinks:YES callback:jcb error:&e];
+                return [fm fileExistsAtPath:
+                        [out stringByAppendingPathComponent:@"src/.DS_Store"]]
+                    || [fm fileExistsAtPath:
+                        [out stringByAppendingPathComponent:@"src/sub/._normal.txt"]];
+            };
+
+            ok(junkLandsOnDisk(YES, @"excl") == NO,
+               @"excludeMacJunk=YES 时 .DS_Store / ._* 不进归档");
+            ok(junkLandsOnDisk(NO, @"keep") == YES,
+               @"excludeMacJunk=NO 时 .DS_Store / ._* 按普通文件进归档（开关确实生效）");
+            ok([fm fileExistsAtPath:
+                [junkRoot stringByAppendingPathComponent:@"out-excl/src/normal.txt"]],
+               @"两种设置下正常文件都被压缩");
+        }
+
         printf("\n== I. 错误路径 ==\n");
         NSError *badErr = nil;
         Z7Archive *missing = [Z7Archive openPath:[work stringByAppendingPathComponent:@"nope.7z"]
