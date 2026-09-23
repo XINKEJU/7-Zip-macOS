@@ -91,8 +91,14 @@ static NSString *DateText(NSDate *d)
 
 /// 「最近使用」列表存在 UserDefaults 里。
 ///
-/// 不用 NSDocumentController 的 recentDocumentURLs：那是给 NSDocument 架构准备的，
-/// 本应用不是 document-based（窗口与控制器自管），硬套只会得到一个永远为空的菜单。
+/// 应用自己的「文件 › 打开最近使用」与程序坞右键菜单都读这份列表，**不用**
+/// NSDocumentController 的 recentDocumentURLs 去喂它们：那是给 NSDocument 架构
+/// 准备的，本应用不是 document-based（窗口与控制器自管），拿它填菜单只会得到
+/// 一个永远为空的菜单。两条线各司其职：
+///   * 本文件里的数组 → 应用自己的两个菜单（可控顺序、可控条数、可清除）；
+///   * Z7NoteRecentPath 里顺带调用的 noteNewRecentDocumentURL: → 只为了让归档
+///     同时出现在系统「苹果菜单 › 最近使用的项目」里（那是系统自己维护的列表，
+///     应用只能投递、不能读改）。
 static NSString * const kZ7RecentKey = @"Z7RecentArchives";
 static const NSUInteger kZ7RecentLimit = 10;
 
@@ -110,6 +116,11 @@ static void Z7NoteRecentPath(NSString *path)
     [a insertObject:path atIndex:0];
     while (a.count > kZ7RecentLimit) [a removeLastObject];
     [[NSUserDefaults standardUserDefaults] setObject:a forKey:kZ7RecentKey];
+
+    // 同时投递给系统，让归档出现在「苹果菜单 › 最近使用的项目」——这是 macOS
+    // 上跨应用统一的最近文件入口，用户在那里就能直接选中它。
+    [[NSDocumentController sharedDocumentController]
+        noteNewRecentDocumentURL:[NSURL fileURLWithPath:path]];
 }
 
 static void Z7ForgetRecentPath(NSString *path)
@@ -123,6 +134,7 @@ static void Z7ForgetRecentPath(NSString *path)
 static void Z7ClearRecentPaths(void)
 {
     [[NSUserDefaults standardUserDefaults] removeObjectForKey:kZ7RecentKey];
+    [[NSDocumentController sharedDocumentController] clearRecentDocuments:nil];
 }
 
 #pragma mark - 临时文件登记表（技术方案 §8.2：SIGTERM 清理）
@@ -828,9 +840,22 @@ typedef NS_ENUM(NSInteger, Z7TaskKind) {
 
 - (NSDragOperation)draggingEntered:(id<NSDraggingInfo>)sender
 {
+    // 只对「至少含一个文件 URL」的拖动给出接受反馈。旧实现无条件返回 Copy 并高亮，
+    // 于是拖一段文本或一张图进来时整块内容区都会亮起边框、放开却什么都不发生——
+    // 反馈与实际行为对不上。先验内容再表态。
+    NSArray *urls = [sender.draggingPasteboard readObjectsForClasses:@[NSURL.class]
+        options:@{NSPasteboardURLReadingFileURLsOnlyKey: @YES}];
+    if (!urls.count) return NSDragOperationNone;
     self.highlighted = YES;
     self.needsDisplay = YES;
     return NSDragOperationCopy;
+}
+
+- (NSDragOperation)draggingUpdated:(id<NSDraggingInfo>)sender
+{
+    // 必须与 draggingEntered: 保持同一判断。NSView 默认实现是「全部接受」，
+    // 只改写 draggingEntered: 的话，指针一移动就被默认值覆盖回接受。
+    return [self draggingEntered:sender];
 }
 
 - (void)draggingExited:(id<NSDraggingInfo>)sender
@@ -1034,7 +1059,7 @@ static NSImage *FileIcon(NSString *name, BOOL isDir, BOOL isLink)
 @interface MainViewController : NSViewController
     <NSOutlineViewDataSource, NSOutlineViewDelegate, DropViewDelegate,
      Z7OutlineKeyDelegate, NSFilePromiseProviderDelegate,
-     QLPreviewPanelDataSource, QLPreviewPanelDelegate>
+     QLPreviewPanelDataSource, QLPreviewPanelDelegate, NSSearchFieldDelegate>
 
 /// 这个窗口是否闲置可复用：还没打开归档，也没有任务在跑。窗口管理器据此决定
 /// 新来的归档是投进现有窗口还是另开一个。
@@ -1065,6 +1090,11 @@ static NSImage *FileIcon(NSString *name, BOOL isDir, BOOL isLink)
 @property (nonatomic, strong) NSButton *logBtn;
 @property (nonatomic, strong) NSButton *optionsBtn;
 @property (nonatomic, strong) NSSearchField *searchField;
+/// 搜索项的引用，供 ⌘F 判断搜索框当下是否在视图层级里（见 performFindPanelAction:）。
+@property (nonatomic, strong) NSToolbarItem *searchItem;
+/// 轮询搜索框文本的定时器与上一次的值。为什么需要它见 buildCompressionControls。
+@property (nonatomic, strong) NSTimer *searchPollTimer;
+@property (nonatomic, copy) NSString *lastSearchText;
 
 // §5.1 配置面板（控件本身放进「压缩选项」弹出面板；名称与字段保持与
 // currentOptions 的映射一致）
@@ -1193,6 +1223,16 @@ static NSImage *FileIcon(NSString *name, BOOL isDir, BOOL isLink)
 @end
 
 @implementation MainViewController
+
+- (void)dealloc
+{
+    // 搜索框的通知观察者必须在销毁前摘掉：选择器式的 addObserver: 是不持有（unretained）
+    // 的，窗口关掉、控制器释放之后通知中心仍会向已释放的对象发消息。
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+    // 轮询搜索框的定时器由 runloop 持有，不随控制器一起走——不显式停掉，关掉的
+    // 窗口会留下一个每 0.15 秒空转一次的定时器。
+    [_searchPollTimer invalidate];
+}
 
 - (void)loadView
 {
@@ -1351,6 +1391,54 @@ static NSString *LevelNameForTick(NSInteger tick)
     self.searchField.action = @selector(searchChanged:);
     self.searchField.sendsWholeSearchString = NO;
     self.searchField.sendsSearchStringImmediately = YES;
+    // 边打边过滤：搜索框由普通工具栏 item 的自定义视图承载
+    // （见 itemForItemIdentifier: 里「为什么不用 NSSearchToolbarItem」），
+    // 编辑事件完全归自己，所以按 NSTextField 的标准做法接两条通道：
+    //   ① delegate 的 controlTextDidChange:
+    //   ② NSControlTextDidChangeNotification（字段编辑器直接投递，不经过 delegate）
+    // 上面两个 sends* 决定 action 的发送时机，是第三条通道。三条都汇到同一个
+    // 防抖入口，彼此幂等，多留一条只是保险。
+    self.searchField.delegate = self;
+    // 实时过滤的主通道：字段编辑器（NSTextView）自己 post 的变更通知。
+    //
+    // 实测（2026-09-24，逐字符注入复现）NSSearchField 会把 controlTextDidChange:
+    // 那条链整个吞掉——编辑期间 delegate 回调与 NSControlTextDidChangeNotification
+    // 一次都不来，只有编辑提交（回车）时才吐出，用户看到的就是「输入后必须回车才
+    // 检索」。字段编辑器自己发的 NSTextDidChangeNotification 绕开了 NSCell 的转发，
+    // 每敲一个字符都会到达；中文输入法在选词提交时同样会发。
+    [[NSNotificationCenter defaultCenter]
+        addObserver:self
+           selector:@selector(editorTextDidChange:)
+               name:NSTextDidChangeNotification
+             object:nil];
+    [[NSNotificationCenter defaultCenter]
+        addObserver:self
+           selector:@selector(searchTextDidChange:)
+               name:NSControlTextDidChangeNotification
+             object:self.searchField];
+
+    // 实时过滤的兜底通道：轻量轮询。
+    //
+    // 实测（2026-09-24，逐字符注入复现）：搜索框编辑期间，delegate 的
+    // controlTextDidChange:、NSControlTextDidChangeNotification、以及字段编辑器自己的
+    // NSTextDidChangeNotification 全都收不到——三条都只在编辑提交（回车）时才一次性
+    // 吐出，用户看到的就是「输入后必须回车才检索」。
+    // 文本值本身随时可读（探针逐字读到了 r → re → … → report），所以用 0.15s 轮询
+    // 兜底：比较一次字符串，变了就进同一个防抖入口。代价是一次属性比较，可忽略。
+    // 上面三条事件通道保留：正常键入时它们能立即响应（轮询只是保险）。
+    __weak MainViewController *weakSelf = self;
+    self.lastSearchText = self.searchField.stringValue ?: @"";   // 免得首拍就当成一次变更
+    self.searchPollTimer = [NSTimer timerWithTimeInterval:0.15 repeats:YES block:^(NSTimer *t) {
+        MainViewController *me = weakSelf;
+        if (!me || !me.searchField.window) return;      // 窗口不在，没必要看
+        NSString *v = me.searchField.stringValue ?: @"";
+        if ([v isEqualToString:me.lastSearchText]) return;
+        me.lastSearchText = v;
+        [me searchChanged:nil];
+    }];
+    // Common modes：滚动列表时 runloop 会切到 event tracking，默认模式下的定时器
+    // 会被暂停，输入跟手性就会丢。
+    [[NSRunLoop mainRunLoop] addTimer:self.searchPollTimer forMode:NSRunLoopCommonModes];
 
     // 格式
     self.formatPop = [self popup:@[@"7z", @"zip", @"tar", @"xz", @"gz", @"bz2"]
@@ -2009,6 +2097,13 @@ static NSString *LevelNameForTick(NSInteger tick)
 }
 
 /// 状态栏右侧的摘要：让用户不必展开面板就知道「新建归档」会用什么参数。
+/// 状态栏右侧那一段文字有两个来源，按优先级取：
+///
+///   1. 列表里有选中项 → 「已选 N 项 · 合计 X」，与访达窗口底部的写法一致；
+///   2. 没有选中 → 新建归档的参数摘要（7z · 正常 · …）。
+///
+/// 参数摘要不会因此丢失：它始终挂在 summaryLabel 的 tooltip 上，而压缩面板本身
+/// 也完整列出了每一项。
 - (void)updateOptionsSummary
 {
     Z7CompressionOptions *o = [self currentOptions];
@@ -2019,8 +2114,25 @@ static NSString *LevelNameForTick(NSInteger tick)
     if (self.verifyAfterCheck.state == NSControlStateValueOn) [bits addObject:@"建包后校验"];
     if (self.deleteSourceCheck.state == NSControlStateValueOn) [bits addObject:@"删源文件"];
     if (self.separateCheck.state == NSControlStateValueOn) [bits addObject:@"逐个建包"];
-    self.summaryLabel.stringValue = [NSString stringWithFormat:@"新建归档：%@",
-                                     [bits componentsJoinedByString:@" · "]];
+    NSString *optionsSummary = [NSString stringWithFormat:@"新建归档：%@",
+                                [bits componentsJoinedByString:@" · "]];
+    self.summaryLabel.toolTip = optionsSummary;
+
+    NSArray<Z7Node *> *sel = [self selectedNodes];
+    if (sel.count) {
+        unsigned long long total = 0;
+        BOOL any = NO;
+        for (Z7Node *n in sel) {
+            if (n.hasSize) { total += n.size; any = YES; }
+        }
+        NSMutableString *s = [NSMutableString stringWithFormat:@"已选 %lu 项",
+                              (unsigned long)sel.count];
+        // 目录没有大小，整选目录时只是不追加合计，而不是报一个假的 0 B。
+        if (any) [s appendFormat:@" · 合计 %@", HumanSize(total, YES, NO)];
+        self.summaryLabel.stringValue = s;
+        return;
+    }
+    self.summaryLabel.stringValue = optionsSummary;
 }
 
 #pragma mark 归档树与空状态
@@ -2438,12 +2550,33 @@ static NSString *LevelNameForTick(NSInteger tick)
  willBeInsertedIntoToolbar:(BOOL)flag
 {
     if ([ident isEqualToString:@"search"]) {
-        NSSearchToolbarItem *it = [[NSSearchToolbarItem alloc] initWithItemIdentifier:ident];
-        it.searchField = self.searchField;
-        it.preferredWidthForSearchField = 190;
+        // 搜索框放在普通 item 的自定义视图里，而不是 NSSearchToolbarItem。
+        //
+        // NSSearchToolbarItem 会连属性、约束和编辑事件一起接管（SDK 原文
+        // “the field properties and layout constraints are managed by the item”）。
+        // 实测（2026-09-24）接管得很彻底：在框里打字时，NSSearchField 本该发出的
+        // NSControlTextDidChangeNotification 一次都不投递（把观察者放宽到 object:nil
+        // 也收不到），目标的 action 也退化成只有回车或点放大镜才发——用户看到的就是
+        // 「输入后必须回车才检索」。改用普通 item 承载后编辑事件完全归自己，与其它
+        // 工具栏按钮走同一条已验证的路径。
+        NSView *box = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 190, 28)];
+        [box addSubview:self.searchField];
+        [NSLayoutConstraint activateConstraints:@[
+            [box.widthAnchor  constraintEqualToConstant:190],
+            [box.heightAnchor constraintEqualToConstant:26],
+            [self.searchField.leadingAnchor  constraintEqualToAnchor:box.leadingAnchor],
+            [self.searchField.trailingAnchor constraintEqualToAnchor:box.trailingAnchor],
+            [self.searchField.centerYAnchor  constraintEqualToAnchor:box.centerYAnchor],
+        ]];
+        NSToolbarItem *it = [[NSToolbarItem alloc] initWithItemIdentifier:ident];
+        it.view = box;
         it.label = @"搜索";
         it.paletteLabel = @"搜索";
         it.toolTip = @"按名称搜索归档内的条目";
+        // 紧凑窗口里工具栏放不下所有项时优先保住搜索框：它是过滤列表的唯一入口，
+        // 一旦被收进「>>」就既看不见、也没法聚焦。
+        it.visibilityPriority = NSToolbarItemVisibilityPriorityHigh;
+        self.searchItem = it;
         return it;
     }
 
@@ -2648,6 +2781,12 @@ static BOOL ParseVolumeSize(NSString *t, unsigned long long *out)
     [self appendLog:s reveal:NO];
 }
 
+/// 日志文本的字符上限。引擎在整档操作里会逐条回警告（一个十万条目的归档可以
+/// 刷出同样多的行），而日志抽屉是常驻视图：不封顶的话 NSTextStorage 只增不减，
+/// 每条还各带一份属性字典，内存与重排代价都随会话时长线性增长。超限时从头部
+/// 砍掉一半，保留最近的上下文。
+static const NSUInteger kZ7LogCharLimit = 200000;
+
 /// reveal=YES 时自动展开日志抽屉。警告与错误才是用户需要看到的内容，
 /// 因此由它们自己把抽屉拉出来，而不是让一个空的日志框长期占据空间。
 - (void)appendLog:(NSString *)s reveal:(BOOL)reveal
@@ -2659,6 +2798,9 @@ static BOOL ParseVolumeSize(NSString *t, unsigned long long *out)
         [st appendAttributedString:[[NSAttributedString alloc] initWithString:s
             attributes:@{NSFontAttributeName: [NSFont monospacedSystemFontOfSize:11 weight:NSFontWeightRegular],
                          NSForegroundColorAttributeName: [NSColor labelColor]}]];
+        if (st.length > kZ7LogCharLimit) {
+            [st deleteCharactersInRange:NSMakeRange(0, st.length - kZ7LogCharLimit / 2)];
+        }
         [self.log scrollRangeToVisible:NSMakeRange(st.length, 0)];
     });
 }
@@ -2816,6 +2958,11 @@ static BOOL ParseVolumeSize(NSString *t, unsigned long long *out)
         a == @selector(doPreview:)) {
         return self.archivePath != nil && self.current == nil;
     }
+    // 编辑菜单里的剪切 / 粘贴在本应用没有落点：归档条目不能就地改名，归档也不
+    // 接受粘贴。留着它们全亮会让用户以为功能坏了——禁用才是诚实的界面。
+    // 日志抽屉或搜索框获得焦点时走的是文本视图自己的 target，不经过这里。
+    if (a == @selector(cut:) || a == @selector(paste:)) return NO;
+    if (a == @selector(copy:)) return [self selectedNodes].count > 0;
     return YES;
 }
 
@@ -2826,6 +2973,47 @@ static BOOL ParseVolumeSize(NSString *t, unsigned long long *out)
     [t requestCancel];
     [self showStatus:@"正在停止…"];
     [self appendLog:@"用户请求停止\n"];
+}
+
+/// 「查找 ⌘F」曾经是一条死菜单项：菜单里写好了条目与快捷键，却没有实现，
+/// 于是动作沿响应链落到标准查找面板上（本窗口没有可查找的文本视图）——按下去
+/// 毫无反应。本应用里「查找」只有一种含义：按文件名过滤归档列表，也就是工具栏
+/// 上的搜索框。这里把它接过来：聚焦并全选，用户可以直接开始输入。
+- (void)performFindPanelAction:(id)sender
+{
+    if (self.current) return;   // 任务进行中列表被锁定，搜索没有意义
+    NSWindow *w = self.view.window;
+
+    if (w && self.searchField.window == w) {
+        [w makeFirstResponder:self.searchField];
+        [self.searchField selectText:nil];
+        return;
+    }
+
+    // 走到这里说明搜索框不在本窗口的视图层级里。理论上不该发生——搜索项的
+    // visibilityPriority 已提到 High，紧凑窗口下也会优先保住它。真到了这一步
+    // 也没有官方 API 能把它取回来，至少给一声提示音，别让 ⌘F 变成无声的空操作。
+    NSBeep();
+}
+
+/// ⌘C 拷贝所选项。
+///
+/// 归档条目在文件系统里并不独立存在，给 fileURL 只会得到一个解析不了的位置；
+/// 真正有用的是条目在归档内的路径（可以粘进脚本、粘进 7z 命令行、粘进工单）。
+/// 多选时一行一条，与 Finder 拷贝多个文件名的可读性一致。
+- (void)copy:(id)sender
+{
+    NSArray<Z7Node *> *nodes = [self selectedNodes];
+    if (!nodes.count) { NSBeep(); return; }
+
+    NSMutableArray<NSString *> *lines = [NSMutableArray arrayWithCapacity:nodes.count];
+    for (Z7Node *n in nodes) [lines addObject:n.path];
+
+    NSPasteboard *pb = [NSPasteboard generalPasteboard];
+    [pb clearContents];
+    [pb setString:[lines componentsJoinedByString:@"\n"] forType:NSPasteboardTypeString];
+    [self showStatus:[NSString stringWithFormat:@"已拷贝 %lu 条路径",
+                      (unsigned long)lines.count]];
 }
 
 #pragma mark 打开 / 列表
@@ -2984,6 +3172,29 @@ static BOOL ParseVolumeSize(NSString *t, unsigned long long *out)
 
 #pragma mark 搜索（§6.3）
 
+/// 边打边过滤的两个入口（注册处见 buildCompressionControls），都汇到下面的防抖。
+///
+/// delegate 与通知同时接：前者是 NSTextField 的标准回调，后者由字段编辑器直接
+/// 投递、不经过 delegate 归属。两条路径幂等——都是「取消上一次、排队下一次」，
+/// 任意一条先到都能让列表跟着指尖动。
+- (void)controlTextDidChange:(NSNotification *)note
+{
+    if (note.object != self.searchField) return;
+    [self searchChanged:nil];
+}
+
+/// 实时过滤的主通道：字段编辑器（NSTextView）的变更通知。
+- (void)editorTextDidChange:(NSNotification *)note
+{
+    if (note.object != self.searchField.currentEditor) return;
+    [self searchChanged:nil];
+}
+
+- (void)searchTextDidChange:(NSNotification *)note
+{
+    [self controlTextDidChange:note];
+}
+
 - (void)searchChanged:(id)s
 {
     // 搜索框每敲一个键都会发 action（sendsWholeSearchString 默认为 NO），而一次搜索
@@ -3044,13 +3255,19 @@ static BOOL ParseVolumeSize(NSString *t, unsigned long long *out)
 
 - (NSArray<Z7Node *> *)selectedNodes
 {
+    // 直接取选中行集合，而不是从第 0 行扫到 numberOfRows。旧写法在十万条目的
+    // 归档里每次都要走完全表（删除 / 解压 / 预览 / 菜单校验各一次），且稀疏选择
+    // 下的代价与实际选中数无关。selectedRowIndexes 的代价只与选中数相关。
     NSMutableArray<Z7Node *> *out = [NSMutableArray array];
-    for (NSInteger r = 0; r < self.outline.numberOfRows; r++) {
-        if ([self.outline isRowSelected:r]) {
-            Z7Node *n = [self.outline itemAtRow:r];
-            if (n) [out addObject:n];
-        }
-    }
+    NSInteger rows = self.outline.numberOfRows;
+    // 用 enumerateIndexesUsingBlock: 而不是 for-in：NSIndexSet 的快枚举协议在
+    // SDK 头里没有声明（clang 会报 may not respond to countByEnumeratingWithState:），
+    // 这也正是 Apple 推荐的下标集合遍历方式。
+    [self.outline.selectedRowIndexes enumerateIndexesUsingBlock:^(NSUInteger r, BOOL *stop) {
+        if ((NSInteger)r >= rows) return;
+        Z7Node *n = [self.outline itemAtRow:(NSInteger)r];
+        if (n) [out addObject:n];
+    }];
     return out;
 }
 
@@ -3172,6 +3389,17 @@ static BOOL ParseVolumeSize(NSString *t, unsigned long long *out)
 
     NSMutableArray<NSString *> *paths = [NSMutableArray array];
     for (NSURL *u in p.URLs) [paths addObject:u.path];
+    [self addPaths:paths];
+}
+
+/// 加入归档的实际动作。文件选择面板与「拖入归档窗口」两条入口共用它，
+/// 免得两条路径各写一份、行为逐渐分叉。
+- (void)addPaths:(NSArray<NSString *> *)inputPaths
+{
+    if (!self.archivePath || !inputPaths.count) return;
+    NSMutableArray<NSString *> *paths = [NSMutableArray arrayWithCapacity:inputPaths.count];
+    for (NSString *s in inputPaths) if (s.length) [paths addObject:s];
+    if (!paths.count) return;
 
     Z7Task *t = [[Z7Task alloc] init];
     t.kind = Z7TaskKindAdd;
@@ -3448,6 +3676,65 @@ static NSString *UniqueArchivePath(NSString *dir, NSString *base, NSString *ext)
 
 #pragma mark NSOutlineViewDelegate
 
+/// 选中项变化时刷新状态栏右侧的「已选 N 项 · 合计 X」。
+- (void)outlineViewSelectionDidChange:(NSNotification *)note
+{
+    [self updateOptionsSummary];
+}
+
+#pragma mark 拖入：把文件加入当前归档
+
+/// 拖到已打开归档的窗口里 = 把文件加进这个归档（Windows 版 7-Zip 就是这么用的）。
+///
+/// 列表在空状态下由 DropView 接「拖入即打开」，归档打开后列表盖住它，于是拖进来
+/// 什么反应也没有——旧版本正是如此。这里补上列表侧的投放：
+///   * 行内拖动（draggingSource 是列表自己）是我们的拖出提取，交给系统落盘，
+///     绝不能被当成「加入归档」；
+///   * 没有归档、或正在跑任务时不接受投放。
+- (NSDragOperation)outlineView:(NSOutlineView *)ov
+                  validateDrop:(id<NSDraggingInfo>)info
+                  proposedItem:(id)item
+            proposedChildIndex:(NSInteger)index
+{
+    if (info.draggingSource == self.outline) return NSDragOperationNone;
+    if (!self.archivePath.length || self.current) return NSDragOperationNone;
+    NSArray *urls = [info.draggingPasteboard readObjectsForClasses:@[NSURL.class]
+        options:@{NSPasteboardURLReadingFileURLsOnlyKey: @YES}];
+    return urls.count ? NSDragOperationCopy : NSDragOperationNone;
+}
+
+- (BOOL)outlineView:(NSOutlineView *)ov
+         acceptDrop:(id<NSDraggingInfo>)info
+               item:(id)item
+         childIndex:(NSInteger)index
+{
+    NSArray<NSURL *> *urls = [info.draggingPasteboard readObjectsForClasses:@[NSURL.class]
+        options:@{NSPasteboardURLReadingFileURLsOnlyKey: @YES}];
+    if (!urls.count) return NO;
+
+    NSString *current = self.archivePath;
+    NSMutableArray<NSString *> *paths = [NSMutableArray arrayWithCapacity:urls.count];
+    for (NSURL *u in urls) {
+        // 把归档拖到它自己的窗口上只会变成「归档加入自己」，直接忽略。
+        if (current && [u.path isEqualToString:current]) continue;
+        if (u.path.length) [paths addObject:u.path];
+    }
+    if (!paths.count) { NSBeep(); return NO; }
+
+    // 投放会真的改写用户的归档，且「拖到列表上」的语义不如点「添加文件…」明确，
+    // 所以这里先确认一次再动手。
+    NSAlert *a = [[NSAlert alloc] init];
+    a.messageText = [NSString stringWithFormat:@"将 %lu 项加入归档？", (unsigned long)paths.count];
+    a.informativeText = [NSString stringWithFormat:@"目标：%@\n归档会被重新打包。",
+                         current.lastPathComponent ?: @""];
+    [a addButtonWithTitle:@"加入"];
+    [a addButtonWithTitle:@"取消"];
+    if ([a runModal] != NSAlertFirstButtonReturn) return NO;
+
+    [self addPaths:paths];
+    return YES;
+}
+
 - (NSView *)outlineView:(NSOutlineView *)ov viewForTableColumn:(NSTableColumn *)col item:(id)item
 {
     Z7Node *n = item;
@@ -3621,8 +3908,21 @@ static NSString *UniqueArchivePath(NSString *dir, NSString *base, NSString *ext)
     [self runTask:t after:^(BOOL ok, NSError *error) {
         MainViewController *me = weakSelf;
         if (!me) return;
-        NSString *produced = [t.destDir stringByAppendingPathComponent:n.name];
-        if (!ok || ![[NSFileManager defaultManager] fileExistsAtPath:produced]) {
+        // 引擎按条目在归档内的**完整路径**落盘：归档里的 src/docs/a.md 会解成
+        // destDir/src/docs/a.md。所以先按 n.path 找。
+        //
+        // 旧实现只拼 basename（destDir/a.md），于是**凡是位于子目录里的条目，预览
+        // 一律误报「无法提取条目」**——文件其实已经正确解出来了，只是找错了地方。
+        // 实测证据：选中 src/docs/report-6.md 按空格，临时目录里确实有
+        // z7preview.*/src/docs/report-6.md，而状态栏报失败。
+        NSFileManager *fm = [NSFileManager defaultManager];
+        NSString *produced = [t.destDir stringByAppendingPathComponent:n.path];
+        if (![fm fileExistsAtPath:produced]) {
+            // 兼容被工具剥掉路径前缀的归档（条目实际落在根下）。
+            NSString *byName = [t.destDir stringByAppendingPathComponent:n.name];
+            if ([fm fileExistsAtPath:byName]) produced = byName;
+        }
+        if (!ok || ![fm fileExistsAtPath:produced]) {
             [me showStatus:[NSString stringWithFormat:@"预览失败：%@", error.localizedDescription ?: @"无法提取条目"]];
             return;
         }
@@ -3658,11 +3958,22 @@ static NSString *UniqueArchivePath(NSString *dir, NSString *base, NSString *ext)
 
 - (void)togglePreviewPanel:(id)sender
 {
-    if ([QLPreviewPanel sharedPreviewPanelExists] && [[QLPreviewPanel sharedPreviewPanel] isVisible]) {
-        [[QLPreviewPanel sharedPreviewPanel] orderOut:nil];
-    } else {
-        [[QLPreviewPanel sharedPreviewPanel] makeKeyAndOrderFront:nil];
+    QLPreviewPanel *panel = [QLPreviewPanel sharedPreviewPanel];
+    if ([QLPreviewPanel sharedPreviewPanelExists] && panel.isVisible) {
+        [panel orderOut:nil];
+        return;
     }
+
+    // QLPreviewPanel 是全局单例，它要沿响应链找到愿意接管它的控制器
+    // （acceptsPreviewPanelControl: / beginPreviewPanelControl:）才会装上数据源，
+    // 而响应链的起点是**当前 key window**。用户完全可能从一个非 key 的窗口触发
+    // 预览（多窗口下很常见），那时数据源装不上，面板就会挂在那儿显示
+    // 「未选定项目」——实测（2026-09-24）就是这个现象。
+    // 所以：先把本窗口置前，再让面板出现，出现后立刻 reloadData 让它按最新数据源
+    // 重新取一次条目数。
+    [self.view.window makeKeyAndOrderFront:nil];
+    [panel makeKeyAndOrderFront:nil];
+    [panel reloadData];
 }
 
 #pragma mark 拖出提取（§6.6）
@@ -3855,6 +4166,25 @@ static NSString *UniqueArchivePath(NSString *dir, NSString *base, NSString *ext)
     if (self.onClose) self.onClose(self);
 }
 
+/// 任务进行中关窗口，会让这个任务失去唯一的界面：进度看不见了，「停止」按钮也
+/// 没得点。任务本身还在后台把盘写完（它被 operation 持有），于是用户会以为已经
+/// 取消了。多窗口架构下尤其容易发生——用户可能只是想关掉旁边那个窗口。
+/// 所以先问一句，并说清「关了会怎样」。
+- (BOOL)windowShouldClose:(NSWindow *)sender
+{
+    Z7Task *task = self.vc.current;
+    if (!task) return YES;
+
+    NSAlert *a = [[NSAlert alloc] init];
+    a.messageText = @"任务尚未完成";
+    a.informativeText = [NSString stringWithFormat:
+        @"「%@」还在进行中。现在关闭窗口会失去进度显示与「停止」入口，"
+        @"任务会在后台继续执行完并写入磁盘。", task.title ?: @"当前任务"];
+    [a addButtonWithTitle:@"继续关闭"];
+    [a addButtonWithTitle:@"取消"];
+    return [a runModal] == NSAlertFirstButtonReturn;
+}
+
 @end
 
 #pragma mark - app delegate
@@ -3941,6 +4271,14 @@ static NSString *UniqueArchivePath(NSString *dir, NSString *base, NSString *ext)
     NSMenu *viewMenu = [[NSMenu alloc] initWithTitle:@"显示"];
     [viewMenu addItemWithTitle:@"显示/隐藏日志" action:@selector(toggleLog:) keyEquivalent:@"l"];
     [viewMenu addItemWithTitle:@"清空日志" action:@selector(clearLog:) keyEquivalent:@""];
+    [viewMenu addItem:[NSMenuItem separatorItem]];
+    // 进入/退出全屏幕：窗口本来就可缩放，是全屏幕的合格对象，但 AppKit 只在
+    // 窗口菜单里放「平铺」之类的排布命令，不会替你生成这一条。快捷键 ⌃⌘F 是
+    // macOS 的固定约定，不写这条用户就只能靠绿色按钮，键盘用户没有入口。
+    NSMenuItem *fsItem = [viewMenu addItemWithTitle:@"进入全屏幕"
+                                             action:@selector(toggleFullScreen:)
+                                      keyEquivalent:@"f"];
+    fsItem.keyEquivalentModifierMask = NSEventModifierFlagControl | NSEventModifierFlagCommand;
     viewItem.submenu = viewMenu;
 
     // 窗口
@@ -3956,7 +4294,36 @@ static NSString *UniqueArchivePath(NSString *dir, NSString *base, NSString *ext)
     winItem.submenu = winMenu;
     NSApp.windowsMenu = winMenu;
 
+    // 帮助菜单。菜单栏里这是个固定位置，缺了它整条菜单栏就不完整。内容只放
+    // 真正有用的两条：本应用里「帮助」约等于「怎么找东西」，所以把焦点动作
+    // （搜索列表）与项目文档放在这里。
+    NSMenuItem *helpItem = [[NSMenuItem alloc] init];
+    [bar addItem:helpItem];
+    NSMenu *helpMenu = [[NSMenu alloc] initWithTitle:@"帮助"];
+    [helpMenu addItemWithTitle:@"搜索归档内的条目（⌘F）"
+                        action:@selector(performFindPanelAction:) keyEquivalent:@""];
+    [helpMenu addItem:[NSMenuItem separatorItem]];
+    [helpMenu addItemWithTitle:@"7-Zip 使用说明"
+                        action:@selector(showDocumentation:) keyEquivalent:@"?"];
+    [helpMenu addItemWithTitle:@"7-Zip 官方网站"
+                        action:@selector(showSevenZipWebsite:) keyEquivalent:@""];
+    helpItem.submenu = helpMenu;
+    NSApp.helpMenu = helpMenu;   // 登记后系统才会把它当作帮助菜单处理
+
     NSApp.mainMenu = bar;
+}
+
+- (void)showDocumentation:(id)s
+{
+    // 项目主页的 README 就是这本应用的说明书。
+    NSURL *u = [NSURL URLWithString:@"https://github.com/XINKEJU/7-Zip-macOS#readme"];
+    if (u) [[NSWorkspace sharedWorkspace] openURL:u];
+}
+
+- (void)showSevenZipWebsite:(id)s
+{
+    NSURL *u = [NSURL URLWithString:@"https://www.7-zip.org/"];
+    if (u) [[NSWorkspace sharedWorkspace] openURL:u];
 }
 
 - (void)showAbout:(id)s
@@ -3989,7 +4356,13 @@ static NSString *UniqueArchivePath(NSString *dir, NSString *base, NSString *ext)
     atexit_b(^{ [[Z7TempRegistry shared] cleanupAll]; });
 
     // 启动即给一个空窗口——空窗口本身就是「把归档拖进来」的投放目标。
-    [self newWindowAndShow:YES];
+    //
+    // 但只在这时候还没有任何窗口时才这么做：启动时若带着文件（Finder 里双击归档），
+    // openURLs: 会先于本方法执行并已经建好那个归档的窗口。无条件再开一个空窗口的话，
+    // 系统会把两个窗口并成标签页、并把后建的空窗口顶在前面——用户看到的是一句
+    // 「未打开归档」，以为双击没反应，而归档其实已经读出来了、只是躲在后台标签页里。
+    // 实测（2026-09-24）就是这个现象。
+    if (self.windowControllers.count == 0) [self newWindowAndShow:YES];
     [NSApp activateIgnoringOtherApps:YES];
 }
 
@@ -4054,12 +4427,19 @@ static NSString *UniqueArchivePath(NSString *dir, NSString *base, NSString *ext)
     [NSApp activateIgnoringOtherApps:YES];
 }
 
-- (void)application:(NSApplication *)app openFiles:(NSArray<NSString *> *)filenames
+/// Finder / LaunchServices 投递文件的主入口。
+///
+/// 用 macOS 10.13 起的 `application:openURLs:`，**不**再实现已废弃的
+/// `application:openFiles:`：两者同时实现时，同一次「用 7-Zip 打开」存在被投递
+/// 两次的风险（表现为凭空多出一个窗口）。部署目标是 11.0，新入口一定存在。
+/// 本应用未开启 App Sandbox，URL 直接就是可用路径，无需 security-scoped 访问。
+- (void)application:(NSApplication *)app openURLs:(NSArray<NSURL *> *)urls
 {
-    // 旧实现逐个遍历却只处理第一个（循环体里 break），于是从 Finder 选中多个归档拖到
-    // 程序坞图标上时只有一个会被打开。多窗口下每个文件都有归宿，全部打开。
-    for (NSString *f in filenames) [self openArchive:f];
-    [app replyToOpenOrPrint:NSApplicationDelegateReplySuccess];
+    // 更早的实现逐个遍历却只处理第一个（循环体里 break），于是从 Finder 选中多个
+    // 归档拖到程序坞图标上时只有一个会被打开。多窗口下每个文件都有归宿，全部打开。
+    for (NSURL *u in urls) {
+        if (u.isFileURL && u.path.length) [self openArchive:u.path];
+    }
 }
 
 /// 点按程序坞图标而当前没有可见窗口时，给一个空窗口，而不是让应用「在运行但看不见」。
@@ -4069,8 +4449,11 @@ static NSString *UniqueArchivePath(NSString *dir, NSString *base, NSString *ext)
     return YES;
 }
 
-/// 程序坞图标右键菜单。菜单弹出时不一定有 key window，所以两个条目都显式指向
+/// 程序坞图标右键菜单。菜单弹出时不一定有 key window，所以所有条目都显式指向
 /// 本对象，而不是靠响应链去找 MainViewController。
+///
+/// 与「文件 › 打开最近使用」用同一份最近列表：右键程序坞图标直接回到刚才那几个
+/// 归档，是 macOS 上最省事的一条路径（不用先把窗口切到前台）。
 - (NSMenu *)applicationDockMenu:(NSApplication *)sender
 {
     NSMenu *m = [[NSMenu alloc] init];
@@ -4078,8 +4461,36 @@ static NSString *UniqueArchivePath(NSString *dir, NSString *base, NSString *ext)
     n.target = self;
     NSMenuItem *o = [m addItemWithTitle:@"打开归档…" action:@selector(dockOpenArchive:) keyEquivalent:@""];
     o.target = self;
+
+    NSArray<NSString *> *recent = Z7RecentPaths();
+    if (recent.count) {
+        [m addItem:[NSMenuItem separatorItem]];
+        NSUInteger shown = MIN(recent.count, (NSUInteger)5);
+        for (NSUInteger i = 0; i < shown; i++) {
+            NSString *p = recent[i];
+            NSMenuItem *it = [m addItemWithTitle:p.lastPathComponent
+                                          action:@selector(dockOpenPath:)
+                                   keyEquivalent:@""];
+            it.target = self;
+            it.representedObject = p;
+            it.toolTip = p;
+        }
+    }
     return m;
 }
+
+- (void)dockOpenPath:(NSMenuItem *)item
+{
+    NSString *p = item.representedObject;
+    if (!p.length) return;
+    if (![[NSFileManager defaultManager] fileExistsAtPath:p]) {
+        Z7ForgetRecentPath(p);      // 顺带清掉失效记录，别让它一直挂在菜单里
+        NSBeep();
+        return;
+    }
+    [self openArchive:p];
+}
+
 
 - (void)dockNewArchive:(id)s
 {

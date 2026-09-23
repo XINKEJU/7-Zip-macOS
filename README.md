@@ -48,7 +48,7 @@
 | 区域 | 实现 |
 |---|---|
 | 标题栏 | 统一工具栏（`NSWindowToolbarStyleUnified`）：窗口标题与按钮同处一行；打开归档后标题下方显示归档名，可 ⌘-点击在 Finder 中定位 |
-| 工具栏 | 纯图标按钮（SF Symbols，`NSToolbarDisplayModeIconOnly`），悬停显示中文说明；系统符号缺失时自动降级为文字按钮，不会出现空白按钮；搜索框使用系统 `NSSearchToolbarItem` |
+| 工具栏 | 纯图标按钮（SF Symbols，`NSToolbarDisplayModeIconOnly`），悬停显示中文说明；系统符号缺失时自动降级为文字按钮，不会出现空白按钮；搜索框放在普通 `NSToolbarItem` 的自定义视图里（**不用** `NSSearchToolbarItem`，原因见 BUILD.md 坑点 8），边打字边过滤，无需回车 |
 | 压缩参数 | 收进工具栏「压缩选项」弹出的 `NSPopover`，不占用主界面；面板内两列对齐排布 |
 | 内容区 | 有归档时是八列表格（`NSTableViewStyleFullWidth`），没有时是居中的空状态（图标 + 标题 + 说明 + 主操作按钮），二者互斥显示，不叠加 |
 | 日志 | 默认收起，出错或出现告警时自动展开；也可由工具栏按钮或 ⌘L 开关 |

@@ -154,9 +154,12 @@ SZ=/path/to/7zz && $SZ
    就会在每次启动时覆盖新默认值——只改 `setContentSize:` 的数字是改不动的，
    界面看起来像"改了没生效"。当前键名 `7ZipMainWindow2`。
 2. 窄窗下工具栏会把放不下的按钮自动收进 `>>` 溢出菜单（560pt 下常驻
-   `打开归档 / 新建归档 / 解压到… / 添加文件…`），这是 `NSToolbar` 行为，
-   不需要手工裁剪 `toolbarDefaultItemIdentifiers`；溢出菜单里的自定义
-   `NSButton` 项按 `label` 正常显示，功能可达。
+   `打开归档 / 搜索框 / >>`），这是 `NSToolbar` 行为，不需要手工裁剪
+   `toolbarDefaultItemIdentifiers`。**但自定义视图的 item 必须把按钮的
+   `target`/`action`/`image` 转给 item**（`itemForItemIdentifier:` 末尾三行）：
+   溢出菜单项执行的是 **item 自己**的 action，只设 `view` 会让菜单项目标为
+   nil、被系统自动禁用——表现为「按钮在工具栏上能点，被收进 `>>` 后点了毫无
+   反应」。实测对照：修复前溢出菜单里「压缩选项」「日志」均为灰色不可点。
 
 验证窗口尺寸不必改源码重建：直接写
 `defaults write org.7-zip.macos.app "NSWindow Frame 7ZipMainWindow2" "200 220 460 404 0 0 1470 923 "`
@@ -166,6 +169,34 @@ SZ=/path/to/7zz && $SZ
 若日后要改回约束布局，请先把上面 7 项变量逐一对齐到「能显示」的那一组，并
 用 `screencapture` 实测，不要只凭 `frame` 数值判断正确性——**布局数值正确与
 内容被绘制是两件事**。
+
+### 坑点 8：工具栏搜索框的编辑事件会被 `NSSearchToolbarItem` 吞掉
+
+`NSSearchField` 放进 `NSToolbar` 时**不要**用 `NSSearchToolbarItem`。该 item 会连
+属性、约束和编辑事件一起接管（SDK 原文 “the field properties and layout
+constraints are managed by the item”），实测（2026-09-24）接管得非常彻底：
+
+- 在框里打字，`delegate` 的 `controlTextDidChange:` **一次都不回调**；
+- `NSControlTextDidChangeNotification` 也**一次都不投递**（把观察者放宽到
+  `object:nil` 同样收不到），而 `searchField.delegate` / `.target` 打印出来确实
+  就是 `MainViewController`——配置是对的，回调就是不来；
+- 字段编辑器自己的 `NSTextDidChangeNotification` 也不发；
+- 只有**编辑提交（回车）**时才一次性吐出回调——用户看到的就是
+  「**输入后必须回车才能检索出来**」。
+
+把搜索框放进**普通 `NSToolbarItem` 的自定义视图**（和其余按钮同一机制）后，
+`delegate`/`target` 归自己管，同时给 `visibilityPriority = High` 让紧凑窗口
+优先保住它。此外还加了一条**轻量轮询兜底**（`buildCompressionControls` 里的
+`searchPollTimer`，0.15s 比较一次 `stringValue`）：注入式输入与中文输入法的
+组合文本（marked text）阶段 AppKit 本就不发上述任何通知，只靠事件通道仍会漏；
+文本值本身随时可读，轮询确保任何输入方式（键入、输入法、粘贴）都实时过滤。
+定时器要 `addTimer:forMode:NSRunLoopCommonModes`，否则滚动列表时会被暂停。
+
+**验证要点**：用 System Events 注入按键时，macOS 的输入法会介入（屏幕会弹出
+候选条，`winid2` 里多一个 `436x31` 的输入法窗口），这条路走的是 marked text，
+无法复现真人的逐字符回调——所以判断标准不能只看"有没有回调"，要看**列表行数
+是否随输入变化**。选测试关键字时也要注意：若归档顶层只有一个条目，行数恒为 1，
+会出现假阳性/假阴性，应挑一个命中数明显不同的关键字（例如 6 个 `report-*.md`）。
 
 ## 二·补：内嵌引擎库的构建顺序
 
