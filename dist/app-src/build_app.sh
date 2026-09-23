@@ -54,6 +54,7 @@ for arch in arm64 x86_64; do
           -arch "$arch" -mmacosx-version-min=11.0 \
           -I"$ENG_DIR" -I"$LIB" \
           -framework AppKit -framework Foundation -framework QuickLookUI -framework CoreFoundation \
+          -framework UserNotifications \
           -o "$BUILD/app-$arch" "$HERE/main.m" \
           "$LIB/lib7zbridgeobjc.a" "$LIB/lib7zbridge.a" \
           -L"$LIB" -l7z -lc++ \

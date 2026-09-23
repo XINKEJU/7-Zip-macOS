@@ -22,6 +22,9 @@
 // QLPreviewPanel 属于 QuickLookUI.framework（不是 QuickLook.framework 的
 // QLThumbnail/QLGenerator 那一套），macOS 上的空格预览面板在这里。
 #import <QuickLookUI/QuickLookUI.h>
+// 长任务的完成告知（通知中心）。系统 10.14+ 自带，部署目标 11.0 覆盖得住；
+// 运行时若不可用会自动降级，见 Z7SystemFeedback 里的探测。
+#import <UserNotifications/UserNotifications.h>
 #import <signal.h>
 #import <unistd.h>
 #import <stdlib.h>
@@ -34,6 +37,25 @@
 static const NSTimeInterval kNoProgressTimeout = 300.0;
 /// 进度节流间隔（技术方案 §7.2）：50ms
 static const NSTimeInterval kProgressThrottle = 0.05;
+
+/// 引擎调用的全局锁。
+///
+/// 多窗口架构下每个窗口有自己的任务队列，但**引擎本身不是为并发会话设计的**：
+/// 整个 SevenZipEngine.cpp 里没有任何跨调用的互斥原语（只有任务自己的取消标志是
+/// atomic），而格式注册表、编解码器表一类全局状态是首次访问时惰性初始化的——两个
+/// 线程同时踏进那条路径就是在赌运气。7-Zip 的 COM 接口也从未声明线程安全。
+///
+/// 所以这里做全局串行：窗口、界面、任务队列都是并行的，真到调用引擎那一刻排成一列。
+/// 用户仍然可以在任意窗口随时发起操作（不必等前一个任务结束），也能在别的窗口浏览
+/// 已经载入的归档——那不需要引擎。付出的是「同一时刻只有一个引擎任务在跑」，换来的是
+/// 不必赌上游库的线程安全。
+static NSLock *Z7EngineLock(void)
+{
+    static NSLock *lock;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ lock = [[NSLock alloc] init]; });
+    return lock;
+}
 
 static NSString *HumanSize(unsigned long long n, BOOL hasValue, BOOL isFolder)
 {
@@ -63,6 +85,44 @@ static NSString *DateText(NSDate *d)
         fmt.dateFormat = @"yyyy-MM-dd HH:mm";
     });
     return [fmt stringFromDate:d];
+}
+
+#pragma mark - 最近打开的归档
+
+/// 「最近使用」列表存在 UserDefaults 里。
+///
+/// 不用 NSDocumentController 的 recentDocumentURLs：那是给 NSDocument 架构准备的，
+/// 本应用不是 document-based（窗口与控制器自管），硬套只会得到一个永远为空的菜单。
+static NSString * const kZ7RecentKey = @"Z7RecentArchives";
+static const NSUInteger kZ7RecentLimit = 10;
+
+static NSArray<NSString *> *Z7RecentPaths(void)
+{
+    NSArray *a = [[NSUserDefaults standardUserDefaults] arrayForKey:kZ7RecentKey];
+    return [a isKindOfClass:NSArray.class] ? a : @[];
+}
+
+static void Z7NoteRecentPath(NSString *path)
+{
+    if (!path.length) return;
+    NSMutableArray<NSString *> *a = [Z7RecentPaths() mutableCopy];
+    [a removeObject:path];      // 重复打开同一个归档时把它提到最前，而不是留两条
+    [a insertObject:path atIndex:0];
+    while (a.count > kZ7RecentLimit) [a removeLastObject];
+    [[NSUserDefaults standardUserDefaults] setObject:a forKey:kZ7RecentKey];
+}
+
+static void Z7ForgetRecentPath(NSString *path)
+{
+    if (!path.length) return;
+    NSMutableArray<NSString *> *a = [Z7RecentPaths() mutableCopy];
+    [a removeObject:path];
+    [[NSUserDefaults standardUserDefaults] setObject:a forKey:kZ7RecentKey];
+}
+
+static void Z7ClearRecentPaths(void)
+{
+    [[NSUserDefaults standardUserDefaults] removeObjectForKey:kZ7RecentKey];
 }
 
 #pragma mark - 临时文件登记表（技术方案 §8.2：SIGTERM 清理）
@@ -154,6 +214,150 @@ static void Z7SignalHandler(int sig)
     (void)sig;
     _exit(128 + sig);
 }
+
+#pragma mark - 系统级任务反馈（程序坞徽标 / 通知 / 提示音）
+
+/// 把「长任务在跑 / 跑完了 / 失败了」告诉系统和用户。
+///
+/// 为什么需要它：引擎调用是同步阻塞的，压缩几个 GB 会跑好几分钟。用户不会一直盯着
+/// 窗口，切走之后如果没有反馈，就只能反复切回来查看——这不是 macOS 应用该有的样子。
+/// 系统有三条现成的通道，这里按「打扰程度」从轻到重使用：
+///
+///   * 程序坞徽标（badgeLabel）——不打断、随时可见：单任务报百分比，多任务报任务数；
+///   * 请求注意（requestUserAttention:）——图标弹跳，把用户叫回来；
+///   * 通知中心——用户人已经在别的应用里时的正式告知。
+///
+/// 通知中心这一条在 ad-hoc 签名下不保证可用：UNUserNotificationCenter 拿不到有效的
+/// bundle 代理时会直接抛异常。因此整条路径都带探测与降级，失败即永久退回
+/// 「弹跳 + 提示音」——那两条在任何签名状态下都有效。
+@interface Z7SystemFeedback : NSObject
+
++ (instancetype)shared;
+
+/// 任务开始：程序坞徽标进入忙碌态。
+- (void)taskBegan;
+/// 任务进度（0.0–1.0；负数表示进度未知）。只在单任务时更新徽标。
+- (void)taskProgress:(double)fraction;
+/// 任务结束。仅当应用不在前台时才提醒——用户就在眼前时弹跳与通知都只是干扰。
+- (void)taskEndedWithTitle:(NSString *)title success:(BOOL)ok;
+
+@end
+
+@implementation Z7SystemFeedback {
+    NSInteger _running;      // 正在跑的任务数（多窗口架构下可能 > 1）
+    NSInteger _lastPercent;  // 徽标上最后一次显示的整数百分比
+    BOOL _probed;
+    BOOL _notificationsUsable;
+}
+
++ (instancetype)shared
+{
+    static Z7SystemFeedback *s;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ s = [[Z7SystemFeedback alloc] init]; });
+    return s;
+}
+
+- (instancetype)init
+{
+    self = [super init];
+    if (self) _lastPercent = NSNotFound;
+    return self;
+}
+
+#pragma mark 程序坞徽标
+
+- (void)taskBegan
+{
+    _running++;
+    _lastPercent = NSNotFound;
+    [self refreshBadge];
+    [self prepareNotificationsIfNeeded];
+}
+
+- (void)taskProgress:(double)fraction
+{
+    if (_running != 1) return;      // 多任务并行时徽标改报任务数，见 refreshBadge
+    if (fraction < 0.0) return;
+    NSInteger pct = (NSInteger)(fraction * 100.0);
+    // 只在整数百分比变化时碰程序坞。进度回调按毫秒级触发，不节流会把 Dock 拖垮。
+    if (pct == _lastPercent) return;
+    _lastPercent = pct;
+    [self refreshBadge];
+}
+
+- (void)taskEndedWithTitle:(NSString *)title success:(BOOL)ok
+{
+    if (_running > 0) _running--;
+    _lastPercent = NSNotFound;
+    [self refreshBadge];
+
+    if (NSApp.isActive) return;     // 用户就在本应用里看着，不需要任何提醒
+
+    if (ok) {
+        // 成功：图标跳一下就够了，不要缠着用户。
+        [NSApp requestUserAttention:NSInformationalRequest];
+    } else {
+        // 失败：需要用户回来处理，所以持续弹跳 + 系统警告音。
+        NSBeep();
+        [NSApp requestUserAttention:NSCriticalRequest];
+    }
+    [self postNotification:title success:ok];
+}
+
+- (void)refreshBadge
+{
+    NSDockTile *tile = NSApp.dockTile;
+    if (!tile) return;
+    if (_running <= 0) { tile.badgeLabel = nil; return; }
+    // 并发多个任务时百分比没有意义，改报任务数；单个任务时百分比信息量更大。
+    tile.badgeLabel = (_running == 1 && _lastPercent != NSNotFound)
+        ? [NSString stringWithFormat:@"%ld%%", (long)_lastPercent]
+        : [NSString stringWithFormat:@"%ld", (long)_running];
+}
+
+#pragma mark 通知中心（可用性探测 + 降级）
+
+- (void)prepareNotificationsIfNeeded
+{
+    if (_probed) return;
+    _probed = YES;
+    @try {
+        UNUserNotificationCenter *center = [UNUserNotificationCenter currentNotificationCenter];
+        if (!center) return;
+        _notificationsUsable = YES;
+        // 授权对话框由系统只在首次弹一次。放在「用户刚发起一个任务」时请求，
+        // 比在启动瞬间请求更有上下文。
+        [center requestAuthorizationWithOptions:(UNAuthorizationOptionAlert | UNAuthorizationOptionSound)
+                              completionHandler:^(BOOL granted, NSError *err) {
+            (void)granted; (void)err;   // 未授权时后续请求被系统静默丢弃，属可接受降级
+        }];
+    } @catch (NSException *ex) {
+        // 未签名构建下 currentNotificationCenter 会抛 NSInternalInconsistencyException。
+        _notificationsUsable = NO;
+    }
+}
+
+- (void)postNotification:(NSString *)title success:(BOOL)ok
+{
+    if (!_notificationsUsable) return;
+    UNMutableNotificationContent *c = [[UNMutableNotificationContent alloc] init];
+    c.title = ok ? @"任务已完成" : @"任务失败";
+    c.body = title.length ? title : @"7-Zip";
+    if (!ok) c.sound = [UNNotificationSound defaultSound];
+
+    UNNotificationRequest *req = [UNNotificationRequest requestWithIdentifier:
+        [NSString stringWithFormat:@"org.7-zip.macos.app.task.%ld",
+         (long)([[NSDate date] timeIntervalSince1970] * 1000)] content:c trigger:nil];
+    @try {
+        [[UNUserNotificationCenter currentNotificationCenter]
+            addNotificationRequest:req withCompletionHandler:^(NSError *err) { (void)err; }];
+    } @catch (NSException *ex) {
+        _notificationsUsable = NO;
+    }
+}
+
+@end
 
 #pragma mark - 归档树节点（§6.2 数据模型）
 
@@ -831,6 +1035,20 @@ static NSImage *FileIcon(NSString *name, BOOL isDir, BOOL isLink)
     <NSOutlineViewDataSource, NSOutlineViewDelegate, DropViewDelegate,
      Z7OutlineKeyDelegate, NSFilePromiseProviderDelegate,
      QLPreviewPanelDataSource, QLPreviewPanelDelegate>
+
+/// 这个窗口是否闲置可复用：还没打开归档，也没有任务在跑。窗口管理器据此决定
+/// 新来的归档是投进现有窗口还是另开一个。
+@property (nonatomic, readonly) BOOL isVacant;
+
+/// 供窗口管理器投递归档（多窗口下由它决定落到哪个窗口）。
+- (void)openArchive:(NSString *)path;
+/// 打开归档，成功后再执行后续动作（Finder 服务「用 7-Zip 解压」用）。
+- (void)openArchive:(NSString *)path thenRun:(void (^)(BOOL ok))then;
+/// 供 Finder 服务与拖放使用。
+- (void)compressURLs:(NSArray<NSURL *> *)urls;
+/// 供程序坞菜单使用——菜单弹出时不一定有 key window，无法靠响应链派发。
+- (void)doOpen:(id)sender;
+- (void)doCompressPick:(id)sender;
 @end
 
 @interface MainViewController ()
@@ -930,6 +1148,15 @@ static NSImage *FileIcon(NSString *name, BOOL isDir, BOOL isLink)
 // 任务
 @property (nonatomic, strong) NSOperationQueue *queue;
 @property (nonatomic, strong) Z7Task *current;
+/// 建树 / 建索引 / 搜索这些纯计算用的队列。与引擎任务队列分开：它们不该和引擎
+/// 调用抢同一条串行通道，也不受「同时只允许一个任务」那条约束。
+@property (nonatomic, strong) NSOperationQueue *workQueue;
+/// 内容代次。每次替换树（打开归档）或发起新搜索就 +1；后台算完回主线程时若代次
+/// 已经变了，说明结果已过期，直接丢弃——用代次代替加锁，避免竞态又不引入死锁风险。
+@property (nonatomic, assign) NSUInteger contentGeneration;
+/// 当前任务进度的整数百分比（NSNotFound 表示未知）。只用于标题栏副标题，
+/// 且只在整数位变化时才改写窗口——进度回调是毫秒级的。
+@property (nonatomic, assign) NSInteger subtitlePercent;
 
 // 预览
 @property (nonatomic, strong) NSURL *previewURL;
@@ -961,6 +1188,8 @@ static NSImage *FileIcon(NSString *name, BOOL isDir, BOOL isLink)
                options:(Z7CompressionOptions *)opts;
 - (void)trashPaths:(NSArray<NSString *> *)paths;
 - (void)updateAdvancedToggleStyle;
+- (void)buildTreeAndIndexInBackground:(NSArray<Z7Item *> *)items then:(void (^)(void))then;
+- (void)runSearch;
 @end
 
 @implementation MainViewController
@@ -972,8 +1201,14 @@ static NSImage *FileIcon(NSString *name, BOOL isDir, BOOL isLink)
     self.view = self.drop;
 
     self.queue = [[NSOperationQueue alloc] init];
-    self.queue.maxConcurrentOperationCount = 1;   // §7.1 串行，避免并发写同一归档
+    // 单个窗口内严格串行（§7.1：避免并发写同一个归档）；跨窗口的串行由
+    // Z7EngineLock 负责，因为引擎本身没有跨会话同步。
+    self.queue.maxConcurrentOperationCount = 1;
     self.queue.name = @"org.7-zip.macos.engine";
+    self.workQueue = [[NSOperationQueue alloc] init];
+    self.workQueue.maxConcurrentOperationCount = 1;
+    self.workQueue.name = @"org.7-zip.macos.work";
+    self.subtitlePercent = NSNotFound;
     self.roots = @[];
     self.displayRoots = @[];
     self.indexByPath = [NSMutableDictionary dictionary];
@@ -1033,6 +1268,9 @@ static NSImage *FileIcon(NSString *name, BOOL isDir, BOOL isLink)
     if (img) b.imagePosition = NSImageOnly;
     b.refusesFirstResponder = YES;
     b.toolTip = title;
+    // 纯图标按钮对 VoiceOver 而言只是一个「按钮」。必须显式给标签，否则读屏用户
+    // 根本分不清工具栏上这一排同样大小的图标各自是什么。
+    b.accessibilityLabel = title;
     b.translatesAutoresizingMaskIntoConstraints = NO;
     [b.widthAnchor constraintGreaterThanOrEqualToConstant:36].active = YES;
     [b.heightAnchor constraintEqualToConstant:26].active = YES;
@@ -1061,6 +1299,7 @@ static NSImage *FileIcon(NSString *name, BOOL isDir, BOOL isLink)
     if (img) b.imagePosition = NSImageOnly;
     b.contentTintColor = [NSColor secondaryLabelColor];
     b.refusesFirstResponder = YES;
+    b.accessibilityLabel = text;    // 同上：图标按钮需要给读屏一个名字
     b.translatesAutoresizingMaskIntoConstraints = NO;
     return b;
 }
@@ -1107,6 +1346,7 @@ static NSString *LevelNameForTick(NSInteger tick)
     self.searchField = [[NSSearchField alloc] initWithFrame:NSZeroRect];
     self.searchField.translatesAutoresizingMaskIntoConstraints = NO;
     self.searchField.placeholderString = @"搜索条目";
+    self.searchField.accessibilityLabel = @"搜索归档内的条目";
     self.searchField.target = self;
     self.searchField.action = @selector(searchChanged:);
     self.searchField.sendsWholeSearchString = NO;
@@ -2432,14 +2672,41 @@ static BOOL ParseVolumeSize(NSString *t, unsigned long long *out)
 {
     NSWindow *w = self.view.window;
     if (!w) return;
+
+    // 窗口标题用文件名，而不是固定的应用名。
+    //
+    // 这是 macOS 文档窗口的惯例（访达 / 预览 / 文本编辑都是这样），更关键的是
+    // 多窗口架构下必须如此：窗口可能按用户偏好合并成标签页，而标签上显示的就是
+    // 窗口标题——标题若一律是 "7-Zip"，几个标签页就完全无从分辨。
+    NSString *name = self.archivePath.lastPathComponent;
+    if (!name.length) name = @"7-Zip";
+
+    // 任务进行中时副标题让位给进度。多窗口下用户可能同时开着几个窗口，副标题是
+    // 「一眼看出这个窗口在忙什么、忙到哪了」的位置。
+    if (self.current) {
+        w.title = name;
+        w.subtitle = (self.subtitlePercent == NSNotFound)
+            ? (self.current.title ?: @"处理中")
+            : [NSString stringWithFormat:@"%@ · %ld%%",
+               self.current.title ?: @"处理中", (long)self.subtitlePercent];
+        return;
+    }
+
     if (self.archivePath.length) {
+        w.title = name;
         w.representedURL = [NSURL fileURLWithPath:self.archivePath];
-        w.subtitle = [NSString stringWithFormat:@"%@%@", self.archivePath.lastPathComponent,
-                      self.archiveHeaderEncrypted ? @" · 文件名已加密" : @""];
+        w.subtitle = self.archiveHeaderEncrypted ? @"文件名已加密" : @"";
     } else {
+        w.title = @"7-Zip";
         w.representedURL = nil;
         w.subtitle = @"";
     }
+}
+
+/// 闲置可复用：还没打开归档、也没有任务在跑。
+- (BOOL)isVacant
+{
+    return self.archivePath.length == 0 && self.current == nil;
 }
 
 #pragma mark 任务执行（§7）
@@ -2457,14 +2724,24 @@ static BOOL ParseVolumeSize(NSString *t, unsigned long long *out)
     [self setBusy:YES];
     [self showStatus:task.title];
     [self appendLog:[NSString stringWithFormat:@"\n== %@ ==\n", task.title]];
+    [[Z7SystemFeedback shared] taskBegan];   // 程序坞徽标进入忙碌态
 
     __weak MainViewController *weakSelf = self;
     task.onProgress = ^(Z7Progress *p) {
         MainViewController *me = weakSelf;
         if (!me) return;
         dispatch_async(dispatch_get_main_queue(), ^{
-            if (p.total > 0) me.progress.doubleValue = 100.0 * (double)p.completed / (double)p.total;
+            // 进度未知（total 为 0）时传 -1，让副标题与程序坞徽标都退回「只报状态」。
+            double frac = p.total > 0 ? (double)p.completed / (double)p.total : -1.0;
+            if (frac >= 0.0) me.progress.doubleValue = 100.0 * frac;
             if (p.itemPath.length) me.statusLabel.stringValue = p.itemPath;
+            [[Z7SystemFeedback shared] taskProgress:frac];
+
+            NSInteger pct = frac >= 0.0 ? (NSInteger)(frac * 100.0) : NSNotFound;
+            if (pct != me.subtitlePercent) {    // 同样只在整数位变化时碰标题栏
+                me.subtitlePercent = pct;
+                [me updateArchiveChrome];
+            }
         });
     };
     task.onLog = ^(NSString *msg, Z7LogLevel level) {
@@ -2480,12 +2757,24 @@ static BOOL ParseVolumeSize(NSString *t, unsigned long long *out)
 
     NSBlockOperation *op = [NSBlockOperation blockOperationWithBlock:^{
         NSError *err = nil;
-        BOOL ok = [task execute:&err];
+        BOOL ok = NO;
+        // 引擎调用全局串行（理由见 Z7EngineLock）。用户可能在排队期间就按了「停止」，
+        // 所以拿到锁之后先看一次取消标志，免得排到队首又白跑一遍。
+        NSLock *engineLock = Z7EngineLock();
+        [engineLock lock];
+        if (task.cancelRequested) {
+            err = [NSError errorWithDomain:Z7ErrorDomain code:-1 userInfo:
+                  @{NSLocalizedDescriptionKey: @"操作已取消"}];
+        } else {
+            ok = [task execute:&err];
+        }
+        [engineLock unlock];
         dispatch_async(dispatch_get_main_queue(), ^{
             MainViewController *me = weakSelf;
             if (!me) return;
             me.current = nil;
-            [me setBusy:NO];
+            [me setBusy:NO];     // 副标题在这里恢复成文件名
+            [[Z7SystemFeedback shared] taskEndedWithTitle:task.title success:ok];
             if (after) after(ok, err);
         });
     }];
@@ -2501,6 +2790,10 @@ static BOOL ParseVolumeSize(NSString *t, unsigned long long *out)
     self.progress.doubleValue = 0;
     self.cancelBtn.enabled = busy;
     [self setControlsEnabled:!busy && self.archivePath != nil];
+    // 忙碌状态决定副标题报进度还是报文件名。状态切换的瞬间就同步一次，否则任务
+    // 启动后标题栏会停在旧内容上，一直等到第一个进度回调到达才更新。
+    self.subtitlePercent = NSNotFound;
+    [self updateArchiveChrome];
 }
 
 - (BOOL)validateMenuItem:(NSMenuItem *)item
@@ -2557,12 +2850,27 @@ static BOOL ParseVolumeSize(NSString *t, unsigned long long *out)
 
 - (void)openArchive:(NSString *)path
 {
-    [self openArchive:path password:nil];
+    [self openArchive:path password:nil then:nil];
+}
+
+/// 打开归档，成功后再执行一个动作。Finder 服务「用 7-Zip 解压」要的是「打开完就解压」，
+/// 而打开是异步的（大归档要读好几秒），靠延时猜时间不可靠——所以把后续动作挂到打开
+/// 完成的回调上，而不是 `performSelector:afterDelay:`。
+- (void)openArchive:(NSString *)path thenRun:(void (^)(BOOL ok))then
+{
+    [self openArchive:path password:nil then:then];
 }
 
 - (void)openArchive:(NSString *)path password:(NSString *)password
 {
-    if (!path.length) return;
+    [self openArchive:path password:password then:nil];
+}
+
+- (void)openArchive:(NSString *)path
+           password:(NSString *)password
+               then:(void (^)(BOOL ok))then
+{
+    if (!path.length) { if (then) then(NO); return; }
 
     // 打开用的密码只存在这个字段里，与「压缩选项」的加密口令分开：前者是本次
     // 会话的临时凭据（§8.2 不落盘、用完即清），后者是新建归档时的口令。
@@ -2587,6 +2895,7 @@ static BOOL ParseVolumeSize(NSString *t, unsigned long long *out)
         if (!ok) {
             NSString *msg = error.localizedDescription ?: @"无法打开归档";
             [me appendLog:[msg stringByAppendingString:@"\n"] reveal:YES];
+            me.contentGeneration++;     // 树上已经没内容，作废在途的搜索，免得旧命中回写
             me.roots = @[];
             me.displayRoots = @[];
             [me.outline reloadData];
@@ -2598,70 +2907,126 @@ static BOOL ParseVolumeSize(NSString *t, unsigned long long *out)
             BOOL needsPassword = [msg containsString:@"需要正确密码"] || [msg containsString:@"密码错误"];
             if (needsPassword) {
                 [me promptPasswordWithMessage:msg completion:^(NSString *pw) {
-                    if (pw.length) [me openArchive:path password:pw];
+                    if (pw.length) [me openArchive:path password:pw then:then];
+                    else if (then) then(NO);
                 }];
+            } else if (then) {
+                then(NO);
             }
             return;
         }
 
         me.archiveHeaderEncrypted = t.headerEncryptedOut;
-        me.roots = BuildTree(t.openedItems);
-        me.displayRoots = me.roots;
         me.filtering = NO;
         me.searchField.stringValue = @"";
-        [me rebuildIndex];
-        [me.outline reloadData];
-        [me.outline expandItem:nil expandChildren:NO];
-        [me setControlsEnabled:YES];
-        [me updateArchiveChrome];
-        [me updateEmptyState];
-        [me showStatus:[NSString stringWithFormat:@"已载入 %lu 项", (unsigned long)t.openedItems.count]];
+        Z7NoteRecentPath(path);     // 只有真的打开成功才计入「最近使用」
+        // 建树与建索引都是整棵树的全量遍历，十万条目的归档在主线程做会明显卡住
+        // （表还没刷新，窗口就像死了一样）。挪到后台，回主线程只赋值 + 刷新。
+        [me buildTreeAndIndexInBackground:t.openedItems then:^{
+            if (then) then(YES);
+        }];
     }];
 }
 
-/// path -> 归档内条目索引（供提取时把树节点映射回引擎索引）
-- (void)rebuildIndex
+/// 把「条目数组 -> 树 + 路径索引」这两遍全量遍历放到后台队列，完成后回主线程刷新。
+///
+/// 为什么值得单开一条队列：这一段是 O(n) 的两遍遍历（建树一遍、建索引一遍），n 是
+/// 归档里的条目数。几百项无感，十万项就是肉眼可见的卡顿，而且卡在主线程上时窗口
+/// 连重绘都做不到。索引是提取阶段「树节点 -> 引擎条目号」的映射，必须与树一起
+/// 原子地换掉，否则两者会短暂不一致。
+- (void)buildTreeAndIndexInBackground:(NSArray<Z7Item *> *)items
+                                 then:(void (^)(void))then
 {
-    [self.indexByPath removeAllObjects];
-    NSMutableArray<Z7Node *> *stack = [NSMutableArray arrayWithArray:self.roots];
-    while (stack.count) {
-        Z7Node *n = stack.lastObject;
-        [stack removeLastObject];
-        if (n.index != UINT32_MAX) {
-            self.indexByPath[n.path] = [NSValue valueWithBytes:&(uint32_t){n.index} objCType:@encode(uint32_t)];
+    NSUInteger gen = ++self.contentGeneration;   // 让在途的旧搜索作废
+    __weak MainViewController *weakSelf = self;
+    [self.workQueue addOperationWithBlock:^{
+        NSArray<Z7Node *> *tree = BuildTree(items);
+        NSMutableDictionary<NSString *, NSValue *> *idx =
+            [NSMutableDictionary dictionaryWithCapacity:items.count];
+        NSMutableArray<Z7Node *> *stack = [NSMutableArray arrayWithArray:tree];
+        while (stack.count) {
+            Z7Node *n = stack.lastObject;
+            [stack removeLastObject];
+            if (n.index != UINT32_MAX) {
+                idx[n.path] = [NSValue valueWithBytes:&(uint32_t){n.index}
+                                             objCType:@encode(uint32_t)];
+            }
+            [stack addObjectsFromArray:n.children];
         }
-        [stack addObjectsFromArray:n.children];
-    }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            MainViewController *me = weakSelf;
+            if (!me) return;
+            if (me.contentGeneration != gen) return;   // 已有更新的一次打开，丢弃本次
+            me.roots = tree;
+            me.displayRoots = tree;
+            me.indexByPath = idx;
+            [me.outline reloadData];
+            [me.outline expandItem:nil expandChildren:NO];
+            [me setControlsEnabled:YES];
+            [me updateArchiveChrome];
+            [me updateEmptyState];
+            [me showStatus:[NSString stringWithFormat:@"已载入 %lu 项", (unsigned long)items.count]];
+            if (then) then();
+        });
+    }];
 }
 
 #pragma mark 搜索（§6.3）
 
 - (void)searchChanged:(id)s
 {
+    // 搜索框每敲一个键都会发 action（sendsWholeSearchString 默认为 NO），而一次搜索
+    // 是整棵树的全量遍历。十万条目的归档里连续输入会明显发涩，所以先防抖：停下
+    // 120ms 才真正搜，期间只取消上一次待执行的请求。
+    [NSObject cancelPreviousPerformRequestsWithTarget:self
+                                             selector:@selector(runSearch)
+                                               object:nil];
+    [self performSelector:@selector(runSearch) withObject:nil afterDelay:0.12];
+}
+
+- (void)runSearch
+{
     NSString *q = self.searchField.stringValue;
+
     if (!q.length) {
+        // 清空是即时动作：没有计算量，不该让用户等那 120ms 的防抖窗口。
+        self.contentGeneration++;       // 作废在途搜索
         self.filtering = NO;
         self.displayRoots = self.roots;
         [self.outline reloadData];
         [self updateEmptyState];
-        [self showStatus:[NSString stringWithFormat:@"共 %lu 个顶层条目", (unsigned long)self.roots.count]];
+        [self showStatus:[NSString stringWithFormat:@"共 %lu 个顶层条目",
+                          (unsigned long)self.roots.count]];
         return;
     }
+
     self.filtering = YES;
-    NSMutableArray<Z7Node *> *hits = [NSMutableArray array];
-    NSMutableArray<Z7Node *> *stack = [NSMutableArray arrayWithArray:self.roots];
-    while (stack.count) {
-        Z7Node *n = stack.lastObject;
-        [stack removeLastObject];
-        if ([n.path rangeOfString:q options:NSCaseInsensitiveSearch].location != NSNotFound) {
-            [hits addObject:n];
+    NSUInteger gen = ++self.contentGeneration;
+    // 捕获当前的树：搜索期间用户可能又打开了别的归档，那时 me.contentGeneration 会
+    // 变，这份结果自然被丢弃，不会把旧命中写到新树的界面上。
+    NSArray<Z7Node *> *roots = self.roots;
+    __weak MainViewController *weakSelf = self;
+    [self.workQueue addOperationWithBlock:^{
+        NSMutableArray<Z7Node *> *hits = [NSMutableArray array];
+        NSMutableArray<Z7Node *> *stack = [NSMutableArray arrayWithArray:roots];
+        while (stack.count) {
+            Z7Node *n = stack.lastObject;
+            [stack removeLastObject];
+            if ([n.path rangeOfString:q options:NSCaseInsensitiveSearch].location != NSNotFound) {
+                [hits addObject:n];
+            }
+            [stack addObjectsFromArray:n.children];
         }
-        [stack addObjectsFromArray:n.children];
-    }
-    self.displayRoots = hits;
-    [self.outline reloadData];
-    [self updateEmptyState];
-    [self showStatus:[NSString stringWithFormat:@"匹配 %lu 项", (unsigned long)hits.count]];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            MainViewController *me = weakSelf;
+            if (!me) return;
+            if (me.contentGeneration != gen) return;    // 已被更晚的输入取代
+            me.displayRoots = hits;
+            [me.outline reloadData];
+            [me updateEmptyState];
+            [me showStatus:[NSString stringWithFormat:@"匹配 %lu 项", (unsigned long)hits.count]];
+        });
+    }];
 }
 
 #pragma mark 提取
@@ -3414,11 +3779,76 @@ static NSString *UniqueArchivePath(NSString *dir, NSString *base, NSString *ext)
 
 @end
 
+#pragma mark - 窗口控制器（一个归档一个窗口）
+
+/// 把关一个归档所需的一切收进一个 NSWindowController。
+///
+/// 旧实现是「全局唯一窗口 + 全局唯一任务」：第二个任务进来只会响一声「已有任务在
+/// 执行」，用户必须先等前一个跑完才能动手。多窗口之后，用户可以在任意窗口随时发起
+/// 操作，也能同时开着几个归档来回切换。
+///
+/// 注意「并行」的确切边界：窗口、界面、任务队列是并行的；**引擎调用不是**——
+/// lib7z 没有跨会话的同步原语，所有引擎调用由 Z7EngineLock 全局串行（那里的注释
+/// 说明了理由）。已载入归档的浏览与搜索不经过引擎，所以确实可以一边等任务、一边
+/// 翻看另一个归档。
+///
+/// tabbingIdentifier 相同，于是系统允许把这些窗口合并为标签页——是否合并由
+/// 「系统设置 › 桌面与程序坞 › 窗口」里的用户偏好决定，应用不替用户下这个判断。
+@interface Z7WindowController : NSWindowController <NSWindowDelegate>
+@property (nonatomic, strong) MainViewController *vc;
+/// 窗口关闭时回调，让持有者把控制器从窗口列表里摘掉。
+@property (nonatomic, copy) void (^onClose)(Z7WindowController *wc);
+@end
+
+@implementation Z7WindowController
+
+- (instancetype)init
+{
+    // 尺寸只是初值：紧接着的 setFrameAutosaveName: 会用上次保存的框架覆盖它。
+    NSRect frame = NSMakeRect(0, 0, 1040, 700);
+    NSWindow *w = [[NSWindow alloc] initWithContentRect:frame
+        styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
+                   NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable)
+          backing:NSBackingStoreBuffered defer:NO];
+    self = [super initWithWindow:w];
+    if (!self) return nil;
+
+    w.title = @"7-Zip";
+    w.backgroundColor = [NSColor windowBackgroundColor];
+    // 统一工具栏：标题与工具栏同处一行，内容区从工具栏下方开始。
+    w.toolbarStyle = NSWindowToolbarStyleUnified;
+    // 先钉下最小尺寸，再挂 contentViewController：否则窗口会按内容的自适应尺寸
+    // 收缩（内容区是显式 frame，不参与约束，窗口宽度无从约束）。
+    w.contentMinSize = NSMakeSize(880, 560);
+    w.minSize = NSMakeSize(880, 560);
+    w.tabbingIdentifier = @"7ZipArchive";
+    w.delegate = self;
+
+    _vc = [[MainViewController alloc] init];
+    w.contentViewController = _vc;
+    w.toolbar = _vc.toolbar;
+
+    // setFrameAutosaveName: 返回是否恢复了上次保存的框架；首次运行没有记录时窗口
+    // 会停在内容自适应得到的最小尺寸上，这里显式给回默认尺寸。
+    if (![w setFrameAutosaveName:@"7ZipMainWindow"]) {
+        [w setContentSize:NSMakeSize(1040, 700)];
+        [w center];
+    }
+    return self;
+}
+
+- (void)windowWillClose:(NSNotification *)n
+{
+    if (self.onClose) self.onClose(self);
+}
+
+@end
+
 #pragma mark - app delegate
 
-@interface AppDelegate : NSObject <NSApplicationDelegate>
-@property (nonatomic, strong) NSWindow *window;
-@property (nonatomic, strong) MainViewController *vc;
+@interface AppDelegate : NSObject <NSApplicationDelegate, NSMenuDelegate>
+/// 活着的窗口。关掉的窗口会通过 Z7WindowController.onClose 自我摘除。
+@property (nonatomic, strong) NSMutableArray<Z7WindowController *> *windowControllers;
 @end
 
 @implementation AppDelegate
@@ -3450,13 +3880,25 @@ static NSString *UniqueArchivePath(NSString *dir, NSString *base, NSString *ext)
     NSMenuItem *fileItem = [[NSMenuItem alloc] init];
     [bar addItem:fileItem];
     NSMenu *fileMenu = [[NSMenu alloc] initWithTitle:@"文件"];
-    [fileMenu addItemWithTitle:@"打开归档…" action:@selector(doOpen:) keyEquivalent:@"o"];
     [fileMenu addItemWithTitle:@"新建归档…" action:@selector(doCompressPick:) keyEquivalent:@"n"];
+    [fileMenu addItemWithTitle:@"打开归档…" action:@selector(doOpen:) keyEquivalent:@"o"];
+    // 「打开最近使用」由 menuNeedsUpdate: 在弹出时填充——最近列表是会变的，
+    // 菜单内容不能在建菜单时一次性定死。
+    NSMenuItem *recentItem = [[NSMenuItem alloc] initWithTitle:@"打开最近使用"
+                                                       action:nil keyEquivalent:@""];
+    NSMenu *recentMenu = [[NSMenu alloc] initWithTitle:@"打开最近使用"];
+    recentMenu.delegate = self;
+    recentItem.submenu = recentMenu;
+    [fileMenu addItem:recentItem];
     [fileMenu addItem:[NSMenuItem separatorItem]];
     [fileMenu addItemWithTitle:@"解压到…" action:@selector(doExtract:) keyEquivalent:@"e"];
     [fileMenu addItemWithTitle:@"添加文件…" action:@selector(doAdd:) keyEquivalent:@"d"];
     [fileMenu addItem:[NSMenuItem separatorItem]];
     [fileMenu addItemWithTitle:@"测试归档" action:@selector(doTest:) keyEquivalent:@"t"];
+    [fileMenu addItem:[NSMenuItem separatorItem]];
+    // 多窗口下 ⌘W 的含义是「关掉这个归档的窗口」。不设 target，让响应链把它交给
+    // key window——只作用于前台窗口，正是用户预期的语义。
+    [fileMenu addItemWithTitle:@"关闭窗口" action:@selector(performClose:) keyEquivalent:@"w"];
     fileItem.submenu = fileMenu;
 
     // 编辑
@@ -3494,7 +3936,12 @@ static NSString *UniqueArchivePath(NSString *dir, NSString *base, NSString *ext)
     NSMenu *winMenu = [[NSMenu alloc] initWithTitle:@"窗口"];
     [winMenu addItemWithTitle:@"最小化" action:@selector(performMiniaturize:) keyEquivalent:@"m"];
     [winMenu addItemWithTitle:@"缩放" action:@selector(performZoom:) keyEquivalent:@""];
+    [winMenu addItemWithTitle:@"全部置于顶层" action:@selector(arrangeInFront:) keyEquivalent:@""];
+    // 注册为系统的「窗口」菜单后，AppKit 会自己在末尾维护窗口列表与标签页管理项
+    // （显示上一个/下一个标签页、合并所有窗口…）。手写这些条目只会失去系统一致性，
+    // 例如系统会按「系统设置」里的标签页偏好决定是否显示它们。
     winItem.submenu = winMenu;
+    NSApp.windowsMenu = winMenu;
 
     NSApp.mainMenu = bar;
 }
@@ -3528,31 +3975,8 @@ static NSString *UniqueArchivePath(NSString *dir, NSString *base, NSString *ext)
     signal(SIGINT, Z7SignalHandler);
     atexit_b(^{ [[Z7TempRegistry shared] cleanupAll]; });
 
-    self.vc = [[MainViewController alloc] init];
-    NSRect frame = NSMakeRect(0, 0, 1040, 700);
-    self.window = [[NSWindow alloc] initWithContentRect:frame
-        styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
-                   NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable)
-          backing:NSBackingStoreBuffered defer:NO];
-    self.window.title = @"7-Zip";
-    self.window.backgroundColor = [NSColor windowBackgroundColor];
-    // 统一工具栏：标题与工具栏同处一行，内容区从工具栏下方开始。配合窗口
-    // 自身的 contentView，不会再出现"控件压在标题栏上"的叠影。
-    self.window.toolbarStyle = NSWindowToolbarStyleUnified;
-    // 先钉下最小尺寸，再挂 contentViewController：否则窗口会按内容的自适应
-    // 尺寸收缩（内容区现在是显式 frame，不再参与约束，窗口宽度无从约束）。
-    self.window.contentMinSize = NSMakeSize(880, 560);
-    self.window.contentViewController = self.vc;
-    self.window.toolbar = self.vc.toolbar;
-    self.window.minSize = NSMakeSize(880, 560);
-    // setFrameAutosaveName: 返回是否成功恢复了上次保存的尺寸。首次运行（没有
-    // 保存记录）时窗口会停在内容自适应得到的最小尺寸上，这里显式给回默认尺寸。
-    if (![self.window setFrameAutosaveName:@"7ZipMainWindow"]) {
-        [self.window setContentSize:NSMakeSize(1040, 700)];
-    }
-    [self.window center];
-    [self.window makeKeyAndOrderFront:nil];
-
+    // 启动即给一个空窗口——空窗口本身就是「把归档拖进来」的投放目标。
+    [self newWindowAndShow:YES];
     [NSApp activateIgnoringOtherApps:YES];
 }
 
@@ -3563,20 +3987,163 @@ static NSString *UniqueArchivePath(NSString *dir, NSString *base, NSString *ext)
     [[Z7TempRegistry shared] cleanupAll];
 }
 
+#pragma mark 窗口管理
+
+- (NSMutableArray<Z7WindowController *> *)windowControllers
+{
+    if (!_windowControllers) _windowControllers = [NSMutableArray array];
+    return _windowControllers;
+}
+
+- (Z7WindowController *)newWindowAndShow:(BOOL)show
+{
+    Z7WindowController *wc = [[Z7WindowController alloc] init];
+    __weak AppDelegate *weakSelf = self;
+    wc.onClose = ^(Z7WindowController *w) { [weakSelf.windowControllers removeObject:w]; };
+    [self.windowControllers addObject:wc];
+
+    // 与上一个窗口错开摆放，避免多个窗口完全重叠（macOS 新窗口的级联习惯）。
+    NSWindow *prev = self.windowControllers.count > 1
+        ? self.windowControllers[self.windowControllers.count - 2].window : nil;
+    if (prev && prev.isVisible) {
+        [wc.window setFrameTopLeftPoint:NSMakePoint(NSMinX(prev.frame) + 26.0,
+                                                    NSMaxY(prev.frame) - 26.0)];
+    }
+    if (show) [wc showWindow:nil];
+    return wc;
+}
+
+/// 可以当投放目标的窗口：还没打开任何归档，也没有任务在跑。
+///
+/// 从 Finder 拖归档进来时，如果桌面上正摆着这样一个空窗口，就应该复用它而不是
+/// 再开一个——否则拖三次就多出三个空窗口，这是 Finder 与文本编辑器的共同习惯。
+- (Z7WindowController *)vacantWindowController
+{
+    for (Z7WindowController *wc in self.windowControllers.reverseObjectEnumerator) {
+        if (wc.vc.isVacant) return wc;
+    }
+    return nil;
+}
+
+/// 在合适的窗口里打开一个归档：优先复用空窗口，否则新开一个。
+- (void)openArchive:(NSString *)path
+{
+    if (!path.length) return;
+    Z7WindowController *wc = [self vacantWindowController] ?: [self newWindowAndShow:NO];
+    [wc showWindow:nil];
+    [wc.window makeKeyAndOrderFront:nil];
+    [wc.vc openArchive:path];
+}
+
 - (void)openPathOnLaunch:(NSString *)path
 {
-    [self.vc openArchive:path];
+    [self openArchive:path];
     [NSApp activateIgnoringOtherApps:YES];
 }
 
 - (void)application:(NSApplication *)app openFiles:(NSArray<NSString *> *)filenames
 {
-    for (NSString *f in filenames) {
-        [self.vc openArchive:f];
-        break;      // 只打开第一个
-    }
+    // 旧实现逐个遍历却只处理第一个（循环体里 break），于是从 Finder 选中多个归档拖到
+    // 程序坞图标上时只有一个会被打开。多窗口下每个文件都有归宿，全部打开。
+    for (NSString *f in filenames) [self openArchive:f];
     [app replyToOpenOrPrint:NSApplicationDelegateReplySuccess];
 }
+
+/// 点按程序坞图标而当前没有可见窗口时，给一个空窗口，而不是让应用「在运行但看不见」。
+- (BOOL)applicationShouldHandleReopen:(NSApplication *)app hasVisibleWindows:(BOOL)flag
+{
+    if (!flag) [self newWindowAndShow:YES];
+    return YES;
+}
+
+/// 程序坞图标右键菜单。菜单弹出时不一定有 key window，所以两个条目都显式指向
+/// 本对象，而不是靠响应链去找 MainViewController。
+- (NSMenu *)applicationDockMenu:(NSApplication *)sender
+{
+    NSMenu *m = [[NSMenu alloc] init];
+    NSMenuItem *n = [m addItemWithTitle:@"新建归档…" action:@selector(dockNewArchive:) keyEquivalent:@""];
+    n.target = self;
+    NSMenuItem *o = [m addItemWithTitle:@"打开归档…" action:@selector(dockOpenArchive:) keyEquivalent:@""];
+    o.target = self;
+    return m;
+}
+
+- (void)dockNewArchive:(id)s
+{
+    [self dockTarget:^(MainViewController *vc) { [vc doCompressPick:nil]; }];
+}
+
+- (void)dockOpenArchive:(id)s
+{
+    [self dockTarget:^(MainViewController *vc) { [vc doOpen:nil]; }];
+}
+
+- (void)dockTarget:(void (^)(MainViewController *vc))action
+{
+    Z7WindowController *wc = [self vacantWindowController] ?: [self newWindowAndShow:YES];
+    [wc showWindow:nil];
+    [wc.window makeKeyAndOrderFront:nil];
+    action(wc.vc);
+}
+
+// macOS 13 起，未声明安全状态恢复的应用会被系统提示「未能恢复窗口」。本应用不做
+// 窗口状态恢复（关闭即退出），显式声明支持即可消除这条噪音，而不是留一个假的恢复路径。
+- (BOOL)applicationSupportsSecureRestorableState:(NSApplication *)app { return YES; }
+
+#pragma mark 最近使用
+
+/// 菜单弹出时才填内容：最近列表每打开一个归档就变，建菜单时定死会一直显示旧内容。
+- (void)menuNeedsUpdate:(NSMenu *)menu
+{
+    [menu removeAllItems];
+
+    NSArray<NSString *> *recent = Z7RecentPaths();
+    if (!recent.count) {
+        NSMenuItem *empty = [menu addItemWithTitle:@"没有最近使用的归档"
+                                           action:nil keyEquivalent:@""];
+        empty.enabled = NO;
+        return;
+    }
+
+    for (NSString *p in recent) {
+        NSMenuItem *it = [menu addItemWithTitle:p.lastPathComponent
+                                        action:@selector(openRecent:)
+                                 keyEquivalent:@""];
+        it.target = self;
+        it.representedObject = p;
+        it.toolTip = p;     // 同名文件靠位置区分，悬停能看到完整路径
+    }
+
+    [menu addItem:[NSMenuItem separatorItem]];
+    NSMenuItem *clear = [menu addItemWithTitle:@"清除菜单"
+                                        action:@selector(clearRecent:)
+                                 keyEquivalent:@""];
+    clear.target = self;
+}
+
+- (void)openRecent:(NSMenuItem *)item
+{
+    NSString *p = item.representedObject;
+    if (!p.length) return;
+
+    if (![[NSFileManager defaultManager] fileExistsAtPath:p]) {
+        // 归档被移走或删掉时既不要静默失败，也不要留着这条死记录。
+        Z7ForgetRecentPath(p);
+        NSAlert *a = [[NSAlert alloc] init];
+        a.messageText = @"找不到归档";
+        a.informativeText = [NSString stringWithFormat:@"「%@」已被移动或删除，已从列表中移除。", p];
+        [a addButtonWithTitle:@"好"];
+        [a runModal];
+        return;
+    }
+    [self openArchive:p];
+}
+
+- (void)clearRecent:(id)s
+{
+    Z7ClearRecentPaths();
+}
+
 
 #pragma mark 服务
 
@@ -3587,7 +4154,7 @@ static NSString *UniqueArchivePath(NSString *dir, NSString *base, NSString *ext)
     NSArray *urls = [pboard readObjectsForClasses:@[NSURL.class]
         options:@{NSPasteboardURLReadingFileURLsOnlyKey: @YES}];
     if (!urls.count) { if (error) *error = @"没有收到文件"; return; }
-    [self.vc compressURLs:urls];
+    [self dockTarget:^(MainViewController *vc) { [vc compressURLs:urls]; }];
 }
 
 - (void)extractWithSevenZip:(NSPasteboard *)pboard
@@ -3597,8 +4164,15 @@ static NSString *UniqueArchivePath(NSString *dir, NSString *base, NSString *ext)
     NSArray *urls = [pboard readObjectsForClasses:@[NSURL.class]
         options:@{NSPasteboardURLReadingFileURLsOnlyKey: @YES}];
     if (!urls.count) { if (error) *error = @"没有收到归档"; return; }
-    [self.vc openArchive:[urls[0] path]];
-    [self.vc performSelector:@selector(doExtract:) withObject:nil afterDelay:0.4];
+
+    // 「打开完再解压」必须挂在打开完成的回调上：旧实现用 afterDelay:0.4 猜时间，
+    // 大归档 0.4 秒还没读完列表，解压就落到一个空窗口上、静默什么也不做。
+    Z7WindowController *wc = [self vacantWindowController] ?: [self newWindowAndShow:NO];
+    [wc showWindow:nil];
+    [wc.window makeKeyAndOrderFront:nil];
+    [wc.vc openArchive:[urls[0] path] thenRun:^(BOOL ok) {
+        if (ok) [wc.vc doExtract:nil];
+    }];
 }
 
 @end
