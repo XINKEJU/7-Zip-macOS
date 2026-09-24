@@ -198,6 +198,63 @@ constraints are managed by the item”），实测（2026-09-24）接管得非�
 是否随输入变化**。选测试关键字时也要注意：若归档顶层只有一个条目，行数恒为 1，
 会出现假阳性/假阴性，应挑一个命中数明显不同的关键字（例如 6 个 `report-*.md`）。
 
+**⌘F 的焦点是可靠的**（探针实测 `makeFirstResponder:` 返回 1、首响应者变成
+`NSTextView`）。如果注入按键后列表没反应，先确认**应用确实是最前且窗口是 key
+窗口**——`set frontmost to true` 之后紧跟的那次 `keystroke` 有时会落空；把
+「激活 → 延时 → 注入」放在**同一次 `osascript` 调用**里可稳定复现。
+判别菜单栏是否被焦点污染：`AXMain` / `AXFocused` 为 `false` 时，所有依赖 key
+窗口的菜单项（连「进入全屏幕」）都会读成禁用，那是读数假象，不是产品缺陷。
+
+### 坑点 9：`NSPopover` 的锚点必须落在窗口的视图层级里
+
+`showRelativeToRect:ofView:preferredEdge:` 的 `ofView:` 传一个**不在任何窗口层级
+里**的视图，弹层会**静默不出现**（不报错、不崩溃、不写日志），表现为「点了没反应」。
+
+触发条件正是本应用的紧凑窗口：AppKit 会把工具栏放不下的 item 收进「>>」溢出菜单，
+**一旦被收起，该 item 的 view 就被移出工具栏层级**，`button.window` 变成 `nil`。
+探针实测：
+
+```
+SHOWOPTIONS sender=NSMenuItem isView=0 btnWindow=0 anchorWindow=0
+ANCHOR=NSButton bounds=43x24 inWindow=0
+（此后没有 AFTER_SHOW —— 执行没能走到下一行）
+```
+
+注意溢出菜单项与菜单栏项两者 `sender` 都是 `NSMenuItem`，**不是**按钮，所以
+「用 sender 当锚点」这条常见写法在这里天然失效，必须显式回退。
+
+正确做法是三级回退，保证锚点**始终在窗口层级内**：
+
+1. `sender` 是视图且 `sender.window != nil` → 用它（弹层贴着按钮，位置最自然）；
+2. 否则 `optionsBtn.window != nil` → 用按钮；
+3. 否则退到 `self.view`，取内容区顶边正中的 `1×1pt` 细条当锚点矩形，
+   `preferredEdge = NSRectEdgeMinY` 会把弹层挂在该矩形下沿——视觉上正好落在
+   工具栏下方居中，用户不会找不到。
+
+**同时注意**：`NSToolbarItem` 只设 `view` 是不够的。溢出菜单执行的是 **item 自己**
+的 `target`/`action`，自定义视图不参与菜单，必须把按钮的 `target`/`action`/`image`
+原样转给 item，否则那些被收起来的按钮在菜单里会**自动变灰**。
+
+### 坑点 10：紧凑窗口下「哪些工具栏项能常驻」取决于搜索框宽度
+
+统一样式（`NSWindowToolbarStyleUnified`）下标题与工具栏同处一行，默认内容宽
+560pt 时空间很紧。搜索框宽度是固定约束，**它多占一点，就少放一个按钮**。同一
+窗口下逐个试过的实测结果：
+
+| 搜索框宽度 | 常驻按钮 |
+|---|---|
+| 190pt | 仅「打开归档」（新建归档、压缩选项都进「>>」） |
+| 150pt | 「打开归档 / 新建归档」 |
+| **120pt** | 「打开归档 / 新建归档 / 压缩选项」三个全部常驻 |
+
+再往下压就切占位文字（「搜索条目」显示不全），故停在 120。当前取值见
+`toolbar:itemForItemIdentifier:willBeInsertedIntoToolbar:` 里搜索项分支的注释。
+
+⚠️ **不要靠提 `visibilityPriority` 来让某个按钮常驻**：实测把「压缩选项」提到
+`High` 之后，AppKit 会优先保住两个 `High` 项（它 + 搜索框），**反而把普通优先级的
+「打开归档」「新建归档」挤进「>>」**——把最高频的操作藏起来，比原来更糟。常驻
+名额只能靠「腾空间」争取，不能靠提优先级抢。
+
 ## 二·补：内嵌引擎库的构建顺序
 
 应用依赖三个产物，顺序固定：

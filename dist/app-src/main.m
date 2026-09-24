@@ -1947,8 +1947,36 @@ static NSString *LevelNameForTick(NSInteger tick)
     }
     [self syncPasswordFieldState];
     [self syncOptionsPopoverSize];
-    NSView *anchor = [sender isKindOfClass:[NSView class]] ? (NSView *)sender : self.optionsBtn;
-    [self.optionsPopover showRelativeToRect:anchor.bounds
+
+    // 锚点必须位于**窗口的视图层级里**，否则 showRelativeToRect:ofView: 无法定位、
+    // 静默失败（弹层完全不出现）。
+    //
+    // 窗口是固定的紧凑尺寸，工具栏放不下的项会被 AppKit 收进「>>」溢出菜单；一旦被
+    // 收起，该项的 view 就被移出工具栏层级，self.optionsBtn.window 变成 nil（探针
+    // 实测：sender=NSMenuItem、btnWindow=0）。此时再拿按钮当锚点就是往游离视图上
+    // 定位——点击菜单项毫无反应，正是「压缩选项点击后无反应」的根因。
+    //
+    // 因此分三级回退：按钮/ sender 视图在层级里就用它（弹在按钮下方，位置最自然）；
+    // 都不可用就退到内容视图顶边中间——弹层从标题栏下方居中拉开，与工具栏同处一个
+    // 视觉区域，用户不会找不到它。
+    NSView *anchor = nil;
+    NSRect anchorRect = NSZeroRect;
+    if ([sender isKindOfClass:[NSView class]] && ((NSView *)sender).window) {
+        anchor = (NSView *)sender;
+        anchorRect = anchor.bounds;
+    } else if (self.optionsBtn.window) {
+        anchor = self.optionsBtn;
+        anchorRect = anchor.bounds;
+    } else if (self.view) {
+        anchor = self.view;
+        NSRect cb = anchor.bounds;
+        // 1×1pt 的细条贴在内容区顶边正中：preferredEdge=MinY 把弹层挂在该矩形
+        // 下沿，视觉上正好落在工具栏下方、水平居中。
+        anchorRect = NSMakeRect(NSMidX(cb) - 0.5, NSMaxY(cb) - 1.0, 1.0, 1.0);
+    }
+    if (!anchor) { NSBeep(); return; }
+
+    [self.optionsPopover showRelativeToRect:anchorRect
                                      ofView:anchor
                              preferredEdge:NSRectEdgeMinY];
     // 弹层出现后不要让第一个控件（分卷）自动获得焦点：面板是"看一眼/改一下"的
@@ -2425,7 +2453,7 @@ static NSString *LevelNameForTick(NSInteger tick)
     self.progress.indeterminate = NO;
     self.progress.minValue = 0; self.progress.maxValue = 100;
     self.progress.controlSize = NSControlSizeSmall;
-    [self.progress.widthAnchor constraintEqualToConstant:150].active = YES;
+    [self.progress.widthAnchor constraintEqualToConstant:120].active = YES;
 
     self.cancelBtn = [NSButton buttonWithTitle:@"停止" target:self action:@selector(doCancel:)];
     self.cancelBtn.translatesAutoresizingMaskIntoConstraints = NO;
@@ -2559,10 +2587,16 @@ static NSString *LevelNameForTick(NSInteger tick)
         // 也收不到），目标的 action 也退化成只有回车或点放大镜才发——用户看到的就是
         // 「输入后必须回车才检索」。改用普通 item 承载后编辑事件完全归自己，与其它
         // 工具栏按钮走同一条已验证的路径。
-        NSView *box = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 190, 28)];
+        // 宽度取 120 是实测出来的，不是随手定的：工具栏是统一样式，标题与按钮同在
+        // 一行，默认窗口内容宽 560pt 时空间很紧。同一窗口下逐个试过——
+        //   搜索框 190pt → 工具栏只放得下「打开归档」（新建归档、压缩选项全进「>>」）
+        //   搜索框 150pt → 放得下「打开归档 / 新建归档」
+        //   搜索框 120pt → 「打开归档 / 新建归档 / 压缩选项」三个全部常驻
+        // 再往下压就开始切占位文字（「搜索条目」显示不全），故停在 120。
+        NSView *box = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 120, 28)];
         [box addSubview:self.searchField];
         [NSLayoutConstraint activateConstraints:@[
-            [box.widthAnchor  constraintEqualToConstant:190],
+            [box.widthAnchor  constraintEqualToConstant:120],
             [box.heightAnchor constraintEqualToConstant:26],
             [self.searchField.leadingAnchor  constraintEqualToAnchor:box.leadingAnchor],
             [self.searchField.trailingAnchor constraintEqualToAnchor:box.trailingAnchor],
@@ -2606,6 +2640,11 @@ static NSString *LevelNameForTick(NSInteger tick)
     it.target = btn.target;
     it.action = btn.action;
     it.image = btn.image;
+    // 这里**不要**给「压缩选项」提 visibilityPriority：实测把它提到 High 之后，
+    // AppKit 会优先保住两个 High 项（它 + 搜索框），反而把普通优先级的「打开归档」
+    // 「新建归档」挤进「>>」——把最高频的操作藏起来，比原来更糟。紧凑窗口只放得下
+    // 两个按钮，常驻名额留给「打开归档 / 新建归档」，「压缩选项」走溢出菜单 /
+    // ⌘, / 应用菜单三个已验证可用的入口。
     return it;
 }
 
