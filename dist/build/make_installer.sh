@@ -284,8 +284,36 @@ printf '   %s  %s bytes\n' "$(basename "$DMG")" "$(stat -f%z "$DMG")"
 
 # ---------------------------------------------------------------------------
 echo "== 8. 命令行工具压缩包 (tar.xz) =="
-( cd "$ROOT_CLI/usr/local" && tar --no-xattrs --owner=0 --group=0 --numeric-owner \
-      -cJf "$TARXZ" . )
+# tar 的方言不统一：覆盖属主的选项各版本不同名，各自支持的子集也不同。本机试
+# 通过不等于别的环境也通过 —— CI 上就出现过
+#   tar: Option --owner=0 is not supported
+# 让 make pkg 在最后一步直接失败。所以先探测本机 tar 接受哪一组，再用它打包。
+# 前两组产出的字节完全一致（bsdtar 对 GNU 风格与自身风格做了等价处理，已实测
+# 逐字节比对），只有退到 --no-xattrs 或全裸时属主才会跟着构建者走。
+# 这里刻意用显式分支而不是把选项拼进变量展开：zsh 不对未加引号的变量做分词，
+# 拼串写法在 zsh 下会把整串当成单个选项。
+# 探测只归档脚本自身这一个小文件，避免为了试选项去遍历整个工作目录。
+TAR_SET=none
+if   tar --no-xattrs --owner=0 --group=0 --numeric-owner -cf /dev/null "$0" >/dev/null 2>&1; then
+    TAR_SET=owner
+elif tar --no-xattrs --uid 0 --gid 0 --numeric-owner -cf /dev/null "$0" >/dev/null 2>&1; then
+    TAR_SET=uid
+elif tar --no-xattrs -cf /dev/null "$0" >/dev/null 2>&1; then
+    TAR_SET=plain
+fi
+printf '   tar: %s\n' "$(tar --version 2>&1 | head -1)"
+case "$TAR_SET" in
+    owner) printf '   选项: --no-xattrs --owner=0 --group=0 --numeric-owner\n'
+           ( cd "$ROOT_CLI/usr/local" && tar --no-xattrs --owner=0 --group=0 \
+                 --numeric-owner -cJf "$TARXZ" . ) ;;
+    uid)   printf '   选项: --no-xattrs --uid 0 --gid 0 --numeric-owner\n'
+           ( cd "$ROOT_CLI/usr/local" && tar --no-xattrs --uid 0 --gid 0 \
+                 --numeric-owner -cJf "$TARXZ" . ) ;;
+    plain) printf '   选项: --no-xattrs（本机 tar 不支持属主覆盖，属主将随构建者）\n'
+           ( cd "$ROOT_CLI/usr/local" && tar --no-xattrs -cJf "$TARXZ" . ) ;;
+    *)     printf '   选项: 无（本机 tar 连 --no-xattrs 都不支持，按默认方式打包）\n'
+           ( cd "$ROOT_CLI/usr/local" && tar -cJf "$TARXZ" . ) ;;
+esac
 printf '   %s  %s bytes\n' "$(basename "$TARXZ")" "$(stat -f%z "$TARXZ")"
 
 # ---------------------------------------------------------------------------
