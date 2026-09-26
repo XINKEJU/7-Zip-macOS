@@ -48,6 +48,45 @@ The installer writes into /usr/local and /Applications, so it asks for an
 administrator password.
 
 
+USING THE APPLICATION
+---------------------
+
+The application is a native AppKit front end. The compression engine runs
+inside the application process: it is loaded as an embedded library
+(Contents/Frameworks/lib7z.dylib) and never spawns a helper process.
+
+  Browsing
+    Drag an archive onto the window, or open one from Finder. The list shows
+    name, size, packed size, ratio, modified time, CRC, method and
+    attributes; Finder-style columns appear by default and the rest can be
+    enabled from the column header menu. Press Space - or double-click a
+    file - for a Quick Look preview, and double-click a folder to expand it.
+    Drag entries out to extract them into Finder. The search field filters
+    the list as you type.
+
+  Extracting
+    "Extract to..." asks for a destination folder and offers a strategy for
+    names that already exist: overwrite, skip, or keep both (automatic
+    rename). The choice is remembered for next time. Note that macOS 26
+    keeps this control behind the "Show Options" button of the system panel.
+
+  Encrypted archives
+    The password prompt offers "Remember this archive's password on this
+    Mac". If enabled, the password is stored in your login keychain (service
+    "org.7-zip.macos", account = the archive's standardized path) and reused
+    silently the next time you open that archive. A remembered password that
+    is rejected is deleted immediately, so it is never retried in a loop.
+    Because this build is ad-hoc signed, macOS may ask once for keychain
+    access after a rebuild; "Always Allow" stops further prompts.
+
+  Large archives
+    Building the file tree runs on a background queue, so the window stays
+    responsive. Entries are read from the engine one at a time and released
+    as they are consumed, which halves the peak memory (measurements for a
+    100,000-entry archive are in BUILD.md). Column sorting is likewise
+    computed off the main thread.
+
+
 DOCUMENTATION INSTALLED WITH THE COMMAND LINE TOOLS
 ---------------------------------------------------
 

@@ -255,6 +255,86 @@ ANCHOR=NSButton bounds=43x24 inWindow=0
 「打开归档」「新建归档」挤进「>>」**——把最高频的操作藏起来，比原来更糟。常驻
 名额只能靠「腾空间」争取，不能靠提优先级抢。
 
+### 坑点 11：中文串在 Mach-O 里是 UTF-16，用 `strings | grep 中文` 会误判
+
+核对"某段代码到底有没有编进产物"时，若用 `strings 主程序 | grep 某中文串`，**永远搜不到**：
+Clang 对含非 ASCII 的 `@"..."` 生成 **UTF-16** 存储，二进制里根本不存在它的 UTF-8 字节序列。
+而同一段代码里的 ASCII 字面量（NSUserDefaults 键名、selector 名）照常能搜到，于是会出现
+"同一个方法里一半字符串在、一半不在"的假象，极易被误判成"源码没编译进去"，然后把时间
+浪费在重编上。
+
+按编码分别搜才对：
+
+```bash
+python3 -c "d=open('dist/7-Zip.app/Contents/MacOS/7-Zip','rb').read()
+print('目标已存在同名文件时'.encode('utf-16-le') in d)"
+```
+
+### 坑点 12：不要按「对象大小」估算短字符串的内存收益
+
+优化条目内存时曾按 `NSString` 对象大小估算"每条目的 CRC/属性串约 190 B"，据此认为
+惰性化能省十几 MB。实测（10 万条目）**只有 ~3 MB**：arm64 上 **11 个 UTF-8 字符以内
+的 `NSString` 是 tagged pointer**，`%08X` 的 CRC 串（8 字符）和 9/10 字符的属性串
+**根本不分配堆内存**，值就存在指针里。
+
+唯一真正上堆的是 `AttributeTextFromMode()` 里的 `stringWithUTF8String:`（它不产生
+tagged pointer），也就是那 3 MB 的来源。
+
+结论：短字符串的惰性化主要省的是**构造开销（CPU）**，不是内存。要量内存只能实测
+（`task_vm_info.phys_footprint`，注意 `mach_task_basic_info` 里没有这个字段），
+不能按类字段推算。
+
+### 坑点 13：`NSOpenPanel` 的 accessoryView 在 macOS 26 默认被收进「显示选项」
+
+解压面板的「目标已存在同名文件时」下拉框挂在 `NSOpenPanel.accessoryView` 上。
+macOS 26 的面板**默认不展开**它——右下角只多一个「显示选项 / 隐藏选项」开关。
+首次验证时既看不到控件、AX 树里也查不到，很容易误判为"accessoryView 没生效"。
+
+验证要先点开「显示选项」，控件才会出现在 `splitter group 1` 下：
+
+```bash
+osascript -e 'tell application "System Events" to tell process "7-Zip" \
+    to tell splitter group 1 of window "打开" to click button "显示选项"'
+```
+
+⚠️ 该按钮位于 `splitter group` 之内，直接对 `window` 点击会报 **-1728**。
+点开后再查 `pop up button 2 of splitter group 1 of window "打开"` 即可读到当前策略。
+
+### 坑点 14：大归档的内存峰值来自「先取全量条目，再建树」
+
+打开十万条目归档时，原实现先 `allItems` 攒一份 10 万个 `Z7Item` 的数组（实测 ~58 MB），
+再据此建 UI 树，两份结构同时驻留。改为**逐条 `itemAtIndex:` 流式建树**后，`Z7Item`
+用完即弃（`@autoreleasepool` 分块），峰值降约一半：
+
+| 路径 | 耗时 | 峰值 |
+|---|---|---|
+| `allItems` + 建树 | 0.250 s | **95.9 MB** |
+| 逐条建树（现方案） | 0.253 s | **48.8 MB** |
+
+前提是引擎侧 `getAllItems` 本来就是循环调 `getItem`（`SevenZipEngine.cpp`），逐条取
+没有任何额外代价。`Z7Archive` 的条目表在打开时就已读入，`itemAtIndex:` 是 O(1)。
+
+顺带清掉的两处浪费：
+
+- **一份只写不读的「路径 -> 条目号」字典**（`indexByPath`）：树节点自带 `index`
+  字段，`indicesForNodes:` 一直直接读节点，那份十万条字典从未被任何代码查询过，
+  白白占内存与建表时间。
+- **建树第二遍的排序**：原为「全部路径排序后逐条反向切分」，实测 124 ms；改为遍历
+  字典键（天然去重）并由 `Z7EnsureAncestor` 递归补全中间目录（与处理顺序无关，
+  本就不需要先排序）后降到 **4 ms**。
+
+### 坑点 15：列头排序不能就地排
+
+`outlineView:sortDescriptorsDidChange:` 原先直接对每一层 `children` 就地
+`sortUsingComparator:`。十万条目下这是 O(n log n) 次 `localizedStandardCompare`，
+全压在主线程上。挪到后台时注意：**不能让后台线程就地排序共享的 `children` 数组**——
+主线程可能正在遍历同一批节点渲染。
+
+做法是「后台只算、主线程只搬」：主线程先收集各层数组的引用（O(n) 指针搬运），
+后台对每层 `sortedArrayUsingComparator:` 生成**有序副本**（不触碰原数组，因此后台
+运算期间主线程继续渲染是安全的），回主线程再 `setArray:` 写回并 `reloadData`。
+作废机制沿用搜索那套 `contentGeneration`。
+
 ## 二·补：内嵌引擎库的构建顺序
 
 应用依赖三个产物，顺序固定：
@@ -467,9 +547,9 @@ sh dist/build/package.sh && shasum -a 256 dist/7zip-macos-26.03-macos-arm64.tar.
 自动化入口：
 
 ```bash
-make test        # 桥接层验收，对照官方 7zz 逐项比对（85 个用例）
-make objc-test   # ObjC 适配层验收（App 实际调用的那一层，41 个用例）
-make appcheck    # 应用包验收（含真实启动与进程模型检查，21 个用例）
+make test        # 桥接层验收，对照官方 7zz 逐项比对（88 个用例）
+make objc-test   # ObjC 适配层验收（App 实际调用的那一层，44 个用例）
+make appcheck    # 应用包验收（含真实启动与进程模型检查，20 个用例）
 make verify      # 离线校验：安装/卸载脚本逻辑 + Homebrew 公式一致性
 make check       # verify + 产物校验和 + DMG 完整性 + 应用签名
 make tarball     # Homebrew 分发包（可复现，见上）

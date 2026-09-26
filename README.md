@@ -28,7 +28,7 @@
 | **命令别名** | `7z` → `7zz` 符号链接 | `/usr/local/bin/7z` |
 | **手册页** | `man 7zz`（完整命令与开关说明）、`man 7z`（别名页） | `/usr/local/share/man/man1/` |
 | **命令补全** | zsh / bash / fish 三套，按子命令区分可用开关 | `/usr/local/share/{zsh,bash-completion,fish}/` |
-| **图形界面** | 原生 AppKit 应用，**引擎内嵌于进程**（`Contents/Frameworks/lib7z.dylib`，不派生 `7zz` 子进程）：拖放、归档树浏览（八列、排序、搜索、右键菜单、拖出、空格预览）、压缩、追加与**删除条目**、解压、完整性校验，以及完整的压缩参数面板（格式/等级/方法/字典/字长/快速字节/匹配查找器/固实与分块/线程/分卷/加密算法/文件名加密/压缩头/完整路径） | `/Applications/7-Zip.app` |
+| **图形界面** | 原生 AppKit 应用，**引擎内嵌于进程**（`Contents/Frameworks/lib7z.dylib`，不派生 `7zz` 子进程）：拖放、归档树浏览（八列、排序、搜索、右键菜单、拖出、空格或双击预览）、压缩、追加与**删除条目**、解压（同名文件可选覆盖 / 跳过 / 自动改名）、完整性校验、加密归档可**记住密码**（存入登录钥匙串），以及完整的压缩参数面板（格式/等级/方法/字典/字长/快速字节/匹配查找器/固实与分块/线程/分卷/加密算法/文件名加密/压缩头/完整路径） | `/Applications/7-Zip.app` |
 | **Quick Look** | 按空格即预览归档内容，不再显示十六进制乱码 | `7-Zip.app/Contents/PlugIns/7ZipQuickLook.appex` |
 | **Finder 服务** | 右键「服务」中的**用 7-Zip 压缩** / **用 7-Zip 解压** | 随应用注册 |
 | **文档类型** | 向 LaunchServices 声明 `.7z`、`.zip`、`.tar`、`.gz`、`.bz2`、`.xz`、`.zst`、`.rar`、`.cab`、`.iso` 等 | 随应用注册 |
@@ -54,11 +54,20 @@
 | 日志 | 默认收起，出错或出现告警时自动展开；也可由工具栏按钮或 ⌘L 开关 |
 | 状态栏 | 底部通栏，左侧为当前状态（就绪 / 已载入 N 项 / 进度），右侧为当前压缩参数摘要 |
 | 外观 | 全部使用语义色（`labelColor`、`secondaryLabelColor`、`windowBackgroundColor`、`controlAccentColor`、`textBackgroundColor`），浅色与深色外观下自动适配 |
+| 列表交互 | 空格预览；**双击**文件走系统 Quick Look、双击目录展开/收起；拖出即解压；列头排序在后台计算，十万条目不会卡住界面 |
+| 密码 | 打开加密归档时弹出输入框，其中的「在此 Mac 上记住该归档的密码」默认勾选，密码存入**登录钥匙串**（服务名 `org.7-zip.macos`，账户名取归档的标准化路径）。下次打开同一归档会自动取用，全程无提示；若记住的密码已被拒，该条目会被立即清除，不会反复白试 |
 | 窗口尺寸 | 紧凑窗体：内容区默认 560×420、最小 460×320。窄窗下工具栏把放不下的按钮自动收进 `>>` 溢出菜单，仍在可滚动范围内保留完整列 |
 
 > 内容区（表格与空状态）与日志抽屉的 frame 由代码直接计算而非 Auto Layout
 > 约束——这是实测踩坑后的约定（`NSScrollView` 由约束定位时会被 AppKit 跳过
 > 绘制），原因与完整排查记录见 `BUILD.md` 坑点 7。
+
+### 大归档性能
+
+以十万条目的 ZIP（12.2 MB）实测：建树在后台队列完成，界面不卡；条目由引擎
+逐条取用、用完即弃，不再先攒一份完整条目数组，**内存峰值减半**（95.9 MB →
+48.8 MB）；列头排序同样移出主线程（124 ms → 4 ms）。数据与做法见 `BUILD.md`
+坑点 14、15。
 
 ---
 
@@ -77,7 +86,7 @@
 │   ├── tests/                 验收测试与工具
 │   │   ├── engine_test.cpp    桥接层验收程序（对照官方 7zz 逐项比对）
 │   │   ├── objc_test.m        ObjC 适配层验收程序
-│   │   ├── verify_engine.sh   桥接层验收套件（85 个用例）
+│   │   ├── verify_engine.sh   桥接层验收套件（88 个用例）
 │   │   ├── verify_app.sh      应用包验收（依赖解析 / 部署目标 / 签名 / 真实启动）
 │   │   └── build_test.sh, build_objc_test.sh
 │   ├── lib/                   构建产物：lib7z.dylib、lib7zbridge*.a
@@ -195,9 +204,9 @@ make app         # 组装 7-Zip.app，并构建内嵌 Quick Look 扩展
 make ql          # 只重建 Quick Look 扩展
 make pkg         # 生成 .pkg / .dmg / .tar.xz / checksums.txt
 make tarball     # 生成 Homebrew 分发包
-make test        # 桥接层验收（对照官方 7zz 逐项比对，85 个用例）
-make objc-test   # ObjC 适配层验收（App 实际调用的那一层，41 个用例）
-make appcheck    # 应用包验收：依赖解析 / 部署目标 / 签名 / 真实启动（21 个用例）
+make test        # 桥接层验收（对照官方 7zz 逐项比对，88 个用例）
+make objc-test   # ObjC 适配层验收（App 实际调用的那一层，44 个用例）
+make appcheck    # 应用包验收：依赖解析 / 部署目标 / 签名 / 真实启动（20 个用例）
 make verify      # 离线校验：安装/卸载脚本逻辑 + 公式一致性
 make check       # verify + 产物校验和、DMG 完整性、应用签名
 make clean       # 删除构建产物
@@ -291,6 +300,9 @@ pkgutil --expand-full dist/7-Zip-26.03-macOS.pkg /tmp/exp    # 检查载荷与�
    帮不上忙）。上游源码未改，恢复 x86_64 只需把各构建脚本里的分支加回来。
 4. **最低系统版本 11.0**（首个支持 Apple Silicon 的版本）；应用扩展为 12.0。
 5. **不提供 32 位支持。**
+6. **钥匙串的一次性授权提示。** ad-hoc 签名没有固定的团队标识，因此重新构建后
+   首次读取已记住的密码时，系统会询问一次是否允许访问（点「始终允许」后不再
+   打扰）。换成 Developer ID 正式签名即可消除该提示。
 
 ---
 
