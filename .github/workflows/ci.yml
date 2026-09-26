@@ -1,11 +1,12 @@
 name: CI
 
 # 门禁全部沿用本地 `make` 目标，不另写一套测试逻辑：
-#   make app      —— 引擎（上游 Alone2 目标）+ 内嵌 dylib + 桥接层 + 应用 + QL 扩展
+#   make pkg tarball —— 引擎（上游 Alone2 目标）+ 内嵌 dylib + 桥接层 + 应用 +
+#                     QL 扩展 + 安装包/磁盘映像 + Homebrew 分发包
 #   make test     —— 桥接层验收 88 项（逐项对照官方 7zz 产物）
 #   make objc-test—— ObjC 适配层验收 44 项（App 实际调用的那一层）
 #   make appcheck —— 应用包验收 20 项（依赖解析 / 部署目标 / 签名 / 真实启动 / 进程模型）
-#   make verify   —— 安装卸载脚本逻辑 + Homebrew 公式一致性（离线可跑）
+#   make verify   —— 安装卸载脚本逻辑 + Homebrew 公式一致性（对着已构建的产物核对）
 
 on:
   push:
@@ -41,8 +42,13 @@ jobs:
           path: 7z2603-src/b
           key: engine-${{ runner.os }}-${{ hashFiles('Makefile', '7z2603-src/CPP/7zip/7zip_gcc.mak', 'dist/engine/*.sh', 'dist/engine/*.cpp', 'dist/engine/*.mm') }}
 
-      - name: 构建（引擎 + 桥接层 + 应用）
-        run: make app
+      # pkg/tarball are not optional here. `make verify` intentionally does not
+      # rebuild them (rebuilding re-stamps the archives and would change every
+      # hash), it only checks the artefacts that were actually built -- so the
+      # packaging steps must have run before it, otherwise it fails its
+      # precondition guard.
+      - name: 构建（引擎 + 桥接层 + 应用 + 安装包 + 分发包）
+        run: make pkg tarball
 
       - name: 桥接层验收（88 项）
         run: make test
@@ -53,7 +59,7 @@ jobs:
       - name: 应用包验收（20 项，含真实启动与进程模型）
         run: make appcheck
 
-      - name: 离线校验（安装/卸载脚本 + 公式）
+      - name: 产物校验（安装/卸载脚本 + Homebrew 公式）
         run: make verify
 
       - name: 体积简报

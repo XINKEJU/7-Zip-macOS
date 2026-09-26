@@ -154,11 +154,32 @@ tarball: enginebin
 	sh '$(BUILD)/package.sh'
 
 # ---------------------------------------------------------------------------
-# verify — offline checks. Needs no privileges and no build artifacts: it
-# replays the install/uninstall logic against a temporary prefix, and replays
-# the formula's install and test blocks against the published tarball.
+# verify — checks the install/uninstall logic and the Homebrew formula.
+#
+# Needs no privileges, but it is NOT artifact-free: verify_scripts.sh reads the
+# real .pkg payload and the two installer scripts under dist/build/.installer/,
+# and verify_formula.sh reads the published tarball.
+#
+# It deliberately does NOT depend on pkg/tarball. verify exists to check the
+# artefacts that were actually built and published -- rebuilding them first
+# would re-stamp the archives (pkgbuild writes fresh timestamps), silently
+# changing every hash and making the checksum/formula comparison meaningless.
+# So it only asserts that the prerequisites are present, and fails fast with an
+# actionable message instead of a cascade of "missing file" errors.
 # ---------------------------------------------------------------------------
+VERIFY_NEEDS := $(DIST)/7-Zip-$(VERSION)-macOS.pkg \
+                $(BUILD)/.installer/scripts-cli/postinstall \
+                $(BUILD)/.installer/scripts-app/postinstall \
+                $(DIST)/7zip-macos-$(VERSION)-macos-arm64.tar.gz
+
 verify:
+	@missing=0; for f in $(VERIFY_NEEDS); do \
+	    [ -e "$$f" ] || { printf 'verify: 缺少 %s\n' "$$f"; missing=1; }; \
+	done; \
+	if [ "$$missing" -ne 0 ]; then \
+	    printf '\n校验要对着真正构建出来的产物做，请先执行:  make pkg tarball\n'; \
+	    exit 1; \
+	fi
 	@printf '==> 安装与卸载脚本逻辑\n'
 	sh '$(BUILD)/verify_scripts.sh'
 	@printf '\n==> Homebrew 公式一致性\n'
