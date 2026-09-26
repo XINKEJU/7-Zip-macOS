@@ -126,6 +126,12 @@
 `7-Zip-26.03-macOS.dmg`，挂载后双击其中的 `.pkg`。安装器提供两个可独立勾选的
 组件：命令行工具与应用。
 
+> **发行标签与产品版本是两回事。** 产品版本始终跟上游走（`26.03`，也是
+> `.app` 的 `CFBundleShortVersionString` 与 `7zz i` 打印的值），产物文件名
+> 用的就是它；发行标签额外带本移植的修订号，当前为 **`v26.03.1`**。所以下载
+> 链接里是 `v26.03.1` 而文件名里是 `26.03`。重新发行时只递增标签，产物文件名
+> 与公式里的 `version` 都不用动。
+
 > 当前产物为 **ad-hoc 签名**，安装包本身**未经 Apple 公证**。首次打开时若被
 > Gatekeeper 拦截，请右键 `.pkg` → **打开**，或在「系统设置 → 隐私与安全性」
 > 中允许。如需正式分发，请参见 `dist/build/BUILD.md` 第七节完成
@@ -134,7 +140,7 @@
 ### 3.2 免安装命令行包
 
 ```bash
-curl -LO https://github.com/XINKEJU/7-Zip-macOS/releases/download/v26.03/7-Zip-26.03-macOS-arm64.tar.xz
+curl -LO https://github.com/XINKEJU/7-Zip-macOS/releases/download/v26.03.1/7-Zip-26.03-macOS-arm64.tar.xz
 sudo tar -xJf 7-Zip-26.03-macOS-arm64.tar.xz -C /usr/local
 ```
 

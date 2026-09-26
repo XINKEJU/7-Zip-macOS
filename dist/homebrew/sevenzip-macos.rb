@@ -44,7 +44,10 @@
 class SevenzipMacos < Formula
   desc "File archiver with a high compression ratio (native macOS build)"
   homepage "https://www.7-zip.org/"
-  url "https://github.com/XINKEJU/7-Zip-macOS/releases/download/v26.03/7zip-macos-26.03-macos-arm64.tar.gz"
+  # The release tag carries the port's revision suffix (v26.03.1) while the
+  # artefact filenames keep the upstream version (26.03) -- `version` below must
+  # stay 26.03 because the formula's test block asserts that `7zz i` prints it.
+  url "https://github.com/XINKEJU/7-Zip-macOS/releases/download/v26.03.1/7zip-macos-26.03-macos-arm64.tar.gz"
   sha256 "be645638742fa44a45a8e4fad226fe755b5dbd3645132c9b263616902c18d6bc"
   version "26.03"
   license "LGPL-2.1-or-later"

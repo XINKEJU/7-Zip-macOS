@@ -27,6 +27,11 @@ DIST="$(cd "$HERE/.." && pwd)"
 FORMULA="$HERE/sevenzip-macos.rb"
 NAME="sevenzip-macos"
 VERSION="26.03"
+# The release tag is not the product version: artefact filenames keep the
+# upstream 7-Zip version (26.03), while the tag carries the port's revision
+# suffix. Keep them apart, otherwise a re-release forces a rename of every
+# artefact and breaks the `version` assertion in the formula's test block.
+TAG="v26.03.1"
 
 PREFIX="$(mktemp -d)/prefix"
 TARBALL="$DIST/7zip-macos-$VERSION-macos-arm64.tar.gz"
@@ -47,6 +52,7 @@ echo "  formula sha256  : $FORMULA_SHA"
 echo "  tarball sha256  : $ACTUAL_SHA"
 echo "  formula version : $FORMULA_VER"
 echo "  tarball version : $VERSION"
+echo "  release tag     : $TAG"
 
 [ "$FORMULA_SHA" = "$ACTUAL_SHA" ] \
     && ok "sha256 与 tarball 一致" \
@@ -55,8 +61,9 @@ echo "  tarball version : $VERSION"
     && ok "version 与 tarball 一致" \
     || bad "version 不一致"
 case "$FORMULA_URL" in
-    *"v$VERSION/7zip-macos-$VERSION-macos-arm64.tar.gz") ok "url 指向 v$VERSION 下的同名产物" ;;
-    *) bad "url 与产物文件名不符: $FORMULA_URL" ;;
+    *"/download/$TAG/7zip-macos-$VERSION-macos-arm64.tar.gz") \
+        ok "url 指向 $TAG 下的同名产物" ;;
+    *) bad "url 与发行 tag 或产物文件名不符: $FORMULA_URL" ;;
 esac
 [ "$(cat "$CHECKSUM_FILE")" = "$ACTUAL_SHA" ] \
     && ok ".sha256 旁车文件自洽" \
