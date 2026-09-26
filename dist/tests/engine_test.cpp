@@ -199,7 +199,40 @@ static int CmdInfo(const std::string &path) {
   printf("format=%s\n", a->formatName().c_str());
   printf("items=%u\n", (unsigned)a->itemCount());
   printf("header_encrypted=%s\n", YesNo(a->isHeaderEncrypted()));
+  printf("chain=%u", (unsigned)a->chainTypes().size());
+  for (size_t i = 0; i < a->chainTypes().size(); i++) printf("\t%s", a->chainTypes()[i].c_str());
+  printf("\n");
   delete a;
+  return 0;
+}
+
+// 进入内层归档（界面双击目录内某个归档条目时的动作）。
+//   engine_test enter <archive> <itemIndex>
+// 打印内层的格式、条目数，以及前若干条路径，供验收脚本断言。
+static int CmdEnter(const std::string &path, unsigned index) {
+  ConsoleCallback cb;
+  std::string err;
+  Archive *outer = Archive::Open(path, &cb, err);
+  if (!outer) {
+    fprintf(stderr, "打开失败: %s\n", err.c_str());
+    return 1;
+  }
+  Archive *inner = Archive::OpenNestedItem(outer, index, &cb, err);
+  if (!inner) {
+    fprintf(stderr, "进入失败: %s\n", err.c_str());
+    delete outer;
+    return 1;
+  }
+  printf("inner_format=%s\n", inner->formatName().c_str());
+  printf("inner_items=%u\n", (unsigned)inner->itemCount());
+  printf("inner_label=%s\n", inner->nestedLabel().c_str());
+  printf("inner_parent=%s\n", inner->archivePath().c_str());
+  const unsigned limit = inner->itemCount() < 12 ? inner->itemCount() : 12;
+  for (unsigned i = 0; i < limit; i++) {
+    ItemInfo it;
+    if (inner->getItem(i, it)) printf("item\t%s\n", it.path.c_str());
+  }
+  delete inner;   // 会连带释放 outer（内层持有一份父级引用）
   return 0;
 }
 
@@ -504,6 +537,7 @@ int main(int argc, char **argv) {
 
   if (cmd == "dumpitems" && argc >= 3) return CmdDumpItems(argv[2]);
   if (cmd == "info" && argc >= 3) return CmdInfo(argv[2]);
+  if (cmd == "enter" && argc >= 4) return CmdEnter(argv[2], (unsigned)atoi(argv[3]));
   if (cmd == "list" && argc >= 3) return CmdList(argv[2]);
   if (cmd == "test" && argc >= 3) return CmdTest(argv[2]);
   if (cmd == "extract" && argc >= 4) {

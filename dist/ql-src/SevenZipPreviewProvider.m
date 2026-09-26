@@ -107,201 +107,6 @@ static void SevenZipDebugForce(NSString *format, ...)
     va_end(ap);
 }
 
-#pragma mark - Tool discovery
-
-// Locate the 7zz engine inside this extension bundle.
-//
-// NOTE: the engine is no longer embedded — it cannot be executed under an
-// ad-hoc signature, because `com.apple.security.inherit` is a restricted
-// entitlement. See the header of ql-src/build_ql.sh for the measurement.
-// This lookup therefore returns nil in the shipped configuration and the
-// in-process reader serves every preview. The lookup and the runner below are
-// kept intact so the full-engine path comes back the moment the project moves
-// to a Developer ID signature and re-embeds the engine.
-//
-// Bundle lookup inside an extension executable is not as reliable as in an
-// app, so several independent strategies are tried and `gProbeLog` records
-// what was attempted for on-screen diagnostics.
-static NSString *gProbeLog = nil;
-
-static NSString *SevenZipFindTool(void)
-{
-    NSMutableArray<NSString *> *candidates = [NSMutableArray array];
-
-    NSBundle *mainBundle = [NSBundle mainBundle];
-    NSBundle *classBundle = [NSBundle bundleForClass:NSClassFromString(@"SevenZipPreviewProvider")];
-
-    for (NSBundle *b in @[ classBundle ?: (id)[NSNull null], mainBundle ?: (id)[NSNull null] ]) {
-        if (![b isKindOfClass:[NSBundle class]])
-            continue;
-        NSString *root = b.bundlePath;
-        if (root.length == 0)
-            continue;
-        for (NSString *sub in @[ @"Contents/Resources/7zz",
-                                 @"Contents/MacOS/7zz",
-                                 @"Contents/Helpers/7zz" ]) {
-            [candidates addObject:[root stringByAppendingPathComponent:sub]];
-        }
-    }
-
-    // Derive from the running executable: <Plugin>.appex/Contents/MacOS/<exe>
-    NSString *execPath = NSProcessInfo.processInfo.arguments.firstObject;
-    if (execPath.length > 0) {
-        NSString *contents = [[execPath stringByDeletingLastPathComponent] stringByDeletingLastPathComponent];
-        [candidates addObject:[contents stringByAppendingPathComponent:@"Resources/7zz"]];
-    }
-
-    // System-wide locations are deliberately NOT probed. The extension runs
-    // sandboxed and cannot execute a binary outside its own bundle, so such a
-    // probe only ever turned up a path that then failed to spawn with EPERM —
-    // and it made preview behaviour depend on whatever the host machine
-    // happened to have installed.
-
-    NSMutableString *probe = [NSMutableString string];
-    [probe appendFormat:@"mainBundle=%@\nclassBundle=%@\n",
-        mainBundle.bundlePath ?: @"(nil)", classBundle.bundlePath ?: @"(nil)"];
-
-    // Probe by existence rather than executability: inside the App Sandbox the
-    // X_OK check can be denied even for a helper in our own bundle, which would
-    // discard a perfectly good engine before we ever try to launch it.
-    for (NSString *path in candidates) {
-        BOOL exists = [[NSFileManager defaultManager] fileExistsAtPath:path];
-        BOOL exec   = [[NSFileManager defaultManager] isExecutableFileAtPath:path];
-        [probe appendFormat:@"%@ exists=%@ exec=%@ %@\n",
-            (exists ? @"[ok]" : @"[--]"), (exists ? @"Y" : @"N"),
-            (exec ? @"Y" : @"N"), path];
-        if (exists) {
-            gProbeLog = probe;
-            return path;
-        }
-    }
-    gProbeLog = probe;
-    return nil;
-}
-
-#pragma mark - Process helper
-
-// Run a tool to completion, returning stdout as a UTF-8 string.
-//
-// posix_spawn is used rather than NSTask on purpose: NSTask performs its own
-// pre-flight check on the executable path and, inside the App Sandbox, reports
-// a misleading "file does not exist" error without ever attempting the spawn.
-// Going straight to posix_spawn lets us surface the real errno and lets the
-// kernel decide whether the helper may run.
-//
-// A deadline enforces `timeout`; the child is killed if it overruns so that a
-// malformed archive or a password prompt can never wedge the Quick Look panel.
-static NSString *SevenZipRun(NSString *tool,
-                             NSArray<NSString *> *args,
-                             NSTimeInterval timeout,
-                             NSString **stderrOut,
-                             NSString **launchErrorOut)
-{
-    if (stderrOut) *stderrOut = @"";
-    if (launchErrorOut) *launchErrorOut = @"";
-
-    if (tool.length == 0) {
-        if (launchErrorOut) *launchErrorOut = @"引擎路径为空。";
-        return nil;
-    }
-
-    int outFds[2] = { -1, -1 };
-    int errFds[2] = { -1, -1 };
-    if (pipe(outFds) != 0 || pipe(errFds) != 0) {
-        if (launchErrorOut) *launchErrorOut = [NSString stringWithFormat:@"pipe() 失败: %s", strerror(errno)];
-        return nil;
-    }
-
-    posix_spawn_file_actions_t actions;
-    posix_spawn_file_actions_init(&actions);
-    posix_spawn_file_actions_adddup2(&actions, outFds[1], STDOUT_FILENO);
-    posix_spawn_file_actions_adddup2(&actions, errFds[1], STDERR_FILENO);
-    posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
-    posix_spawn_file_actions_addclose(&actions, outFds[0]);
-    posix_spawn_file_actions_addclose(&actions, errFds[0]);
-
-    NSMutableArray<NSString *> *full = [NSMutableArray arrayWithObject:tool];
-    [full addObjectsFromArray:args];
-    char **argv = (char **)calloc(full.count + 1, sizeof(char *));
-    for (NSUInteger i = 0; i < full.count; i++)
-        argv[i] = strdup(full[i].UTF8String);
-
-    pid_t pid = 0;
-    int rc = posix_spawn(&pid, tool.fileSystemRepresentation, &actions, NULL, argv, environ);
-
-    posix_spawn_file_actions_destroy(&actions);
-    for (NSUInteger i = 0; i < full.count; i++) free(argv[i]);
-    free(argv);
-    close(outFds[1]);
-    close(errFds[1]);
-
-    if (rc != 0) {
-        if (launchErrorOut) {
-            *launchErrorOut = [NSString stringWithFormat:@"posix_spawn 失败：%s (errno %d)", strerror(rc), rc];
-        }
-        close(outFds[0]);
-        close(errFds[0]);
-        return nil;
-    }
-
-    // Drain both pipes with select() so a chatty child cannot deadlock on a
-    // full stderr buffer while we are blocked reading stdout.
-    fcntl(outFds[0], F_SETFL, O_NONBLOCK);
-    fcntl(errFds[0], F_SETFL, O_NONBLOCK);
-
-    NSMutableData *outData = [NSMutableData data];
-    NSMutableData *errData = [NSMutableData data];
-    BOOL outOpen = YES, errOpen = YES;
-    BOOL timedOut = NO;
-    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:timeout];
-    char buffer[16384];
-
-    while (outOpen || errOpen) {
-        if ([deadline timeIntervalSinceNow] <= 0) { timedOut = YES; break; }
-
-        fd_set rd;
-        FD_ZERO(&rd);
-        int maxFd = -1;
-        if (outOpen) { FD_SET(outFds[0], &rd); maxFd = MAX(maxFd, outFds[0]); }
-        if (errOpen) { FD_SET(errFds[0], &rd); maxFd = MAX(maxFd, errFds[0]); }
-
-        struct timeval tv;
-        tv.tv_sec = 0;
-        tv.tv_usec = 200000;   // 200 ms poll tick keeps the deadline responsive
-        int ready = select(maxFd + 1, &rd, NULL, NULL, &tv);
-        if (ready < 0 && errno != EINTR) { timedOut = YES; break; }
-        if (ready <= 0) continue;
-
-        if (outOpen && FD_ISSET(outFds[0], &rd)) {
-            ssize_t n = read(outFds[0], buffer, sizeof(buffer));
-            if (n > 0) [outData appendBytes:buffer length:(NSUInteger)n];
-            else if (n == 0 || (n < 0 && errno != EAGAIN && errno != EINTR)) { close(outFds[0]); outOpen = NO; }
-        }
-        if (errOpen && FD_ISSET(errFds[0], &rd)) {
-            ssize_t n = read(errFds[0], buffer, sizeof(buffer));
-            if (n > 0) [errData appendBytes:buffer length:(NSUInteger)n];
-            else if (n == 0 || (n < 0 && errno != EAGAIN && errno != EINTR)) { close(errFds[0]); errOpen = NO; }
-        }
-    }
-
-    if (outOpen) close(outFds[0]);
-    if (errOpen) close(errFds[0]);
-
-    if (timedOut) {
-        kill(pid, SIGKILL);
-        if (launchErrorOut)
-            *launchErrorOut = [NSString stringWithFormat:@"引擎在 %.0f 秒内未返回，已终止。", timeout];
-    }
-
-    int status = 0;
-    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) { /* retry */ }
-
-    if (stderrOut)
-        *stderrOut = errData.length ? [[NSString alloc] initWithData:errData encoding:NSUTF8StringEncoding] : @"";
-
-    return [[NSString alloc] initWithData:outData encoding:NSUTF8StringEncoding];
-}
-
 #pragma mark - Listing parser
 
 // Human-readable byte count.
@@ -333,74 +138,6 @@ static NSString *SevenZipEscapeHTML(NSString *s)
     [m replaceOccurrencesOfString:@">" withString:@"&gt;"   options:0 range:NSMakeRange(0, m.length)];
     [m replaceOccurrencesOfString:@"\"" withString:@"&quot;" options:0 range:NSMakeRange(0, m.length)];
     return m;
-}
-
-// Parse one `Key = Value` block into a dictionary.
-static NSDictionary *SevenZipParseBlock(NSString *block)
-{
-    NSMutableDictionary *dict = [NSMutableDictionary dictionary];
-    for (NSString *rawLine in [block componentsSeparatedByString:@"\n"]) {
-        NSString *line = [rawLine stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-        NSRange eq = [line rangeOfString:@" = "];
-        if (eq.location == NSNotFound)
-            continue;
-        NSString *key = [line substringToIndex:eq.location];
-        NSString *value = [line substringFromIndex:eq.location + eq.length];
-        if (key.length)
-            dict[key] = value;
-    }
-    return dict;
-}
-
-// Split the `7zz l -slt` output into (archive-info, entry-blocks).
-static void SevenZipSplitListing(NSString *raw, NSMutableDictionary *archiveInfo, NSMutableArray<NSDictionary *> *entries)
-{
-    if (raw.length == 0)
-        return;
-
-    NSArray<NSString *> *lines = [raw componentsSeparatedByString:@"\n"];
-    NSMutableArray<NSString *> *section = [NSMutableArray array];   // archive header key/values
-    NSMutableString *currentBlock = [NSMutableString string];
-    BOOL inEntries = NO;
-    BOOL sawHeaderStart = NO;
-
-    for (NSString *line in lines) {
-        NSString *trimmed = [line stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-
-        if ([trimmed isEqualToString:@"----------"]) {
-            // Everything collected so far belongs to the archive header.
-            inEntries = YES;
-            continue;
-        }
-        if (!inEntries && [trimmed isEqualToString:@"--"]) {
-            sawHeaderStart = YES;
-            [section removeAllObjects];
-            continue;
-        }
-        if (!inEntries && !sawHeaderStart)
-            continue;
-
-        if (!inEntries) {
-            [section addObject:trimmed];
-            continue;
-        }
-
-        // Entry section: blocks separated by blank lines.
-        if (trimmed.length == 0) {
-            if (currentBlock.length > 0) {
-                [entries addObject:SevenZipParseBlock(currentBlock)];
-                [currentBlock setString:@""];
-            }
-        } else {
-            [currentBlock appendString:trimmed];
-            [currentBlock appendString:@"\n"];
-        }
-    }
-    if (currentBlock.length > 0)
-        [entries addObject:SevenZipParseBlock(currentBlock)];
-
-    NSDictionary *info = SevenZipParseBlock([section componentsJoinedByString:@"\n"]);
-    [archiveInfo addEntriesFromDictionary:info];
 }
 
 #pragma mark - HTML rendering
@@ -622,9 +359,6 @@ static void SevenZipAdoptNativeListing(NSURL *url,
     NSURL *url = request.fileURL;
     SevenZipDebugLog(@"=== preview request: %@", url.path);
 
-    NSString *tool = SevenZipFindTool();
-    SevenZipDebugLog(@"engine: %@", tool ?: @"(not found)");
-
     QLPreviewReply *reply =
         [[QLPreviewReply alloc] initWithDataOfContentType:UTTypeHTML
                                               contentSize:CGSizeMake(760, 820)
@@ -633,76 +367,46 @@ static void SevenZipAdoptNativeListing(NSURL *url,
         (void)error;   // failures are reported inline in the HTML body
 
         @try {
-            NSString *stderrText = nil;
-            NSString *launchErr = nil;
-            NSString *raw = nil;
-
-            // Preferred path: the full 7-Zip engine, which can enumerate every
-            // format it supports. This requires the sandbox to permit executing
-            // the embedded helper, which only happens for a helper carrying a
-            // valid `com.apple.security.inherit` entitlement — i.e. a build
-            // signed with a real team identity. Ad-hoc builds are refused with
-            // EPERM and fall through to the in-process reader below.
-            if (tool.length > 0) {
-                NSArray *args = @[ @"l", @"-slt", @"-p", @"-sccUTF-8", @"--", url.path ];
-                raw = SevenZipRun(tool, args, 15.0, &stderrText, &launchErr);
-                if (launchErr.length)
-                    SevenZipDebugForce(@"engine unavailable: %@", launchErr);
-                SevenZipDebugLog(@"engine run: raw=%lu bytes", (unsigned long)raw.length);
-            } else {
-                launchErr = @"未找到 7zz 引擎。";
-                SevenZipDebugForce(@"engine not found");
-            }
-
             NSMutableDictionary *archiveInfo = [NSMutableDictionary dictionary];
             NSMutableArray<NSDictionary *> *entries = [NSMutableArray array];
-            SevenZipSplitListing(raw, archiveInfo, entries);
-
             NSString *fallback = nil;
             NSString *note = nil;
 
-            if (entries.count == 0) {
-                // The engine produced nothing. Inside the App Sandbox the spawn
-                // is refused for ad-hoc signed helpers (EPERM), so fall back to
-                // the in-process reader, which needs no subprocess and is
-                // always permitted.
-                QlListing lst;
-                int recognised = QlReadListing(url.fileSystemRepresentation, &lst);
-                SevenZipDebugLog(@"native reader: recognised=%d format=%s complete=%d count=%zu err=%s",
-                                 recognised, lst.format, lst.complete, lst.count,
-                                 lst.error ? lst.error : "-");
+            // 单一列举路径。QlReadListing 优先驱动链接进来的 7-Zip 引擎
+            // （EngineListing.mm），引擎拒绝该文件时才回退到内置解析器 ——
+            // 两者填的是同一个 QlListing，故下面的呈现逻辑共享。
+            //
+            // 这里不派生子进程。原先那条「执行内嵌 7zz」的路径已于
+            // 2026-09-26 移除：在沙箱内执行助手需要 com.apple.security.inherit
+            // 这一受限权利，ad-hoc 签名拿不到（EPERM）；而把引擎当动态库
+            // **加载**是允许的，且能力更强。见 ql-src/build_ql.sh。
+            QlListing lst;
+            int recognised = QlReadListing(url.fileSystemRepresentation, &lst);
+            SevenZipDebugLog(@"listing: recognised=%d format=%s complete=%d count=%zu via_engine=%d err=%s",
+                             recognised, lst.format, lst.complete, lst.count, lst.via_engine,
+                             lst.error ? lst.error : "-");
 
-                if (recognised) {
-                    SevenZipAdoptNativeListing(url, &lst, archiveInfo, entries);
-                    SevenZipDebugLog(@"adopted %lu rows", (unsigned long)entries.count);
+            if (recognised) {
+                SevenZipAdoptNativeListing(url, &lst, archiveInfo, entries);
+                SevenZipDebugLog(@"adopted %lu rows", (unsigned long)entries.count);
 
-                    if (lst.detail[0])
-                        note = @(lst.detail);
+                if (lst.detail[0])
+                    note = @(lst.detail);
 
-                    if (entries.count == 0) {
-                        fallback = @"已识别该归档容器，但其内容列表需要 7-Zip 引擎解析。";
-                    } else if (!lst.complete && note.length) {
-                        note = [note stringByAppendingString:
-                                @"\n使用 7-Zip 应用可查看完整内容列表。"];
-                    }
-                    QlListingFree(&lst);
-                } else {
-                    NSMutableString *why = [NSMutableString string];
-                    if (launchErr.length)
-                        [why appendFormat:@"%@\n", launchErr];
-                    if (lst.error)
-                        [why appendFormat:@"%@\n", @(lst.error)];
-                    if (raw.length == 0) {
-                        [why appendString:@"7zz 引擎无法启动。\n"];
-                        if (stderrText.length)
-                            [why appendFormat:@"%@\n", stderrText];
-                    } else if (stderrText.length) {
-                        [why appendFormat:@"%@\n", stderrText];
-                    }
-                    [why appendFormat:@"\n引擎：%@\n\n%@", tool ?: @"(未找到)", gProbeLog ?: @"(无)"];
-                    fallback = why;
-                    QlListingFree(&lst);
+                if (entries.count == 0) {
+                    fallback = @"已识别该归档容器，但其中没有可列出的条目。";
+                } else if (!lst.complete && note.length) {
+                    note = [note stringByAppendingString:
+                            @"\n使用 7-Zip 应用可查看完整内容列表。"];
                 }
+                QlListingFree(&lst);
+            } else {
+                NSMutableString *why = [NSMutableString string];
+                if (lst.error)
+                    [why appendFormat:@"%@\n", @(lst.error)];
+                [why appendString:@"\n7-Zip 引擎未能打开该文件，内置解析器也不认识这种格式。"];
+                fallback = why;
+                QlListingFree(&lst);
             }
 
             NSString *html = SevenZipBuildHTML(url, archiveInfo, entries, fallback, note);

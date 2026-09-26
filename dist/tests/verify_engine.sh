@@ -15,6 +15,7 @@
 #  10. 符号链接策略（越界/绝对目标拒绝）与 .partial 原子落盘
 #  11. 更新模式（新增/跳过/替换）与 §5.1 扩展字段（-spf / -ms=…）
 #  12. 删除模式（§6.4）：级联删除、容器格式保持、加密保持、失败分类
+#  13. 容器级联（上游 CArchiveLink 语义）与进入内层归档
 #
 # 用法：sh verify_engine.sh
 
@@ -29,6 +30,7 @@ FAILED_CASES=""
 
 ok()   { PASS=$((PASS + 1)); printf '  \033[32mPASS\033[0m  %s\n' "$1"; }
 bad()  { FAIL=$((FAIL + 1)); FAILED_CASES="$FAILED_CASES\n    - $1"; printf '  \033[31mFAIL\033[0m  %s\n' "$1"; }
+skip() { printf '  \033[33mSKIP\033[0m  %s\n' "$1"; }
 head1() { printf '\n\033[1m== %s ==\033[0m\n' "$1"; }
 
 if [ ! -x "$T" ]; then echo "缺少测试程序：$T" >&2; exit 2; fi
@@ -664,6 +666,264 @@ if "$T" list "$DEL/plain.7z" --password 'AnyPw' >/dev/null 2>&1; then
     ok "未加密归档即使带密码参数也能正常打开（无误报）"
 else
     bad "未加密归档带密码参数时被误判为密码错误"
+fi
+
+# ---------------------------------------------------------------------------
+head1 "13. 容器级联与进入内层归档"
+
+CAS="$WORK/cascade"
+mkdir -p "$CAS/inner/sub"
+printf 'hello cascade\n' > "$CAS/inner/note.txt"
+printf 'deep\n' > "$CAS/inner/sub/d.txt"
+( cd "$CAS/inner" && tar -cf "$CAS/payload.tar" . ) >/dev/null 2>&1
+gzip -kf -c "$CAS/payload.tar" > "$CAS/payload.tar.gz"
+xz   -kf -c "$CAS/payload.tar" > "$CAS/payload.tar.xz"
+
+# 13.1 格式名必须与 CLI 的 "Type = ..." 同源（处理器的注册名），
+#      而不是归档属性里的内部名 —— WIM 曾经显示成 "E0C318FD.wim"。
+if "$T" info "$CAS/payload.tar.gz" 2>/dev/null | grep -q '^format=gzip'; then
+    ok "gzip 的格式名为 gzip（与 7zz 的 Type 一致）"
+else
+    bad "gzip 的格式名不正确"
+fi
+
+# 13.2 .tar.gz 上层只有 1 个条目：引擎不自动级联，这一点与上游 7zz 相同
+#      （实测 7zz x s.tar.gz 也只得到 s.tar）。
+if "$T" info "$CAS/payload.tar.gz" 2>/dev/null | grep -q '^items=1'; then
+    ok ".tar.gz 上层只列出 1 个条目（不自动级联，与上游一致）"
+else
+    bad ".tar.gz 上层条目数不是 1"
+fi
+
+# 13.3 进入内层：gzip 没有 IInArchiveGetStream，走「解到临时文件」的退路。
+#      这条退路是上游没有的，官方 7zz 只能解两次。
+ENT_GZ=$("$T" enter "$CAS/payload.tar.gz" 0 2>&1)
+if printf '%s' "$ENT_GZ" | grep -q '^inner_format=tar'; then
+    ok "从 .tar.gz 进入内层得到 tar"
+else
+    bad "从 .tar.gz 进入内层失败：$ENT_GZ"
+fi
+if printf '%s' "$ENT_GZ" | grep -q 'note.txt'; then
+    ok "进入后的条目列表包含 note.txt"
+else
+    bad "进入后的条目列表不正确"
+fi
+
+# 13.4 xz 实现了 IInArchiveGetStream，走取流路径（不落临时文件）
+ENT_XZ=$("$T" enter "$CAS/payload.tar.xz" 0 2>&1)
+if printf '%s' "$ENT_XZ" | grep -q '^inner_format=tar'; then
+    ok "从 .tar.xz 进入内层得到 tar"
+else
+    bad "从 .tar.xz 进入内层失败：$ENT_XZ"
+fi
+
+# 13.5 进入非归档条目必须给出明确提示，而不是静默失败
+printf 'just text\n' > "$CAS/plain.txt"
+gzip -kf -c "$CAS/plain.txt" > "$CAS/plain.txt.gz"
+if "$T" enter "$CAS/plain.txt.gz" 0 2>&1 | grep -q '不是引擎能识别的归档'; then
+    ok "进入非归档条目时提示明确"
+else
+    bad "进入非归档条目时的提示不明确"
+fi
+
+# 13.6 临时文件必须清理干净（否则每次进入都漏一个解开的归档在磁盘上）
+if ls "${TMPDIR:-/tmp}"/7z-nested-* >/dev/null 2>&1; then
+    bad "进入内层后残留了临时文件"
+else
+    ok "进入内层用的临时文件已清理"
+fi
+
+# 13.7 磁盘映像：上游靠 kpidMainSubfile 级联到文件系统层，这里同样要落到文件
+if command -v hdiutil >/dev/null 2>&1; then
+    hdiutil create -volname Z7Cascade -srcfolder "$CAS/inner" -ov \
+        -format UDZO "$CAS/disk.dmg" -quiet >/dev/null 2>&1
+    if [ -f "$CAS/disk.dmg" ]; then
+        if "$T" list "$CAS/disk.dmg" 2>/dev/null | grep -q 'note.txt'; then
+            ok "磁盘映像级联到文件系统层（可直接看到 note.txt）"
+        else
+            bad "磁盘映像没有级联到文件层"
+        fi
+        if "$T" info "$CAS/disk.dmg" 2>/dev/null | grep -q '^chain=2'; then
+            ok "磁盘映像的层级链为 2 层（Dmg + 文件系统）"
+        else
+            bad "磁盘映像的层级链不是 2 层"
+        fi
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+head1 "14. 创建格式补齐：wim 与一步生成的 tar.* 组合格式"
+
+CMP="$WORK/compose"
+mkdir -p "$CMP/in/sub"
+printf 'AAA\n' > "$CMP/in/a.txt"
+printf 'BBB\n' > "$CMP/in/b.txt"
+printf 'CCC\n' > "$CMP/in/sub/c.txt"
+
+# 14.0 上游对照：7zz 无法一步生成含多文件的 .tar.gz —— 这是本移植补足的能力，
+#      不是照抄上游。先钉住上游行为，日后上游补上了这条断言会立刻提醒我们。
+if "$Z" a -tgzip "$CMP/upstream.tar.gz" "$CMP/in/a.txt" "$CMP/in/b.txt" \
+        >/dev/null 2>&1; then
+    bad "上游 7zz 竟能一步生成 tar.gz（断言 14.0 的前提已失效，需复核）"
+else
+    ok "上游 7zz 确实无法一步生成 tar.gz（本移植补足的能力）"
+fi
+
+# 14.1 wim：引擎的处理器表里它本来就声明可创建，之前只是下拉里没有
+if "$T" create wim "$CMP/mk.wim" "$CMP/in/a.txt" "$CMP/in/b.txt" "$CMP/in/sub" \
+        >/dev/null 2>&1 && [ -s "$CMP/mk.wim" ]; then
+    ok "wim 归档创建成功"
+else
+    bad "wim 归档创建失败"
+fi
+if "$Z" l "$CMP/mk.wim" 2>/dev/null | grep -q 'sub/c.txt' &&
+   "$Z" l "$CMP/mk.wim" 2>/dev/null | grep -q 'a.txt'; then
+    ok "wim 产物被 7zz 正确识别且条目完整"
+else
+    bad "wim 产物未被 7zz 正确识别"
+fi
+
+# 14.2 一步生成 .tar.gz：外层必须是真的 gzip，且内层条目名与官方两步法一致
+#      （官方两步法的结果是 out.tar.gz 内含 out.tar）
+if "$T" create tar.gz "$CMP/mk.tar.gz" "$CMP/in/a.txt" "$CMP/in/b.txt" \
+        "$CMP/in/sub" >/dev/null 2>&1 && [ -s "$CMP/mk.tar.gz" ]; then
+    ok "一步生成 tar.gz 成功"
+else
+    bad "一步生成 tar.gz 失败"
+fi
+if "$Z" l "$CMP/mk.tar.gz" 2>/dev/null | grep -q '^Type = gzip' &&
+   "$Z" l "$CMP/mk.tar.gz" 2>/dev/null | grep -q 'mk.tar'; then
+    ok "tar.gz 外层是真正的 gzip，内层名为 mk.tar（与官方两步法一致）"
+else
+    bad "tar.gz 结构不对（外层不是 gzip 或内层名不是 mk.tar）"
+fi
+
+# 14.3 端到端：用 7zz 解两层，内容必须逐字节对得上
+rm -rf "$CMP/out"
+mkdir -p "$CMP/out"
+"$Z" x -o"$CMP/out" "$CMP/mk.tar.gz" >/dev/null 2>&1
+"$Z" x -o"$CMP/out" "$CMP/out/mk.tar" >/dev/null 2>&1
+if [ "$(cat "$CMP/out/a.txt" "$CMP/out/b.txt" "$CMP/out/sub/c.txt" 2>/dev/null \
+        | tr -d '\n')" = "AAABBBCCC" ]; then
+    ok "tar.gz 两段解包后内容正确（AAA/BBB/CCC）"
+else
+    bad "tar.gz 两段解包后内容不正确"
+fi
+
+# 14.4 短写法 tgz 必须等价于 tar.gz
+if "$T" create tgz "$CMP/mk.tgz" "$CMP/in/a.txt" "$CMP/in/b.txt" "$CMP/in/sub" \
+        >/dev/null 2>&1 && "$Z" l "$CMP/mk.tgz" 2>/dev/null | grep -q 'mk.tar'; then
+    ok "短写法 tgz 等价于 tar.gz（内层名同样是 mk.tar）"
+else
+    bad "短写法 tgz 未生成正确的 tar.gz"
+fi
+
+# 14.5 另外两种外层
+for pair in "tar.xz:xz" "tar.bz2:bzip2"; do
+    fmt="${pair%%:*}"
+    want="${pair##*:}"
+    if "$T" create "$fmt" "$CMP/mk.$fmt" "$CMP/in/a.txt" "$CMP/in/b.txt" \
+            "$CMP/in/sub" >/dev/null 2>&1 &&
+       "$Z" l "$CMP/mk.$fmt" 2>/dev/null | grep -q "^Type = $want" &&
+       "$Z" l "$CMP/mk.$fmt" 2>/dev/null | grep -q 'mk.tar'; then
+        ok "$fmt 一步生成成功且外层为 $want"
+    else
+        bad "$fmt 一步生成失败或外层不是 $want"
+    fi
+done
+
+# 14.6 两段式的中间 tar 必须清理干净，否则每次建包都漏一个归档在磁盘上
+if ls "${TMPDIR:-/tmp}"/7z-compose-* >/dev/null 2>&1; then
+    bad "创建组合归档后残留了临时目录"
+else
+    ok "创建组合归档用的临时目录已清理"
+fi
+
+# 14.7 格式名必须能走通「按注册名查 CLSID」这条新路径 —— 既有的 7z/zip/tar
+#      也在同一条路径上，任何一个格式名写错都会在这里暴露
+if "$T" create zip "$CMP/mk.zip" "$CMP/in/a.txt" >/dev/null 2>&1 &&
+   "$Z" l "$CMP/mk.zip" 2>/dev/null | grep -q '^Type = zip'; then
+    ok "既有格式（zip）走新的按名查表路径仍然正常"
+else
+    bad "既有格式（zip）在按名查表路径上回归"
+fi
+
+# ---------------------------------------------------------------------------
+head1 "15. 新编解码器：zstd 创建 / lz4 解压 / 单流与解码-only 约束"
+
+EXT="$WORK/extcodec"
+mkdir -p "$EXT/in/sub"
+printf 'AAA\n' > "$EXT/in/a.txt"
+printf 'BBB\n' > "$EXT/in/b.txt"
+printf 'CCC\n' > "$EXT/in/sub/c.txt"
+
+# 15.1 zstd 创建：上游只有解码器、没有编码器，这是本移植真正补足的「创建」能力
+if "$T" create zstd "$EXT/mk.zst" "$EXT/in/a.txt" >/dev/null 2>&1 && [ -s "$EXT/mk.zst" ]; then
+    ok "zstd 归档创建成功（上游做不到）"
+else
+    bad "zstd 归档创建失败"
+fi
+if "$Z" l "$EXT/mk.zst" 2>/dev/null | grep -q '^Type = zstd' ||
+   "$Z" l "$EXT/mk.zst" 2>/dev/null | grep -q '^Type = Zstd'; then
+    ok "zstd 产物被官方 7zz 识别为 zstd"
+else
+    bad "zstd 产物未被官方 7zz 识别"
+fi
+
+# 15.2 zstd 往返：自产自解，内容必须逐字节一致
+rm -rf "$EXT/zstout"
+mkdir -p "$EXT/zstout"
+if "$T" extract "$EXT/mk.zst" "$EXT/zstout" >/dev/null 2>&1 &&
+   [ "$(cat "$EXT/zstout"/* 2>/dev/null | tr -d '\n')" = "AAA" ]; then
+    ok "zstd 往返（创建→解码→抽取）内容一致"
+else
+    bad "zstd 往返内容不一致"
+fi
+
+# 15.3 lz4 解压：上游完全没有 lz4 处理器，这是本移植新接入的解码能力。
+#      样本用系统 lz4 工具生成；若该工具或 lz4 静态库不可用则跳过（CI 上无 Homebrew）。
+LZ4BIN="$(command -v lz4 || true)"
+if [ -n "$LZ4BIN" ] && "$LZ4BIN" -q "$EXT/in/a.txt" "$EXT/sample.lz4" >/dev/null 2>&1; then
+    if "$T" info "$EXT/sample.lz4" 2>/dev/null | grep -q '^format=lz4' &&
+       "$T" info "$EXT/sample.lz4" 2>/dev/null | grep -q '^items=1'; then
+        ok "lz4 归档被识别为 format=lz4、1 条目"
+    else
+        bad "lz4 归档未被正确识别"
+    fi
+    rm -rf "$EXT/lz4out"
+    mkdir -p "$EXT/lz4out"
+    if "$T" extract "$EXT/sample.lz4" "$EXT/lz4out" >/dev/null 2>&1 &&
+       [ "$(cat "$EXT/lz4out"/* 2>/dev/null | tr -d '\n')" = "AAA" ]; then
+        ok "lz4 解码抽取内容与原文一致"
+    else
+        bad "lz4 解码内容不一致"
+    fi
+else
+    skip "lz4 工具/库不可用，跳过 lz4 解码断言（优雅降级）"
+fi
+
+# 15.4 解码-only 格式（lz4）创建必须被明确拒绝，不能静默产出错误格式
+rm -f "$EXT/rej.lz4"
+if "$T" create lz4 "$EXT/rej.lz4" "$EXT/in/a.txt" >/dev/null 2>&1; then
+    bad "lz4 创建竟被允许（应拒绝：仅支持解压）"
+else
+    ok "lz4 创建被明确拒绝（仅支持解压）"
+fi
+
+# 15.5 单流格式（zstd）多文件创建必须被拒绝并给出清晰报错
+rm -f "$EXT/multi.zst"
+if "$T" create zstd "$EXT/multi.zst" "$EXT/in/a.txt" "$EXT/in/b.txt" >/dev/null 2>&1; then
+    bad "zstd 多文件创建竟被允许（单流格式只能压一个文件）"
+else
+    ok "zstd 多文件创建被拒绝（单流格式约束）"
+fi
+
+# 15.6 brotli 未链入库时：创建必须报错而非崩溃（优雅降级，CI 上无 Homebrew 即此路径）
+rm -f "$EXT/rej.br"
+if "$T" create br "$EXT/rej.br" "$EXT/in/a.txt" >/dev/null 2>&1; then
+    bad "brotli 创建竟被允许（库未链入时应拒绝）"
+else
+    ok "brotli 未链入库时创建被拒绝（优雅降级）"
 fi
 
 # ---------------------------------------------------------------------------

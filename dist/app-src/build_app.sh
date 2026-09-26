@@ -51,6 +51,9 @@ plutil -lint "$HERE/Info.plist"
 
 echo "== 2. 编译 arm64（部署目标 11.0）=="
 mkdir -p "$BUILD"
+# 外部压缩库静态库（zstd/lz4/brotli）；缺失时为空，见 ext_codecs.sh
+. "$DIST/engine/ext_codecs.sh"
+
 export MACOSX_DEPLOYMENT_TARGET=11.0
 clang -fobjc-arc -fmodules -Wall -O2 \
       -arch arm64 -mmacosx-version-min=11.0 \
@@ -59,6 +62,7 @@ clang -fobjc-arc -fmodules -Wall -O2 \
       -framework UserNotifications \
       -o "$BUILD/app-arm64" "$HERE/main.m" \
       "$LIB/lib7zbridgeobjc.a" "$LIB/lib7zbridge.a" \
+      $EXT_CODEC_LIBS \
       -L"$LIB" -l7z -lc++ \
       -Wl,-rpath,@executable_path/../Frameworks
 printf "   %-8s %s bytes\n" arm64 "$(stat -f%z "$BUILD/app-arm64")"

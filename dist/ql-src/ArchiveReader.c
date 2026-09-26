@@ -480,6 +480,34 @@ int QlReadListing(const char *path, QlListing *out)
     memset(out, 0, sizeof(*out));
     snprintf(out->format, sizeof(out->format), "未知");
 
+    /* 引擎优先。EngineListing.mm 是同步的「只列出」包装，覆盖引擎注册的
+       全部处理器（7z / ISO / DMG / WIM / ZSTD / RAR / APFS…），远超本文件
+       自带的那几个解析器。它失败时不分配任何内存，因此这里失败后可以干净
+       地重新走内置路径——那条路径仍然是必要的：7-Zip 应用未安装、扩展被
+       单独加载、或引擎拒绝某个文件时，预览都得有东西可显示。 */
+    char engineErrorText[192] = { 0 };
+    char *engineError = NULL;
+    char engineFormat[32] = { 0 }, engineMethod[48] = { 0 }, engineDetail[128] = { 0 };
+    if (Z7EngineListArchive(path, &out->items, &out->count, &out->cap, &out->complete,
+                            engineFormat, sizeof(engineFormat),
+                            engineMethod, sizeof(engineMethod),
+                            engineDetail, sizeof(engineDetail),
+                            &engineError) && out->count > 0) {
+        snprintf(out->format, sizeof(out->format), "%s", engineFormat);
+        snprintf(out->method, sizeof(out->method), "%s", engineMethod);
+        snprintf(out->detail, sizeof(out->detail), "%s", engineDetail);
+        out->via_engine = 1;
+        free(engineError);
+        return 1;
+    }
+    if (engineError) {
+        snprintf(engineErrorText, sizeof(engineErrorText), "%s", engineError);
+    }
+    QlListingFree(out);
+    free(engineError);
+    memset(out, 0, sizeof(*out));
+    snprintf(out->format, sizeof(out->format), "未知");
+
     int fd = open(path, O_RDONLY);
     if (fd < 0) { set_error(out, "无法打开文件。"); return 0; }
 
@@ -504,7 +532,14 @@ int QlReadListing(const char *path, QlListing *out)
     else if (detect_and_summarise(d, n, out)) recognised = 1;
 
     if (!recognised) {
-        set_error(out, "无法识别的归档格式，或文件已损坏。");
+        if (engineErrorText[0]) {
+            char why[256];
+            snprintf(why, sizeof(why),
+                     "无法识别的归档格式，或文件已损坏。\n引擎：%s", engineErrorText);
+            set_error(out, why);
+        } else {
+            set_error(out, "无法识别的归档格式，或文件已损坏。");
+        }
         snprintf(out->format, sizeof(out->format), "未知");
     }
 

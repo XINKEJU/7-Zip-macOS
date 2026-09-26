@@ -49,12 +49,17 @@
 				<string>org.tukaani.lzma-archive</string>
 				<string>public.lzma-archive</string>
 				<string>public.zstandard-archive</string>
+				<string>com.facebook.zstandard-archive</string>
+				<string>com.microsoft.wim-archive</string>
 				<string>com.rarlab.rar-archive</string>
 				<string>com.microsoft.cab-archive</string>
 				<string>public.cpio-archive</string>
 				<string>public.z-archive</string>
 				<string>public.lzip-archive</string>
 				<string>public.iso-image</string>
+				<string>public.disk-image</string>
+				<string>com.apple.disk-image</string>
+				<string>com.apple.disk-image-udif</string>
 				<string>public.archive</string>
 			</array>
 			<key>QLSupportsSearchableItems</key>

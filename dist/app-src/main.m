@@ -1550,7 +1550,11 @@ static NSString *LevelNameForTick(NSInteger tick)
     [[NSRunLoop mainRunLoop] addTimer:self.searchPollTimer forMode:NSRunLoopCommonModes];
 
     // 格式
-    self.formatPop = [self popup:@[@"7z", @"zip", @"tar", @"xz", @"gz", @"bz2"]
+    // tar.* 是组合格式（tar + 单流外层），官方 7zz 无法一步生成，本移植自己做两段式。
+    // 列表里必须与引擎 CanonicalFormatName / IsComposedTarFormat 认得的写法一致。
+    self.formatPop = [self popup:@[@"7z", @"zip", @"tar", @"wim",
+                                   @"tar.gz", @"tar.bz2", @"tar.xz",
+                                   @"xz", @"gz", @"bz2"]
                           action:@selector(formatChanged:)];
 
     self.levelSlider = [[NSSlider alloc] initWithFrame:NSZeroRect];
@@ -1792,7 +1796,8 @@ static NSString *LevelNameForTick(NSInteger tick)
     fmtCap.font = [NSFont systemFontOfSize:12];
     fmtCap.textColor = [NSColor tertiaryLabelColor];
 
-    [self.formatPop.widthAnchor constraintEqualToConstant:82].active = YES;
+    // 下拉要放得下最长的 "tar.bz2"（改列表时记得同步核对宽度）
+    [self.formatPop.widthAnchor constraintEqualToConstant:96].active = YES;
     [self.formatPop.heightAnchor constraintEqualToConstant:24].active = YES;
 
     NSButton *done = [self button:@"完成" action:@selector(closeOptions:)];
@@ -2767,9 +2772,16 @@ static NSString *LevelNameForTick(NSInteger tick)
 
 - (void)formatChanged:(id)s
 {
-    // 不同格式支持的方法不同：zip/tar 走 Deflate 系列，gz/bz2/xz 只有单流
+    // 不同格式支持的方法不同：zip/tar 走 Deflate 系列，gz/bz2/xz 只有单流。
+    // tar.* 的可调项取决于外层那个单流编解码器，所以与 gz/bz2/xz 同类：
+    // 字典/字长/fastbytes/匹配器/固实/分卷都不可用，只有压缩等级生效。
     NSString *f = [self selectedFormat];
-    BOOL single = ([f isEqualToString:@"gz"] || [f isEqualToString:@"bz2"] || [f isEqualToString:@"xz"]);
+    BOOL composed = [f hasPrefix:@"tar."];
+    // 单流格式（gz/bz2/xz/zstd/lz4/br）与 tar.* 组合格式都只能压一个文件，
+    // 故字典/字长/fastbytes/匹配器/固实/分卷/更新模式都不可用（仅压缩等级生效）。
+    BOOL single = ([f isEqualToString:@"gz"] || [f isEqualToString:@"bz2"] ||
+                   [f isEqualToString:@"xz"] || [f isEqualToString:@"zstd"] ||
+                   [f isEqualToString:@"lz4"] || [f isEqualToString:@"br"] || composed);
     BOOL zipLike = [f isEqualToString:@"zip"];
     self.methodPop.enabled = !single;
     self.dictPop.enabled = !single && !zipLike;

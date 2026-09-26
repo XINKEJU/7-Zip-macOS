@@ -31,6 +31,10 @@ BUILD="$DIST/engine/.build"
 TARGET="$OUT/lib7zbridge.a"
 TARGET_OBJC="$OUT/lib7zbridgeobjc.a"
 
+# 外部压缩库（zstd / lz4 / brotli）：探测结果决定哪些格式被编译进来。
+# 缺失时只是少一种格式，不会让构建失败（详见 ext_codecs.sh 文件头）。
+. "$HERE/ext_codecs.sh"
+
 INC="-I$SRC/CPP -I$SRC/C"
 MINVER="-mmacosx-version-min=11.0"
 CFLAGS_BASE="-O2 -DNDEBUG -D_REENTRANT -D_FILE_OFFSET_BITS=64 -D_LARGEFILE_SOURCE -fPIC -w $MINVER"
@@ -62,10 +66,16 @@ CPP/Common/MyWindows.cpp
 CPP/Windows/System.cpp
 CPP/7zip/Common/FileStreams.cpp
 CPP/7zip/Common/MultiOutStream.cpp
+CPP/7zip/Common/StreamUtils.cpp
 "
 
 echo "=== 源码根目录: $SRC"
 echo "=== 输出目录:   $OUT"
+if [ -n "$EXT_CODEC_NAMES" ]; then
+    echo "=== 外部编解码器: $EXT_CODEC_NAMES"
+else
+    echo "=== 外部编解码器: 无（未找到 zstd/lz4/brotli 静态库，相关格式不启用）"
+fi
 mkdir -p "$BUILD" "$OUT"
 
 # 不预先删除产物：
@@ -113,6 +123,13 @@ for ARCH in $ARCHS; do
     # 桥接层本体
     OBJ="$ADIR/SevenZipEngine.o"
     clang++ $CFLAGS -arch "$ARCH" -std=c++11 -c "$HERE/SevenZipEngine.cpp" -o "$OBJ"
+    OBJS="$OBJS $OBJ"
+
+    # 外部编解码器（zstd 创建 / lz4 与 brotli 解压）。库缺失时 EXT_CODEC_DEFS
+    # 为空，本文件会被编成一个「什么都不支持」的空壳，链接也不会引用外部符号。
+    OBJ="$ADIR/Z7ExtCodec.o"
+    clang++ $CFLAGS $EXT_CODEC_DEFS $EXT_CODEC_INCS -arch "$ARCH" -std=c++11 \
+            -I"$HERE" -c "$HERE/Z7ExtCodec.cpp" -o "$OBJ"
     OBJS="$OBJS $OBJ"
 
     ARCH_LIB="$ADIR/lib7zbridge.a"

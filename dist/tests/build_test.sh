@@ -25,6 +25,10 @@ for f in "$LIB/lib7zbridge.a" "$LIB/lib7z.dylib" "$HERE/engine_test.cpp"; do
     fi
 done
 
+# 外部压缩库（zstd / lz4 / brotli）的静态库：桥接层引用了它们的符号，
+# 缺了会链接失败。库不存在时探测结果为空，链接照旧（对应格式已被编译出去）。
+. "$DIST/engine/ext_codecs.sh"
+
 export MACOSX_DEPLOYMENT_TARGET=11.0
 
 # 只构建 arm64：测试程序与它链接的桥接层/引擎必须同架构，否则链接即失败。
@@ -34,6 +38,7 @@ clang++ -std=c++11 -O2 -Wall -w \
     -o "$HERE/engine_test" \
     "$HERE/engine_test.cpp" \
     "$LIB/lib7zbridge.a" \
+    $EXT_CODEC_LIBS \
     -L"$LIB" -l7z \
     -Wl,-rpath,"$LIB" \
     -framework CoreFoundation

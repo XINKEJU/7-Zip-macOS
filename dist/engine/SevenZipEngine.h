@@ -166,7 +166,20 @@ public:
 
   // 打开归档并自动探测格式。失败返回 nullptr，error 填入原因（UTF-8）。
   // 若归档加密且 cb->GetPassword() 返回空串，Open 失败并给出提示。
+  //
+  // 会按上游 CArchiveLink 的语义做容器级联：只要当前层声明 kpidMainSubfile
+  // （磁盘映像 / 容器类格式，如 Dmg、MBR、GPT、VHD、XAR），就继续往里开，
+  // 使 itemCount/getItem 直接反映最内层的文件。压缩层（gzip / xz / zstd 等）
+  // 上游不声明该属性，因此不会级联 —— 那类组合请用下面的 OpenNestedItem。
   static Archive *Open(const std::string &utf8Path, Callback *cb, std::string &error);
+
+  // 把某个条目当归档打开，对应界面上的「进入内层归档」。
+  // 用于 .tar.gz / .tar.xz / .tar.zst 这类引擎本身不级联的组合：上层只看到一个
+  // s.tar，由这里再进一层才看得到 tar 里的文件。
+  // 失败返回 nullptr 并填 error；成功返回的对象持有一份 outer 的引用，调用方
+  // 按普通 Archive 释放即可（父级生命周期由它负责）；调用期间 outer 必须有效。
+  static Archive *OpenNestedItem(Archive *outer, uint32_t index, Callback *cb,
+                                 std::string &error);
 
   ~Archive();
 
@@ -175,6 +188,12 @@ public:
 
   const std::string &formatName() const;
   const std::string &archivePath() const;
+
+  // 每一层的格式名（最外层在前）。单层文件时只有一个元素。
+  const std::vector<std::string> &chainTypes() const;
+
+  // 经 OpenNestedItem 进入时，记录被进入的那个条目路径；顶层时为空串。
+  const std::string &nestedLabel() const;
 
   // 打开该归档时是否需要密码。对 7z 而言等价于「文件名加密（-mhe）」——
   // 仅数据加密的归档在打开阶段不需要密码。

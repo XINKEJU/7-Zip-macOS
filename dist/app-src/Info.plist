@@ -78,6 +78,12 @@
                 <string>public.disk-image</string>
                 <string>com.microsoft.cab-archive</string>
                 <string>public.zstandard-archive</string>
+                <!-- macOS 给 .zst / .wim 实际分配的标识并不是上面那两个：
+                     .zst → com.facebook.zstandard-archive，.wim → com.microsoft.wim-archive。
+                     两个都列上，绑定才在这些文件上真正生效（这只是接受绑定，不是在
+                     UTImportedTypeDeclarations 里重复声明类型，后者仍然不碰）。 -->
+                <string>com.facebook.zstandard-archive</string>
+                <string>com.microsoft.wim-archive</string>
             </array>
             <key>CFBundleTypeExtensions</key>
             <array>

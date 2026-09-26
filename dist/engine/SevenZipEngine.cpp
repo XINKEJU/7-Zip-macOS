@@ -23,6 +23,7 @@
 #include "SevenZipEngine.h"
 
 #include <atomic>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -32,6 +33,7 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <stdlib.h>   // mkstemps
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -61,6 +63,7 @@
 #include "7zip/IStream.h"
 #include "7zip/PropID.h"
 
+#include "Z7ExtCodec.h"
 #include "7zVersion.h"
 
 using namespace NWindows;
@@ -1353,6 +1356,15 @@ struct HandlerEntry {
   std::string name;
   std::string extensions;
   bool canUpdate = false;
+  // 处理器注册标志（NArcInfoFlags）。当前只关心 kByExtOnlyOpen ——
+  // Base64 / IHex 这类「任何文本都像」的处理器靠它限定只在扩展名匹配时才启用。
+  // 不看这个标志的话，纯文本会被 Base64 处理器认领（官方 7zz 不会），
+  // 打开 .txt 也会显示成一个只有 [Content] 一条的「Base64 归档」。
+  uint32_t flags = 0;
+  // 非空表示这是外部链入的编解码器（lz4 / brotli / zstd），走我们自己的处理器
+  // 而非上游注册表。zstd 上游已有解码器，故不入 Open 候选（避免重复认领），
+  // 只通过 FindExternalCodec 用于创建。
+  const ExternalCodec *extCodec = nullptr;
 };
 
 static bool GetHandlerClsid(UInt32 i, GUID &g) {
@@ -1383,6 +1395,28 @@ static void EnumerateHandlers(std::vector<HandlerEntry> &out) {
     if (GetHandlerProperty2(i, NArchive::NHandlerPropID::kUpdate, &prop) == S_OK &&
         prop.vt == VT_BOOL)
       e.canUpdate = (prop.boolVal != VARIANT_FALSE);
+    NCOM::CPropVariant flagsProp;
+    if (GetHandlerProperty2(i, NArchive::NHandlerPropID::kFlags, &flagsProp) == S_OK &&
+        flagsProp.vt == VT_UI4)
+      e.flags = flagsProp.ulVal;
+    out.push_back(e);
+  }
+
+  // 注入外部链入的解码器（lz4 / brotli）。它们不在上游注册表里，必须显式登记，
+  // 否则 Open 路径不会尝试它们。zstd 上游已有解码器，这里不重复注入；它只通过
+  // FindExternalCodec 用于「创建」（上游的 zstd 处理器没有 IOutArchive）。
+  const std::vector<ExternalCodec> &exts = GetExternalCodecs();
+  for (size_t k = 0; k < exts.size(); k++) {
+    const ExternalCodec &c = exts[k];
+    if (!c.canDecode) continue;
+    if (strcmp(c.name, "zstd") == 0) continue;  // 上游已能解，避免重复认领
+    HandlerEntry e;
+    e.extCodec = &exts[k];
+    e.name = c.name;
+    e.extensions = c.extensions;
+    e.canUpdate = c.canEncode;
+    // byExtOnly（无魔数）的编解码器只能按扩展名认领；有魔数的（lz4）靠内容探测。
+    if (c.byExtOnly) e.flags = NArcInfoFlags::kByExtOnlyOpen;
     out.push_back(e);
   }
 }
@@ -1407,6 +1441,243 @@ static bool ExtensionMatches(const std::string &extList, const std::string &lowe
   return false;
 }
 
+// 候选处理器排序：先按扩展名命中，再把常见容器提前，减少无效尝试。
+// 第一层与级联的内层共用这一份逻辑 —— 内层用子条目的名字当路径提示，
+// 例如 "s.tar" 会把 tar 处理器排在前面。
+static std::vector<HandlerEntry> OrderHandlersForPath(const std::vector<HandlerEntry> &handlers,
+                                                      const std::string &pathHint) {
+  std::string lower = pathHint;
+  for (size_t i = 0; i < lower.size(); i++)
+    lower[i] = (char)tolower((unsigned char)lower[i]);
+
+  std::vector<HandlerEntry> ordered;
+  for (size_t i = 0; i < handlers.size(); i++) {
+    const bool em = ExtensionMatches(handlers[i].extensions, lower);
+    if (!em) continue;
+    ordered.push_back(handlers[i]);
+  }
+  for (size_t i = 0; i < handlers.size(); i++) {
+    const bool extMatch = ExtensionMatches(handlers[i].extensions, lower);
+    if (extMatch) continue;
+    // kByExtOnlyOpen：处理器自己声明「只在扩展名匹配时才该被调用」。Base64 /
+    // IHex 这类「什么文本都像」的处理器靠它兜底 —— 忽略它就会把任意纯文本
+    // 认领成「Base64 归档」，而官方 7zz 在同样输入上是直接失败的。
+    if (handlers[i].flags & NArcInfoFlags::kByExtOnlyOpen) continue;
+    ordered.push_back(handlers[i]);
+  }
+
+  const char *preferred[] = {"7z", "zip", "tar", "gzip", "bzip2", "xz", NULL};
+  std::vector<HandlerEntry> finalOrder;
+  for (int p = 0; preferred[p]; p++)
+    for (size_t i = 0; i < ordered.size(); i++)
+      if (ordered[i].name == preferred[p]) finalOrder.push_back(ordered[i]);
+  for (size_t i = 0; i < ordered.size(); i++) {
+    bool seen = false;
+    for (size_t j = 0; j < finalOrder.size(); j++) {
+      // 外部编解码器不在上游注册表里，HandlerEntry.clsid 是未初始化的占位值，
+      // 不能用它和上游处理器做 memcmp —— 栈上垃圾字节可能恰好等于某个上游
+      // 格式（如 gzip）的 CLSID，从而被误判成「重复」而丢弃。
+      // 规则：只要比较双方有一方是外部处理器，就改用 extCodec 指针判重；
+      // 两个外部处理器只有同一指针才算重复，外部与上游永远不同、直接放行。
+      if (ordered[i].extCodec || finalOrder[j].extCodec) {
+        if (ordered[i].extCodec && finalOrder[j].extCodec &&
+            ordered[i].extCodec == finalOrder[j].extCodec) {
+          seen = true;
+          break;
+        }
+        continue;
+      }
+      if (memcmp(&finalOrder[j].clsid, &ordered[i].clsid, sizeof(GUID)) == 0) {
+        seen = true;
+        break;
+      }
+    }
+    if (!seen) finalOrder.push_back(ordered[i]);
+  }
+  return finalOrder;
+}
+
+// 一层归档的输入来源：要么是磁盘上的文件（第一层），要么是外层归档里某个
+// 条目的流（级联的内层）。每次 Create 都返回一个新打开、位置在 0 的流 ——
+// 沿用原实现「每个候选格式重新打开一次输入流」的做法，避免依赖 Seek 复位语义。
+class CLevelStreamSource {
+public:
+  explicit CLevelStreamSource(const std::string *path) : _path(path) {}
+  CLevelStreamSource(IInArchiveGetStream *getStream, UInt32 index)
+      : _getStream(getStream), _index(index) {}
+
+  bool Create(CMyComPtr<IInStream> &out) const {
+    if (_path) {
+      CInFileStream *spec = new CInFileStream;
+      CMyComPtr<IInStream> stream(spec);
+      if (!spec->Open(ToFString(*_path))) return false;
+      out = stream;
+      return true;
+    }
+    if (!_getStream) return false;
+    CMyComPtr<ISequentialInStream> seq;
+    if (_getStream->GetStream(_index, &seq) != S_OK || !seq) return false;
+    CMyComPtr<IInStream> stream;
+    if (seq.QueryInterface(IID_IInStream, &stream) != S_OK || !stream) return false;
+    out = stream;
+    return true;
+  }
+
+private:
+  const std::string *_path = NULL;
+  CMyComPtr<IInArchiveGetStream> _getStream;
+  UInt32 _index = 0;
+};
+
+// 在给定来源上依次尝试候选处理器。成功时返回该层的归档对象，并把「本层实际
+// 使用的流」「本层的格式名」「本层是否索要过密码」一并交回 —— 级联时这三样
+// 都必须由调用方持有，否则内层的流会被提前释放。
+//
+// usedStreamOut 用 IInStream** 而不是 CMyComPtr* ：CMyComPtr 重载了 operator&
+// 直接返回内部指针的地址（见 Common/MyCom.h），写成 CMyComPtr* 反而接不上。
+// 成功时所有权随之转移（Detach），调用方接住即可。
+//
+// streamUnavailable 用于区分「来源本身打不开」和「格式都不匹配」：前者是硬
+// 失败（第一层就是文件打不开），后者只是这一层不是归档。
+static IInArchive *TryHandlersOnStream(const std::vector<HandlerEntry> &candidates,
+                                       const std::string &pathHint,
+                                       const CLevelStreamSource &src, Callback *cb,
+                                       IInStream **usedStreamOut,
+                                       std::string *formatNameOut, bool *attemptPwOut,
+                                       bool &sawPasswordSupplied, bool &sawNeedPassword,
+                                       HRESULT &lastHR, bool *streamUnavailable) {
+  if (streamUnavailable) *streamUnavailable = false;
+  for (size_t h = 0; h < candidates.size(); h++) {
+    if (cb && cb->IsCanceled()) return NULL;
+
+    CMyComPtr<IInStream> stream;
+    if (!src.Create(stream)) {
+      if (streamUnavailable) *streamUnavailable = true;
+      return NULL;
+    }
+
+    CMyComPtr<IInArchive> arch;
+    if (candidates[h].extCodec) {
+      // 外部链入的编解码器不在上游注册表里，必须走我们自己的处理器。
+      arch = CreateExternalInHandler(candidates[h].extCodec);
+      if (!arch) continue;
+      // 单流容器里不存文件名，条目的名字只能由路径推导，必须赶在 GetProperty
+      // 之前告诉处理器。
+      Z7ExternalHandlerSetPath(arch, pathHint);
+    } else if (CreateObject(&candidates[h].clsid, &IID_IInArchive, (void **)&arch) != S_OK ||
+               !arch) {
+      continue;
+    }
+
+    COpenCallback *openCbSpec = new COpenCallback;
+    CMyComPtr<IArchiveOpenCallback> openCb(openCbSpec);
+    openCbSpec->cb = cb;
+
+    const UInt64 scanSize = (UInt64)1 << 23;
+    const HRESULT hr = arch->Open(stream, &scanSize, openCb);
+    if (openCbSpec->passwordSupplied) sawPasswordSupplied = true;
+
+    if (hr == S_OK) {
+      if (usedStreamOut) *usedStreamOut = stream.Detach();
+      if (attemptPwOut) *attemptPwOut = openCbSpec->passwordSupplied;
+      if (formatNameOut) {
+        // 用处理器的注册名，与 CLI 的 "Type = gzip" 完全同源（实测逐项一致：
+        // gzip / xz / zstd / Iso / wim / Dmg / APFS …）。
+        //
+        // 不要拿归档属性 kpidName 当格式名：那是处理器自报的名字，有些格式给的
+        // 是内部名 —— WIM 会返回 "E0C318FD.wim"、gzip 会把原始文件名当名字 ——
+        // 于是徽标会显示成文件名而不是格式。kpidType 也不能用：这些处理器在
+        // 被直接查询时并不返回它（OpenArchive.cpp 里的 Type 取自 CArc::ArcType，
+        // 不是归档属性）。故只把两者当兜底。
+        if (!candidates[h].name.empty()) {
+          *formatNameOut = candidates[h].name;
+        } else {
+          NCOM::CPropVariant typeProp;
+          NCOM::CPropVariant nameProp;
+          if (arch->GetArchiveProperty(kpidType, &typeProp) == S_OK &&
+              typeProp.vt == VT_BSTR && typeProp.bstrVal)
+            *formatNameOut = ToUtf8(typeProp.bstrVal);
+          else if (arch->GetArchiveProperty(kpidName, &nameProp) == S_OK &&
+                   nameProp.vt == VT_BSTR && nameProp.bstrVal)
+            *formatNameOut = ToUtf8(nameProp.bstrVal);
+          else
+            *formatNameOut = "?";
+        }
+      }
+      return arch.Detach();
+    }
+
+    if (hr == E_ABORT) sawNeedPassword = true;
+    lastHR = hr;
+  }
+  return NULL;
+}
+
+// 级联层数上限。上游用的是 kpidMainSubfile 链，理论上有限；设一个硬上限既
+// 防畸形归档构造出无限链，也让失败路径可预期。
+static const int kMaxNestingDepth = 10;
+
+// 沿 kpidMainSubfile 链继续往里开层，直到某一层不再声明它、或内层不是归档。
+// 供 Archive::Open 与 Archive::OpenNestedItem 共用。
+//
+// 上游的取舍要如实说明：真正会声明 kpidMainSubfile 的只有磁盘映像与容器类
+// 处理器（MBR / GPT / Dmg / APM / VHD(X) / VMDK / VDI / QCOW / Split /
+// Sparse / LVM / RPM / XAR / COM / PE / AR / LP / AVB）。压缩层那几个
+// （gzip / bzip2 / zstd）根本不声明，xz 那边上游甚至把赋值注释掉了
+// （"debug only, comment it"）—— 所以 .tar.gz / .tar.xz / .tar.zst 在官方
+// 7zz 上同样要解两次：实测 `7zz x s.tar.gz` 只得到 s.tar。想一步进到 tar 层
+// 靠的是界面上的「进入内层归档」，不是这里。这段照搬上游语义，不额外发明。
+static void ExtendChain(std::vector<CMyComPtr<IInArchive>> &chainArchives,
+                        std::vector<CMyComPtr<IInStream>> &chainStreams,
+                        std::vector<std::string> &chainTypes,
+                        const std::vector<HandlerEntry> &handlers, Callback *cb,
+                        bool &sawPasswordSupplied, bool &sawNeedPassword, HRESULT &lastHR) {
+  for (int depth = 0; depth < kMaxNestingDepth; depth++) {
+    IInArchive *cur = chainArchives.back();
+    if (!cur) break;
+
+    NCOM::CPropVariant mainProp;
+    if (cur->GetArchiveProperty(kpidMainSubfile, &mainProp) != S_OK || mainProp.vt != VT_UI4)
+      break;
+    const UInt32 mainIndex = mainProp.ulVal;
+
+    UInt32 numItems = 0;
+    if (cur->GetNumberOfItems(&numItems) != S_OK || mainIndex >= numItems) break;
+
+    CMyComPtr<IInArchiveGetStream> getStream;
+    if (cur->QueryInterface(IID_IInArchiveGetStream, (void **)&getStream) != S_OK || !getStream)
+      break;
+
+    std::string subPath;
+    {
+      NCOM::CPropVariant pathProp;
+      if (cur->GetProperty(mainIndex, kpidPath, &pathProp) == S_OK &&
+          pathProp.vt == VT_BSTR && pathProp.bstrVal)
+        subPath = ToUtf8(pathProp.bstrVal);
+    }
+    if (cb)
+      cb->OnLog(LogLevel::Info,
+                "进入内层归档：" + (subPath.empty() ? std::string("[流]") : subPath));
+
+    std::vector<HandlerEntry> subOrder = OrderHandlersForPath(handlers, subPath);
+    CLevelStreamSource subSrc(getStream, mainIndex);
+    CMyComPtr<IInStream> subStream;
+    std::string subFmt;
+    bool subPw = false;
+    bool subUnavailable = false;
+    CMyComPtr<IInArchive> next;
+    next.Attach(TryHandlersOnStream(subOrder, subPath, subSrc, cb, &subStream, &subFmt,
+                                    &subPw, sawPasswordSupplied, sawNeedPassword,
+                                    lastHR, &subUnavailable));
+    if (!next) break;   // 内层不是归档：保留当前层
+
+    chainArchives.push_back(next);
+    chainStreams.push_back(subStream);
+    chainTypes.push_back(subFmt);
+    if (subPw) sawPasswordSupplied = true;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Archive
 // ---------------------------------------------------------------------------
@@ -1419,6 +1690,27 @@ struct Archive::Impl {
   std::atomic<bool> canceled;
   UInt32 numItems = 0;
   ExtractStats stats;
+
+  // 容器级联：由外到内每一层的归档与它实际使用的流。必须整条链一起持有 ——
+  // 内层归档的流是外层归档提供的子流，外层一旦析构，内层的流就成了悬垂引用。
+  // 单层文件时这两个数组各有一个元素。
+  std::vector<CMyComPtr<IInArchive>> chainArchives;
+  std::vector<CMyComPtr<IInStream>> chainStreams;
+
+  // 每一层的格式名（最外层在前）。单层时只有一个元素，等于 formatName。
+  // 界面可用它显示 "Dmg ▸ APFS" 之类的层级信息。
+  std::vector<std::string> chainTypes;
+
+  // 经「进入内层归档」打开时，记录进入的是哪个条目（用于面包屑）。
+  std::string nestedLabel;
+
+  // 由 OpenNestedItem 打开时，持有父归档：内层的流最终读的是父归档持有的
+  // 文件流，父级必须活到内层关闭为止。由本对象负责释放。
+  Archive *parentKeepAlive = NULL;
+
+  // 走「解到临时文件再进入」时，临时的内层归档路径；析构时删除。
+  std::string tempFilePath;
+
   // 打开时是否被 handler 索要过密码。
   // 对 7z 而言这等价于"文件名/头部已加密"（-mhe）：仅数据加密的归档打开时不需要密码。
   // 删除走重建路径，必须据此还原 -mhe，否则会悄悄削弱归档的机密性。
@@ -1431,11 +1723,26 @@ Archive::Archive() : m_impl(new Impl) {}
 
 Archive::~Archive() {
   if (m_impl) {
+    // 由内到外逐个关闭；最内层在 chainStreams.back() 上也由 chainArchives 持有
+    for (size_t i = m_impl->chainArchives.size(); i > 0; i--)
+      if (m_impl->chainArchives[i - 1]) m_impl->chainArchives[i - 1]->Close();
     if (m_impl->archive) m_impl->archive->Close();
+    // 父归档必须在所有内层流释放之后再销毁
+    m_impl->chainArchives.clear();
+    m_impl->chainStreams.clear();
+    if (m_impl->parentKeepAlive) {
+      delete m_impl->parentKeepAlive;
+      m_impl->parentKeepAlive = NULL;
+    }
+    // 临时解出的内层归档最后删（上面的 Close 可能还在读它）
+    if (!m_impl->tempFilePath.empty()) unlink(m_impl->tempFilePath.c_str());
     delete m_impl;
     m_impl = NULL;
   }
 }
+
+const std::vector<std::string> &Archive::chainTypes() const { return m_impl->chainTypes; }
+const std::string &Archive::nestedLabel() const { return m_impl->nestedLabel; }
 
 const std::string &Archive::formatName() const { return m_impl->formatName; }
 const std::string &Archive::archivePath() const { return m_impl->path; }
@@ -1454,96 +1761,251 @@ Archive *Archive::Open(const std::string &utf8Path, Callback *cb, std::string &e
     return NULL;
   }
 
-  std::string lower = utf8Path;
-  for (size_t i = 0; i < lower.size(); i++)
-    lower[i] = (char)tolower((unsigned char)lower[i]);
+  // 候选顺序：第一层用文件路径当提示
+  std::vector<HandlerEntry> ordered = OrderHandlersForPath(handlers, utf8Path);
 
-  std::vector<HandlerEntry> ordered;
-  for (size_t i = 0; i < handlers.size(); i++)
-    if (ExtensionMatches(handlers[i].extensions, lower)) ordered.push_back(handlers[i]);
-  for (size_t i = 0; i < handlers.size(); i++)
-    if (!ExtensionMatches(handlers[i].extensions, lower)) ordered.push_back(handlers[i]);
-
-  // 常见容器排在前面，减少无效尝试
-  const char *preferred[] = {"7z", "zip", "tar", "gzip", "bzip2", "xz", NULL};
-  std::vector<HandlerEntry> finalOrder;
-  for (int p = 0; preferred[p]; p++)
-    for (size_t i = 0; i < ordered.size(); i++)
-      if (ordered[i].name == preferred[p]) finalOrder.push_back(ordered[i]);
-  for (size_t i = 0; i < ordered.size(); i++) {
-    bool seen = false;
-    for (size_t j = 0; j < finalOrder.size(); j++)
-      if (memcmp(&finalOrder[j].clsid, &ordered[i].clsid, sizeof(GUID)) == 0) seen = true;
-    if (!seen) finalOrder.push_back(ordered[i]);
-  }
-  ordered.swap(finalOrder);
-
-  const UInt64 scanSize = (UInt64)1 << 23;
   HRESULT lastHR = S_OK;
   bool sawNeedPassword = false;
   bool sawPasswordSupplied = false;
 
-  for (size_t h = 0; h < ordered.size(); h++) {
-    if (cb && cb->IsCanceled()) {
-      error = "已取消";
+  std::vector<CMyComPtr<IInArchive>> chainArchives;
+  std::vector<CMyComPtr<IInStream>> chainStreams;
+  std::vector<std::string> chainTypes;
+
+  // ---- 第一层：磁盘文件 ----------------------------------------------------
+  std::string fmtName;
+  CMyComPtr<IInStream> usedStream;
+  bool level1Pw = false;
+  bool fileUnavailable = false;
+  {
+    CLevelStreamSource src(&utf8Path);
+    CMyComPtr<IInArchive> first;
+    // 必须用 Attach 而不是「构造函数 + 裸指针」：TryHandlersOnStream 交回的是
+    // 已转移所有权的指针，而 CMyComPtr(T*) 会再 AddRef 一次，那样会白白漏一个引用。
+    first.Attach(TryHandlersOnStream(ordered, utf8Path, src, cb, &usedStream, &fmtName,
+                                     &level1Pw, sawPasswordSupplied,
+                                     sawNeedPassword, lastHR, &fileUnavailable));
+    if (!first) {
+      if (cb && cb->IsCanceled()) {
+        error = "已取消";
+        return NULL;
+      }
+      if (fileUnavailable) {
+        error = "无法打开文件：" + utf8Path;
+        return NULL;
+      }
+      // 失败原因分类（顺序即优先级）：
+      //   1. 已提供密码仍打不开 —— 密码错误是首要嫌疑（头加密归档尤其如此）
+      //   2. 完全没提供密码且 handler 索要过 —— 明确提示需要密码
+      //   3. 其余 —— 格式不识别或文件损坏
+      if (sawPasswordSupplied) {
+        const char *t = HRReason(lastHR);
+        error = "密码错误或归档已损坏";
+        error += t ? (std::string("（") + t + "）") : ("（" + HRText(lastHR) + "）");
+      } else if (sawNeedPassword) {
+        error = "归档已加密，需要正确密码";
+      } else {
+        const char *t = HRReason(lastHR);
+        error = "无法识别归档格式或文件已损坏";
+        error += t ? (std::string("（") + t + "）") : ("（" + HRText(lastHR) + "）");
+      }
       return NULL;
     }
-
-    // 每个候选格式重新打开一次输入流，避免依赖 Seek 复位语义
-    CInFileStream *fileSpec = new CInFileStream;
-    CMyComPtr<IInStream> fileStream(fileSpec);
-    if (!fileSpec->Open(ToFString(utf8Path))) {
-      error = "无法打开文件：" + utf8Path;
-      return NULL;
-    }
-
-    CMyComPtr<IInArchive> arch;
-    if (CreateObject(&ordered[h].clsid, &IID_IInArchive, (void **)&arch) != S_OK || !arch)
-      continue;
-
-    COpenCallback *openCbSpec = new COpenCallback;
-    CMyComPtr<IArchiveOpenCallback> openCb(openCbSpec);
-    openCbSpec->cb = cb;
-
-    const HRESULT hr = arch->Open(fileStream, &scanSize, openCb);
-    if (openCbSpec->passwordSupplied) sawPasswordSupplied = true;
-    if (hr == S_OK) {
-      Archive *a = new Archive;
-      a->m_impl->archive = arch;
-      a->m_impl->stream = fileStream;
-      a->m_impl->path = utf8Path;
-      // 只采信"成功的那次尝试"的密码索取标志（openCbSpec 与本次 handler 一一对应）
-      a->m_impl->headerEncrypted = openCbSpec->passwordSupplied;
-      NCOM::CPropVariant nameProp;
-      if (arch->GetArchiveProperty(kpidName, &nameProp) == S_OK &&
-          nameProp.vt == VT_BSTR && nameProp.bstrVal)
-        a->m_impl->formatName = ToUtf8(nameProp.bstrVal);
-      else
-        a->m_impl->formatName = ordered[h].name;
-      arch->GetNumberOfItems(&a->m_impl->numItems);
-      return a;
-    }
-
-    if (hr == E_ABORT) sawNeedPassword = true;
-    lastHR = hr;
+    chainArchives.push_back(first);
+    chainStreams.push_back(usedStream);
+    chainTypes.push_back(fmtName);
   }
 
-  // 失败原因分类（顺序即优先级）：
-  //   1. 已提供密码仍打不开 —— 密码错误是首要嫌疑（头加密归档尤其如此）
-  //   2. 完全没提供密码且 handler 索要过 —— 明确提示需要密码
-  //   3. 其余 —— 格式不识别或文件损坏
-  if (sawPasswordSupplied) {
-    const char *t = HRReason(lastHR);
-    error = "密码错误或归档已损坏";
-    error += t ? (std::string("（") + t + "）") : ("（" + HRText(lastHR) + "）");
-  } else if (sawNeedPassword) {
-    error = "归档已加密，需要正确密码";
+  // ---- 容器级联 ------------------------------------------------------------
+  ExtendChain(chainArchives, chainStreams, chainTypes, handlers, cb,
+              sawPasswordSupplied, sawNeedPassword, lastHR);
+
+  Archive *a = new Archive;
+  a->m_impl->archive = chainArchives.back();
+  a->m_impl->stream = chainStreams.back();
+  a->m_impl->chainArchives.swap(chainArchives);
+  a->m_impl->chainStreams.swap(chainStreams);
+  a->m_impl->path = utf8Path;
+
+  // formatName 取**最外层**的格式名：单层文件就是原来那个值；级联时是用户
+  // 实际打开的那个容器（例如 Dmg），里面是什么由 chainTypes 表达，界面据此
+  // 显示 "Dmg ▸ APFS" 这样的层级。
+  a->m_impl->formatName = chainTypes.empty() ? std::string("?") : chainTypes.front();
+  a->m_impl->chainTypes = chainTypes;
+
+  // 只采信第一层那次成功尝试的密码索取标志（与各处理的语义不变）
+  a->m_impl->headerEncrypted = level1Pw;
+  a->m_impl->archive->GetNumberOfItems(&a->m_impl->numItems);
+  return a;
+}
+
+// 「进入内层归档」走临时文件时的体积上限。单流压缩（gzip/bzip2/zstd）没有
+// 按条目取流的接口，只能先落盘；给一个上限，避免 4 GB 的 tar 被无声解开占满磁盘。
+static const UInt64 kMaxNestedTempBytes = (UInt64)8 << 30;   // 8 GiB
+
+// 生成一个带合适后缀的临时文件名（后缀用于让内层格式探测有线索）。
+// 失败返回空串。
+static std::string MakeNestedTempPath(const std::string &itemName) {
+  std::string suffix;
+  const size_t dot = itemName.find_last_of('.');
+  if (dot != std::string::npos && dot + 1 < itemName.size() && itemName.size() - dot <= 12) {
+    suffix = itemName.substr(dot);   // 含点
+    for (size_t i = 0; i < suffix.size(); i++) {
+      const char c = suffix[i];
+      if (!isalnum((unsigned char)c) && c != '.') suffix[i] = '_';
+    }
+  }
+  const char *tmp = getenv("TMPDIR");
+  std::string dir = (tmp && *tmp) ? tmp : "/tmp";
+  while (dir.size() > 1 && dir[dir.size() - 1] == '/') dir.erase(dir.size() - 1);
+
+  std::string tmpl = dir + "/7z-nested-XXXXXX" + suffix;
+  std::vector<char> buf(tmpl.begin(), tmpl.end());
+  buf.push_back('\0');
+  const int fd = mkstemps(buf.data(), (int)suffix.size());
+  if (fd < 0) return std::string();
+  close(fd);
+  return std::string(buf.data());
+}
+
+Archive *Archive::OpenNestedItem(Archive *outer, uint32_t index, Callback *cb,
+                                 std::string &error) {
+  error.clear();
+  if (!outer || !outer->m_impl || !outer->m_impl->archive) {
+    error = "内部错误：父归档未打开";
+    return NULL;
+  }
+
+  IInArchive *cur = outer->m_impl->archive;
+  UInt32 numItems = 0;
+  if (cur->GetNumberOfItems(&numItems) != S_OK || index >= numItems) {
+    error = "条目不存在";
+    return NULL;
+  }
+
+  std::string subPath;
+  {
+    NCOM::CPropVariant pathProp;
+    if (cur->GetProperty(index, kpidPath, &pathProp) == S_OK &&
+        pathProp.vt == VT_BSTR && pathProp.bstrVal)
+      subPath = ToUtf8(pathProp.bstrVal);
+  }
+  if (subPath.empty()) {
+    // 单流压缩的条目常常没有名字（xz 就不给 kpidPath），退而用格式名当标签
+    NCOM::CPropVariant nameProp;
+    if (cur->GetArchiveProperty(kpidName, &nameProp) == S_OK &&
+        nameProp.vt == VT_BSTR && nameProp.bstrVal)
+      subPath = ToUtf8(nameProp.bstrVal);
+  }
+  if (subPath.empty()) subPath = "[Content]";
+
+  std::vector<HandlerEntry> handlers;
+  EnumerateHandlers(handlers);
+  if (handlers.empty()) {
+    error = "无法从引擎枚举归档格式";
+    return NULL;
+  }
+
+  std::vector<HandlerEntry> ordered = OrderHandlersForPath(handlers, subPath);
+
+  // 两条路：处理器提供按条目取流就直接读；不提供就先把条目解到临时文件。
+  //
+  // 需要退路的是单流压缩处理器 —— gzip / bzip2 / zstd / lzma / Z 都只声明了
+  // IInArchive + IArchiveOpenSeq + ISetProperties，没有 IInArchiveGetStream
+  // （见 Archive/GzHandler.cpp 的 Z7_CLASS_IMP_CHandler_IInArchive_3、
+  // Archive/ZstdHandler.cpp 的 Z7_COM_QI_BEGIN2）。上游 7zz 因此进不去
+  // .tar.gz / .tar.zst，只能解两次；落盘这条退路是上游没有的。
+  std::string tmpPath;
+  bool usedTempFile = false;
+  CMyComPtr<IInArchiveGetStream> getStream;
+  if (cur->QueryInterface(IID_IInArchiveGetStream, (void **)&getStream) != S_OK || !getStream) {
+    if (numItems != 1) {
+      error = "该归档不支持按条目取数据流，无法进入内层";
+      return NULL;
+    }
+    ItemInfo probe;
+    if (!outer->getItem(index, probe)) {
+      error = "无法读取该条目的信息";
+      return NULL;
+    }
+    if (probe.size > kMaxNestedTempBytes) {
+      error = "内层体积超过 8 GiB，请先用「解压到…」展开后再打开";
+      return NULL;
+    }
+    tmpPath = MakeNestedTempPath(subPath);
+    if (tmpPath.empty()) {
+      error = "无法创建临时文件";
+      return NULL;
+    }
+    if (!outer->extractToFile(index, tmpPath, cb, error)) {
+      unlink(tmpPath.c_str());
+      if (error.empty()) error = "解出内层归档时失败";
+      return NULL;
+    }
+    usedTempFile = true;
+    if (cb) cb->OnLog(LogLevel::Info, "已解出内层以便继续进入：" + tmpPath);
+  }
+
+  HRESULT lastHR = S_OK;
+  bool sawPasswordSupplied = false;
+  bool sawNeedPassword = false;
+  CMyComPtr<IInStream> usedStream;
+  std::string fmt;
+  bool attemptPw = false;
+  bool unavailable = false;
+  CMyComPtr<IInArchive> opened;
+  if (usedTempFile) {
+    CLevelStreamSource src(&tmpPath);
+    opened.Attach(TryHandlersOnStream(ordered, subPath, src, cb, &usedStream, &fmt, &attemptPw,
+                                      sawPasswordSupplied, sawNeedPassword, lastHR, &unavailable));
   } else {
-    const char *t = HRReason(lastHR);
-    error = "无法识别归档格式或文件已损坏";
-    error += t ? (std::string("（") + t + "）") : ("（" + HRText(lastHR) + "）");
+    CLevelStreamSource src(getStream, index);
+    opened.Attach(TryHandlersOnStream(ordered, subPath, src, cb, &usedStream, &fmt, &attemptPw,
+                                      sawPasswordSupplied, sawNeedPassword, lastHR, &unavailable));
   }
-  return NULL;
+  if (!opened) {
+    if (!tmpPath.empty()) unlink(tmpPath.c_str());
+    if (cb && cb->IsCanceled())
+      error = "已取消";
+    else if (unavailable)
+      error = "无法读取该条目的数据流";
+    else if (sawPasswordSupplied)
+      error = "内层归档的密码错误或已损坏";
+    else if (sawNeedPassword)
+      error = "内层归档已加密，需要密码";
+    else
+      error = "该条目不是引擎能识别的归档";
+    return NULL;
+  }
+
+  std::vector<CMyComPtr<IInArchive>> chainArchives;
+  std::vector<CMyComPtr<IInStream>> chainStreams;
+  std::vector<std::string> chainTypes;
+  chainArchives.push_back(opened);
+  chainStreams.push_back(usedStream);
+  chainTypes.push_back(fmt);
+
+  // 内层如果还能继续级联（例如进了 dmg 里的分区表），同样走一遍
+  ExtendChain(chainArchives, chainStreams, chainTypes, handlers, cb,
+              sawPasswordSupplied, sawNeedPassword, lastHR);
+
+  Archive *a = new Archive;
+  a->m_impl->archive = chainArchives.back();
+  a->m_impl->stream = chainStreams.back();
+  a->m_impl->chainArchives.swap(chainArchives);
+  a->m_impl->chainStreams.swap(chainStreams);
+  // 路径仍是最外层文件：钥匙串按它存取密码，窗口标题也仍指同一个文件
+  a->m_impl->path = outer->m_impl->path;
+  a->m_impl->formatName = chainTypes.front();
+  a->m_impl->chainTypes = outer->m_impl->chainTypes;
+  a->m_impl->chainTypes.insert(a->m_impl->chainTypes.end(),
+                               chainTypes.begin(), chainTypes.end());
+  a->m_impl->nestedLabel = subPath;
+  a->m_impl->headerEncrypted = outer->m_impl->headerEncrypted || attemptPw;
+  a->m_impl->tempFilePath = tmpPath;   // 空串表示走的取流路径
+  a->m_impl->parentKeepAlive = outer;  // 父级的生命周期交给本对象
+  a->m_impl->archive->GetNumberOfItems(&a->m_impl->numItems);
+  return a;
 }
 
 bool Archive::getItem(uint32_t index, ItemInfo &out) const {
@@ -1964,26 +2426,158 @@ static UString ArchiveRootForPath(const std::string &utf8Path, const Compression
   return ToUString(slash == std::string::npos ? base : base.substr(slash + 1));
 }
 
-static bool FormatToClsid(const std::string &format, GUID &out, std::string &error) {
-  if (format == "7z") { out = g_CLSID_7z; return true; }
-  if (format == "zip") { out = g_CLSID_Zip; return true; }
-  if (format == "gzip" || format == "gz") { out = g_CLSID_GZip; return true; }
-  if (format == "bzip2" || format == "bz2") { out = g_CLSID_BZip2; return true; }
-  if (format == "tar") { out = g_CLSID_Tar; return true; }
-  if (format == "xz") { out = g_CLSID_Xz; return true; }
-  error = "不支持的压缩格式：" + format;
+// 格式别名 -> 处理器注册名（即 listFormats 输出的「名称」列，也是 7zz -t 的名字）。
+// 例如 "gz"/"tgz"/"tar.gz" 都归到 gzip；组合格式的外层名也在这里归一化。
+static std::string CanonicalFormatName(const std::string &format) {
+  std::string f;
+  for (size_t i = 0; i < format.size(); i++)
+    f += (char)tolower((unsigned char)format[i]);
+  if (f == "7z") return "7z";
+  if (f == "zip") return "zip";
+  if (f == "tar") return "tar";
+  if (f == "wim" || f == "swm") return "wim";
+  if (f == "gz" || f == "gzip") return "gzip";
+  if (f == "bz2" || f == "bzip2") return "bzip2";
+  if (f == "xz") return "xz";
+  if (f == "zst" || f == "zstd") return "zstd";
+  return f;
+}
+
+// 组合格式（tar + 单流外层）：上游 7zz 无法一步生成 —— 多个输入时 -tgzip 直接
+// E_INVALIDARG，写成 -ttar 又只产出裸 tar（名字却是 .tar.gz，会误导）。
+// 这里自己分两段完成，故需要拆出外层格式名。
+//
+// 注意：必须拿**原始**格式串来判定，不能先过 CanonicalFormatName —— 后者会把
+// "tar.gz" 折叠成 "gzip"，组合信息就丢了。
+static bool IsComposedTarFormat(const std::string &formatRaw, std::string &outer) {
+  std::string f;
+  for (size_t i = 0; i < formatRaw.size(); i++)
+    f += (char)tolower((unsigned char)formatRaw[i]);
+
+  // 短写法：整名即 tar+外层的合写
+  if (f == "tgz") { outer = "gzip"; return true; }
+  if (f == "tbz2" || f == "tbz") { outer = "bzip2"; return true; }
+  if (f == "txz") { outer = "xz"; return true; }
+  if (f == "tzst") { outer = "zstd"; return true; }
+
+  // 长写法：tar.<ext>。只有单流压缩层能当外层，tar.tar / tar.zip 没有意义。
+  const size_t p = f.rfind('.');
+  if (p == std::string::npos) return false;
+  if (f.substr(0, p) != "tar") return false;
+  const std::string o = f.substr(p + 1);
+  if (o == "gz" || o == "gzip") { outer = "gzip"; return true; }
+  if (o == "bz2" || o == "bzip2") { outer = "bzip2"; return true; }
+  if (o == "xz") { outer = "xz"; return true; }
+  if (o == "zst" || o == "zstd") { outer = "zstd"; return true; }
   return false;
 }
 
-bool create(const std::vector<std::string> &utf8InputPaths,
-            const std::string &utf8DestArchive, const CompressionOptions &options,
-            Callback *cb, std::string &error) {
+// 按处理器注册名查 CLSID。走运行时枚举而不是硬编码 id 字节 —— 7-Zip 的
+// 格式 CLSID 只是 {23170F69-40C1-278A-1000-000110<id>0000}，靠 id 区分，
+// 抄错一个字节就会静默创建出别的东西。枚举表取自 lib7z 自己注册的元数据，
+// 因此新增格式（如 wim）不需要再手抄。
+static bool ClsidByHandlerName(const std::string &handlerName, GUID &out) {
+  std::vector<HandlerEntry> hs;
+  EnumerateHandlers(hs);
+  for (size_t i = 0; i < hs.size(); i++) {
+    // 跳过外部编解码器：它们的 clsid 是占位值（非上游注册表），不能拿去 CreateObject。
+    // 否则 lz4 / brotli 这类没有编码器的格式会被匹配到垃圾 CLSID，创建时静默行为错乱。
+    if (hs[i].extCodec) continue;
+    if (hs[i].name == handlerName) {
+      out = hs[i].clsid;
+      return true;
+    }
+  }
+  // 枚举不可用时退回已知 id（保证旧行为不因枚举失败而整体失效）
+  if (handlerName == "7z") { out = g_CLSID_7z; return true; }
+  if (handlerName == "zip") { out = g_CLSID_Zip; return true; }
+  if (handlerName == "gzip") { out = g_CLSID_GZip; return true; }
+  if (handlerName == "bzip2") { out = g_CLSID_BZip2; return true; }
+  if (handlerName == "tar") { out = g_CLSID_Tar; return true; }
+  if (handlerName == "xz") { out = g_CLSID_Xz; return true; }
+  return false;
+}
+
+static bool FormatToClsid(const std::string &format, GUID &out, std::string &error) {
+  const std::string name = CanonicalFormatName(format);
+  if (name.empty()) {
+    error = "不支持的压缩格式：" + format;
+    return false;
+  }
+  std::string outer;
+  if (IsComposedTarFormat(format, outer)) {
+    error = "组合格式 " + format + " 应走两段式创建路径";
+    return false;
+  }
+  if (!ClsidByHandlerName(name, out)) {
+    error = "不支持的压缩格式：" + format;
+    return false;
+  }
+  return true;
+}
+
+// 组合格式里内层 tar 在归档中显示的条目名。官方两步法的结果是
+// "out.tar.gz" 内含 "out.tar"，这里保持一致。
+static std::string InnerTarEntryName(const std::string &destUtf8) {
+  const size_t s = destUtf8.find_last_of('/');
+  std::string b = (s == std::string::npos) ? destUtf8 : destUtf8.substr(s + 1);
+  std::string lower;
+  for (size_t i = 0; i < b.size(); i++) lower += (char)tolower((unsigned char)b[i]);
+
+  // 短后缀：.tgz / .tbz2 / .tbz / .txz / .tzst —— 整段替换成 .tar
+  const char *shortExt[] = {"tgz", "tbz2", "tbz", "txz", "tzst", NULL};
+  for (int i = 0; shortExt[i]; i++) {
+    const std::string e = std::string(".") + shortExt[i];
+    if (lower.size() > e.size() && lower.compare(lower.size() - e.size(), e.size(), e) == 0)
+      return b.substr(0, b.size() - e.size()) + ".tar";
+  }
+  // 长后缀：.tar.gz / .tar.bz2 / .tar.xz / .tar.zst —— 去掉外层即可
+  const char *longExt[] = {"gz", "bz2", "xz", "zst", NULL};
+  for (int i = 0; longExt[i]; i++) {
+    const std::string e = std::string(".") + longExt[i];
+    if (lower.size() > e.size() && lower.compare(lower.size() - e.size(), e.size(), e) == 0) {
+      std::string base = b.substr(0, b.size() - e.size());
+      if (base.size() > 4) {
+        std::string bl;
+        for (size_t k = 0; k < base.size(); k++) bl += (char)tolower((unsigned char)base[k]);
+        if (bl.compare(bl.size() - 4, 4, ".tar") == 0) return base;
+      }
+      return base + ".tar";
+    }
+  }
+  return b;
+}
+
+// 单段创建：把给定条目写成一个归档。组合格式（tar.*）调用它两次。
+static bool CreateSingleArchive(const std::vector<std::string> &utf8InputPaths,
+                                const std::string &utf8DestArchive,
+                                const CompressionOptions &options,
+                                Callback *cb, std::string &error) {
   error.clear();
   // 密码副本的生存期被严格限制在本函数内（技术方案 §8.2）
   CPasswordGuard pwGuard(options.password);
 
   if (utf8InputPaths.empty()) {
     error = "没有待压缩的输入";
+    return false;
+  }
+
+  // 外部编解码器里只解压、不编码的格式（lz4 / brotli）：明确拒绝创建，避免落到
+  // 上游 CLSID 查找给出含糊的「不支持的压缩格式」。
+  if (const ExternalCodec *ext = FindExternalCodec(options.format)) {
+    if (!ext->canEncode) {
+      error = "「" + options.format + "」仅支持解压，无法创建归档";
+      return false;
+    }
+  }
+
+  // 单流格式（gz/bz2/xz 上游限制；zstd/lz4/br 是我们外部编解码器，本质单流）
+  // 只能装一个文件。多个输入时官方 7zz 给 E_INVALIDARG，这里提前给清晰的中文报错。
+  const std::string cf = CanonicalFormatName(options.format);
+  if ((cf == "gzip" || cf == "bzip2" || cf == "xz" || cf == "zstd" ||
+       cf == "lz4" || cf == "br") &&
+      utf8InputPaths.size() > 1) {
+    error = "「" + cf + "」是单流格式，一次只能压缩一个文件";
     return false;
   }
 
@@ -2014,10 +2608,19 @@ bool create(const std::vector<std::string> &utf8InputPaths,
     }
   }
 
-  CMyComPtr<IOutArchive> outArchive;
-  if (CreateObject(&clsid, &IID_IOutArchive, (void **)&outArchive) != S_OK || !outArchive) {
-    error = "该格式不支持创建归档";
-    return false;
+  // 外部编解码器优先：上游注册表里 zstd 的处理器没有 IOutArchive（7-Zip 只带
+  // 解码器），创建必须走我们自己的实现。FindExternalCodec 在库没链进来时
+  // 返回 NULL，此时自然回落到注册表路径。
+  const ExternalCodec *extCodec = FindExternalCodec(options.format);
+  CMyComPtr<IOutArchive> outArchive =
+      extCodec ? CreateExternalOutHandler(extCodec) : CMyComPtr<IOutArchive>();
+  if (!outArchive) {
+    if (CreateObject(&clsid, &IID_IOutArchive, (void **)&outArchive) != S_OK || !outArchive) {
+      error = extCodec ? ("该格式暂时不支持创建归档（" + std::string(extCodec->name) +
+                          " 编码器未链接）")
+                       : "该格式不支持创建归档";
+      return false;
+    }
   }
 
   // ---- 应用压缩选项（技术方案 §5.1 字段映射）----
@@ -2080,6 +2683,62 @@ bool create(const std::vector<std::string> &utf8InputPaths,
     return false;
   }
   return true;
+}
+
+// 组合格式用的临时目录：单独建一个子目录，避免同名归档互相踩。
+// 目录内文件名固定为内层条目名（见 InnerTarEntryName）。
+static bool MakeComposedTempTar(const std::string &innerName, std::string &dirOut,
+                                std::string &pathOut) {
+  const char *tmp = getenv("TMPDIR");
+  std::string base = (tmp && *tmp) ? tmp : "/tmp";
+  while (base.size() > 1 && base[base.size() - 1] == '/') base.erase(base.size() - 1);
+  std::string tmpl = base + "/7z-compose-XXXXXX";
+  std::vector<char> buf(tmpl.begin(), tmpl.end());
+  buf.push_back('\0');
+  if (!mkdtemp(buf.data())) return false;
+  dirOut = std::string(buf.data());
+  pathOut = dirOut + "/" + innerName;
+  return true;
+}
+
+bool create(const std::vector<std::string> &utf8InputPaths,
+            const std::string &utf8DestArchive, const CompressionOptions &options,
+            Callback *cb, std::string &error) {
+  std::string outer;
+  if (!IsComposedTarFormat(options.format, outer))
+    return CreateSingleArchive(utf8InputPaths, utf8DestArchive, options, cb, error);
+
+  // tar.<外层> 两段式：先把条目打成 tar 临时文件，再用外层单流格式压缩它。
+  // 这是官方 7zz 做不到的一步生成（多输入 -tgzip 直接 E_INVALIDARG）。
+  const std::string innerName = InnerTarEntryName(utf8DestArchive);
+  std::string tmpDir, tmpTar;
+  if (!MakeComposedTempTar(innerName, tmpDir, tmpTar)) {
+    error = "无法创建临时目录";
+    return false;
+  }
+
+  bool ok = false;
+  do {
+    CompressionOptions innerOpts = options;
+    innerOpts.format = "tar";
+    // 分卷只对最外层有意义；内层 tar 若也分卷会先写出一串 .001 中间文件
+    innerOpts.hasVolumeSize = false;
+    if (cb) cb->OnLog(LogLevel::Info, "组合归档：第 1/2 段 打包 tar");
+    if (!CreateSingleArchive(utf8InputPaths, tmpTar, innerOpts, cb, error)) break;
+
+    CompressionOptions outerOpts = options;
+    outerOpts.format = outer;
+    // 外层只装这一个 tar，条目名必须就是它；「保留完整路径」只对内层内容生效，
+    // 否则归档里会存下一个 /var/folders/... 的绝对路径。
+    outerOpts.fullPaths = false;
+    if (cb) cb->OnLog(LogLevel::Info, std::string("组合归档：第 2/2 段 ") + outer + " 压缩");
+    ok = CreateSingleArchive(std::vector<std::string>(1, tmpTar), utf8DestArchive, outerOpts,
+                             cb, error);
+  } while (false);
+
+  unlink(tmpTar.c_str());
+  rmdir(tmpDir.c_str());
+  return ok;
 }
 
 // ---------------------------------------------------------------------------
@@ -2459,11 +3118,15 @@ bool listFormats(std::vector<FormatInfo> &out) {
   out.clear();
   std::vector<HandlerEntry> handlers;
   EnumerateHandlers(handlers);
+  // 外部编解码器的「可创建」能力：zstd 上游只报可解（canUpdate=0），我们补了
+  // 编码器，这里按真实能力覆盖。lz4 / brotli 是纯解码，保持 canUpdate=false。
+  bool zstdCanEncode = (FindExternalCodec("zstd") != NULL);
   for (size_t i = 0; i < handlers.size(); i++) {
     FormatInfo fi;
     fi.name = handlers[i].name;
     fi.extensions = handlers[i].extensions;
     fi.canUpdate = handlers[i].canUpdate;
+    if (zstdCanEncode && handlers[i].name == "zstd") fi.canUpdate = true;
     out.push_back(fi);
   }
   return !out.empty();

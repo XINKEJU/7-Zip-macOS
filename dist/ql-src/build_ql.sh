@@ -8,14 +8,16 @@
 # (The extension was a universal binary until 2026-09-24, when the x86_64 slice
 # was dropped project-wide — see the Makefile header.)
 #
-# The extension lists archives in-process (see ArchiveReader.c). It deliberately
-# does NOT embed the `7zz` console engine any more.
+# The extension lists archives with the linked 7-Zip engine (EngineListing.mm →
+# dist/lib/lib7z.dylib) and falls back to an in-process reader (ArchiveReader.c)
+# for anything the engine declines.
 #
-# Why: running an embedded helper from inside the extension's App Sandbox needs
-# the restricted entitlement `com.apple.security.inherit`, which the kernel only
-# grants to binaries signed with a real Developer ID and a matching provisioning
-# profile. This project ships ad-hoc signed (`codesign --sign -`,
-# TeamIdentifier=not set), so every spawn is refused with EPERM.
+# History — why the engine used to be absent. Until 2026-09-24 the extension
+# tried to *spawn* an embedded `7zz` helper. A spawn inside the App Sandbox
+# needs the restricted entitlement `com.apple.security.inherit`, which the
+# kernel grants only to binaries signed with a real Developer ID and a matching
+# provisioning profile. This project ships ad-hoc signed (`codesign --sign -`,
+# TeamIdentifier=not set), so every spawn was refused with EPERM.
 #
 # Measured 2026-09-24 against the shipped bundle:
 #     engine unavailable: posix_spawn 失败：Operation not permitted (errno 1)
@@ -23,15 +25,17 @@
 #     native reader: recognised=1 format=ZIP complete=1 count=4
 # i.e. the engine never produced a single byte, and the whole preview came from
 # the in-process reader. The embedded copy was 6,012,576 bytes — 48% of the
-# entire .app — and never executed successfully once.
-# Evidence: ~/Library/Containers/org.7-zip.macos.quicklook/Data/tmp/7zip-quicklook.log
+# entire .app — and never executed successfully once. It was removed.
 #
-# Should this project ever adopt a Developer ID signature, the full-engine
-# listing path can be restored by copying the engine back into the bundle and
-# signing it with its own entitlements:
-#     cp "$DIST/build/7zz" "$OUT/Contents/Resources/7zz"   # chmod 755
-#     { com.apple.security.app-sandbox : true,
-#       com.apple.security.inherit     : true }
+# Loading a dylib *in-process* is a different question from spawning a helper,
+# and it is permitted here. The extension is signed without the hardened runtime
+# (`codesign --sign -`, no `--options runtime`) — the signature reports
+# `flags=0x2(adhoc)` and no `runtime` — and macOS enforces library validation
+# only for hardened-runtime processes. The engine already lives in the host
+# application's Contents/Frameworks and is reachable from the appex through
+# `@executable_path/../../../../Frameworks`, so the extension links it exactly
+# the way the main executable does. Nothing is spawned; the invariant asserted
+# by `make appcheck` is untouched.
 #
 # Requirements: macOS 12+, Command Line Tools.
 #
@@ -62,21 +66,42 @@ mkdir -p "$BUILD"
 # Building with `-bundle` (MH_BUNDLE) instead would produce a plugin that the
 # system refuses to launch, and ad-hoc signing silently drops entitlements for
 # MH_BUNDLE binaries, so the sandbox entitlement would never stick.
+LIB="$DIST/lib"
+# 外部压缩库静态库（zstd/lz4/brotli）；缺失时为空，见 ext_codecs.sh
+. "$DIST/engine/ext_codecs.sh"
+
+for f in "$LIB/lib7z.dylib" "$LIB/lib7zbridge.a"; do
+    if [ ! -f "$f" ]; then
+        echo "缺少 $f，请先运行 make bridge（构建引擎与桥接层）" >&2
+        exit 2
+    fi
+done
+
+# 三个源文件、两种语言：Provider 是 ObjC，ArchiveReader 是 C，EngineListing 是
+# ObjC++（要 include 引擎的 C++ 头）。因此各自编译成 .o，再单独一步链接 ——
+# 把 C++ 链接参数混进 ObjC 编译行很容易出错。
 compile_slice() {
   local arch="$1"
   echo "==> compiling $arch"
-  clang \
-    -arch "$arch" \
-    -mmacosx-version-min="$MIN_MACOS" \
-    -fobjc-arc -fmodules \
-    -O2 -Wall -Wextra \
-    -Wl,-e,_NSExtensionMain \
-    -framework Foundation \
-    -framework QuickLookUI \
-    -framework UniformTypeIdentifiers \
-    -o "$BUILD/$EXEC_NAME" \
-    "$HERE/SevenZipPreviewProvider.m" \
-    "$HERE/ArchiveReader.c"
+  clang -arch "$arch" -mmacosx-version-min="$MIN_MACOS" \
+        -fobjc-arc -fmodules -O2 -Wall -Wextra \
+        -c -o "$BUILD/SevenZipPreviewProvider.o" "$HERE/SevenZipPreviewProvider.m"
+  clang -arch "$arch" -mmacosx-version-min="$MIN_MACOS" \
+        -fobjc-arc -fmodules -O2 -Wall -Wextra \
+        -c -o "$BUILD/ArchiveReader.o" "$HERE/ArchiveReader.c"
+  clang -arch "$arch" -mmacosx-version-min="$MIN_MACOS" \
+        -fobjc-arc -fmodules -O2 -Wall -Wextra -std=c++17 \
+        -I"$DIST/engine" -I"$HERE" \
+        -c -o "$BUILD/EngineListing.o" "$HERE/EngineListing.mm"
+  echo "==> linking $arch"
+  clang -arch "$arch" -mmacosx-version-min="$MIN_MACOS" \
+        -Wl,-e,_NSExtensionMain \
+        -o "$BUILD/$EXEC_NAME" \
+        "$BUILD/SevenZipPreviewProvider.o" "$BUILD/ArchiveReader.o" \
+        "$BUILD/EngineListing.o" \
+        "$LIB/lib7zbridge.a" $EXT_CODEC_LIBS -L"$LIB" -l7z -lc++ \
+        -Wl,-rpath,@executable_path/../../../../Frameworks \
+        -framework Foundation -framework QuickLookUI -framework UniformTypeIdentifiers
 }
 
 # 单架构，无需 lipo 合并。保留 arch 参数的函数形态，将来加回 x86_64 时只需

@@ -25,6 +25,9 @@ if [ ! -f "$LIB/lib7z.dylib" ]; then
     exit 2
 fi
 
+# 外部压缩库静态库（zstd/lz4/brotli）；缺失时为空，见 ext_codecs.sh
+. "$DIST/engine/ext_codecs.sh"
+
 build_arch() {
     arch="$1"
     out="$HERE/objc_test"
@@ -33,6 +36,7 @@ build_arch() {
           -I"$ENGINE" -I"$LIB" \
           -o "$out" "$HERE/objc_test.m" \
           "$LIB/lib7zbridgeobjc.a" "$LIB/lib7zbridge.a" \
+          $EXT_CODEC_LIBS \
           -L"$LIB" -l7z -lc++ \
           -Wl,-rpath,"$LIB" \
           -framework Foundation -framework CoreFoundation
