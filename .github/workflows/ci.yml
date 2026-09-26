@@ -1,0 +1,66 @@
+name: CI
+
+# 门禁全部沿用本地 `make` 目标，不另写一套测试逻辑：
+#   make app      —— 引擎（上游 Alone2 目标）+ 内嵌 dylib + 桥接层 + 应用 + QL 扩展
+#   make test     —— 桥接层验收 88 项（逐项对照官方 7zz 产物）
+#   make objc-test—— ObjC 适配层验收 44 项（App 实际调用的那一层）
+#   make appcheck —— 应用包验收 20 项（依赖解析 / 部署目标 / 签名 / 真实启动 / 进程模型）
+#   make verify   —— 安装卸载脚本逻辑 + Homebrew 公式一致性（离线可跑）
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    # Apple Silicon runner：本移植只发行 arm64（见 README「已知限制」）
+    runs-on: macos-14
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 工具链信息
+        run: |
+          clang --version
+          make --version | head -1
+          sw_vers
+          uname -m
+
+      # 上游源码目录内的 b/ 是编译中间产物，缓存它可以省掉每次重编引擎的时间。
+      # key 里带 makefile 与桥接层源码的哈希，改到这些文件时缓存自动失效。
+      - name: 缓存引擎编译中间产物
+        uses: actions/cache@v4
+        with:
+          path: 7z2603-src/b
+          key: engine-${{ runner.os }}-${{ hashFiles('Makefile', '7z2603-src/CPP/7zip/7zip_gcc.mak', 'dist/engine/*.sh', 'dist/engine/*.cpp', 'dist/engine/*.mm') }}
+
+      - name: 构建（引擎 + 桥接层 + 应用）
+        run: make app
+
+      - name: 桥接层验收（88 项）
+        run: make test
+
+      - name: ObjC 适配层验收（44 项）
+        run: make objc-test
+
+      - name: 应用包验收（20 项，含真实启动与进程模型）
+        run: make appcheck
+
+      - name: 离线校验（安装/卸载脚本 + 公式）
+        run: make verify
+
+      - name: 体积简报
+        if: always()
+        run: |
+          echo "== .app 体积 =="
+          du -sh dist/7-Zip.app 2>/dev/null || true
+          echo "== 关键产物 =="
+          ls -l dist/7-Zip.app/Contents/MacOS/7-Zip \
+                dist/7-Zip.app/Contents/Frameworks/lib7z.dylib 2>/dev/null || true
