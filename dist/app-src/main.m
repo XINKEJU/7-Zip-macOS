@@ -28,6 +28,7 @@
 #import <signal.h>
 #import <unistd.h>
 #import <stdlib.h>
+#import <Security/Security.h>
 
 #import "SevenZipEngineObjC.h"
 
@@ -135,6 +136,60 @@ static void Z7ClearRecentPaths(void)
 {
     [[NSUserDefaults standardUserDefaults] removeObjectForKey:kZ7RecentKey];
     [[NSDocumentController sharedDocumentController] clearRecentDocuments:nil];
+}
+
+#pragma mark - 归档密码的钥匙串存取
+
+/// 记住加密归档的密码（只在用户于密码框里显式勾选时才写入）。
+///
+/// 这是「密码不落盘」的一处显式例外：勾选才落登录钥匙串，不勾选连条目都不建；
+/// 若发现记住的密码已被拒，会立刻删掉该条目，不留下错密码反复白试。
+///
+/// 服务名与 App 标识一致，账户名取归档的标准化路径。注意 ad-hoc 签名没有固定的
+/// 团队标识，重新构建后首次读取会由系统询问一次授权（点「始终允许」后不再打扰）；
+/// 换成 Developer ID 正式签名即可消除该提示。
+static NSString *const Z7KeychainService = @"org.7-zip.macos";
+
+static NSMutableDictionary *Z7KeychainQuery(NSString *archivePath)
+{
+    return [@{(id)kSecClass: (id)kSecClassGenericPassword,
+              (id)kSecAttrService: Z7KeychainService,
+              (id)kSecAttrAccount: [archivePath stringByStandardizingPath]} mutableCopy];
+}
+
+/// 取回该归档记住的密码；没有、读取失败或为空都返回 nil。
+static NSString *Z7KeychainLoadPassword(NSString *archivePath)
+{
+    if (!archivePath.length) return nil;
+    NSMutableDictionary *q = Z7KeychainQuery(archivePath);
+    q[(id)kSecReturnData] = @YES;
+    q[(id)kSecMatchLimit] = (id)kSecMatchLimitOne;
+    CFTypeRef out = NULL;
+    if (SecItemCopyMatching((__bridge CFDictionaryRef)q, &out) != errSecSuccess || !out) {
+        return nil;
+    }
+    NSString *pw = [[NSString alloc] initWithData:(__bridge_transfer NSData *)out
+                                         encoding:NSUTF8StringEncoding];
+    return pw.length ? pw : nil;
+}
+
+/// 记住该归档的密码。同一条目先删后加，避免 errSecDuplicateItem。
+static BOOL Z7KeychainStorePassword(NSString *archivePath, NSString *password)
+{
+    if (!archivePath.length || !password.length) return NO;
+    SecItemDelete((__bridge CFDictionaryRef)Z7KeychainQuery(archivePath));
+    NSMutableDictionary *add = Z7KeychainQuery(archivePath);
+    add[(id)kSecValueData] = [password dataUsingEncoding:NSUTF8StringEncoding];
+    add[(id)kSecAttrLabel] = [NSString stringWithFormat:@"7-Zip 归档密码（%@）",
+                              archivePath.lastPathComponent ?: archivePath];
+    return SecItemAdd((__bridge CFDictionaryRef)add, NULL) == errSecSuccess;
+}
+
+/// 忘掉该归档的密码（用户取消勾选，或记住的密码被证实无效时）。
+static void Z7KeychainForgetPassword(NSString *archivePath)
+{
+    if (!archivePath.length) return;
+    SecItemDelete((__bridge CFDictionaryRef)Z7KeychainQuery(archivePath));
 }
 
 #pragma mark - 临时文件登记表（技术方案 §8.2：SIGTERM 清理）
@@ -387,22 +442,56 @@ static void Z7SignalHandler(int sig)
 @property (nonatomic, assign) double ratio;         // <0 表示不可计算
 
 @property (nonatomic, strong) NSDate *modified;
-@property (nonatomic, copy) NSString *crcText;
 @property (nonatomic, copy) NSString *method;
-@property (nonatomic, copy) NSString *attributeText;
 @property (nonatomic, assign) BOOL encrypted;
+
+// 技术列（CRC / 属性）默认隐藏在「显示列」菜单之后，因此这两串改为按需计算：
+// 建树时为十万条目预先构造它们，会白白常驻十几 MB（实测每条约 190 B）。
+// 原始值用标量保存，成本只是两个 uint32 + 两个 BOOL。
+@property (nonatomic, assign) BOOL hasCRC;
+@property (nonatomic, assign) uint32_t crc;
+@property (nonatomic, assign) BOOL hasAttributes;
+@property (nonatomic, assign) uint32_t attributes;
+@property (nonatomic, readonly, copy) NSString *crcText;
+@property (nonatomic, readonly, copy) NSString *attributeText;
 
 @property (nonatomic, strong) NSMutableArray<Z7Node *> *children;
 @property (nonatomic, weak) Z7Node *parent;
 @property (nonatomic, assign) uint32_t index;       // 引擎条目索引（目录为合成节点）
 @end
 
-@implementation Z7Node
+@implementation Z7Node {
+    NSString *_crcTextCache;
+    NSString *_attributeTextCache;
+}
 
 - (instancetype)init
 {
     if ((self = [super init])) { _children = [NSMutableArray array]; _ratio = -1; }
     return self;
+}
+
+/// CRC 十六进制串：只有真的被显示（或按 CRC 排序）时才构造。
+- (NSString *)crcText
+{
+    if (_crcTextCache) return _crcTextCache;
+    _crcTextCache = self.hasCRC ? [NSString stringWithFormat:@"%08X", self.crc] : @"";
+    return _crcTextCache;
+}
+
+/// ls -l 风格属性串：同样惰性。分支与引擎侧 Z7Item 保持一致，
+/// 无属性位时目录给占位串、其余为空。
+- (NSString *)attributeText
+{
+    if (_attributeTextCache) return _attributeTextCache;
+    if (self.hasAttributes) {
+        _attributeTextCache = [Z7Item attributeTextFromMode:self.attributes
+                                               isDirectory:self.isDirectory
+                                                 isSymLink:self.isSymLink];
+    } else {
+        _attributeTextCache = self.isDirectory ? @"d---------" : @"";
+    }
+    return _attributeTextCache;
 }
 
 /// 显示名：目录 / 符号链接带后缀提示（§6.2）
@@ -444,38 +533,55 @@ static Z7Node *Z7EnsureAncestor(NSMutableDictionary<NSString *, Z7Node *> *byPat
     return n;
 }
 
-/// 由扁平 Z7Item 列表构建层级树。归档内路径以 '/' 分隔。
-static NSArray<Z7Node *> *BuildTree(NSArray<Z7Item *> *items)
+/// 由引擎的条目表直接构建层级树。归档内路径以 '/' 分隔。
+///
+/// 这里逐条向引擎取（Z7Archive.getItem 是对已打开条目表的 O(1) 访问），而不是先
+/// allItems 攒一份完整数组：十万条目那份 Z7Item 数组实测占 ~58 MB，而建树只是
+/// 一条条过一遍。按块自动释放后，打开大归档的峰值内存里就只剩树本身。
+static NSArray<Z7Node *> *BuildTree(Z7Archive *archive, NSUInteger count)
 {
-    NSMutableDictionary<NSString *, Z7Node *> *byPath = [NSMutableDictionary dictionary];
+    NSMutableDictionary<NSString *, Z7Node *> *byPath =
+        [NSMutableDictionary dictionaryWithCapacity:count];
     NSMutableArray<Z7Node *> *roots = [NSMutableArray array];
 
-    // 第一遍：为每个真实条目建立节点
-    for (Z7Item *it in items) {
-        if (!it.path.length) continue;
-        Z7Node *n = [[Z7Node alloc] init];
-        n.path = it.path;
-        n.name = it.name.length ? it.name : it.path;
-        n.isDirectory = it.isDirectory;
-        n.isSymLink = it.isSymLink;
-        n.linkTarget = it.linkTarget;
-        n.hasSize = it.hasSize;
-        n.size = it.size;
-        n.hasPacked = it.hasPackedSize;
-        n.packed = it.packedSize;
-        n.ratio = it.compressionRatio;
-        n.modified = it.modificationDate;
-        n.crcText = it.crcText;
-        n.method = it.method;
-        n.attributeText = it.attributeText;
-        n.encrypted = it.encrypted;
-        n.index = it.index;
-        byPath[it.path] = n;
+    // 第一遍：为每条真实条目建立节点
+    for (uint32_t i = 0; i < count; i++) {
+        @autoreleasepool {
+            Z7Item *it = [archive itemAtIndex:i];
+            if (it.path.length) {
+                Z7Node *n = [[Z7Node alloc] init];
+                n.path = it.path;
+                n.name = it.name.length ? it.name : it.path;
+                n.isDirectory = it.isDirectory;
+                n.isSymLink = it.isSymLink;
+                n.linkTarget = it.linkTarget;
+                n.hasSize = it.hasSize;
+                n.size = it.size;
+                n.hasPacked = it.hasPackedSize;
+                n.packed = it.packedSize;
+                n.ratio = it.compressionRatio;
+                n.modified = it.modificationDate;
+                n.method = it.method;
+                n.encrypted = it.encrypted;
+                n.index = it.index;
+                // 技术列只复制原始标量：这里若去取 it.crcText / it.attributeText，
+                // 会当场触发引擎侧的惰性 getter 把串造出来，惰性化就白做了。
+                n.hasCRC = it.hasCRC;
+                n.crc = it.crc;
+                n.hasAttributes = it.hasAttributes;
+                n.attributes = it.attributes;
+                byPath[it.path] = n;
+            }
+        }
     }
 
-    // 第二遍：连接父子关系（先做一份快照，避免边遍历边插入）
-    NSArray<NSString *> *snapshot = [[byPath allKeys] sortedArrayUsingSelector:@selector(compare:)];
-    for (NSString *path in snapshot) {
+    // 第二遍：连接父子关系。
+    //
+    // 遍历路径字典的键快照：它天然按路径去重（归档内允许同名条目），配合
+    // Z7EnsureAncestor 的递归补全，处理顺序无关紧要。这里刻意不建「路径 -> 父路径」
+    // 的中间表——那要给十万条路径各留一个字符串；切分出的临时串都在 autoreleasepool
+    // 里就地释放。
+    for (NSString *path in [byPath allKeys]) {
         Z7Node *n = byPath[path];
         NSRange slash = [path rangeOfString:@"/" options:NSBackwardsSearch];
         if (slash.location == NSNotFound) {
@@ -528,12 +634,12 @@ typedef NS_ENUM(NSInteger, Z7TaskKind) {
 @property (nonatomic, strong) Z7CompressionOptions *options;
 @property (nonatomic, assign) BOOL replaceExisting;
 @property (nonatomic, assign) BOOL testMode;
-@property (nonatomic, assign) BOOL overwrite;
+@property (nonatomic, assign) Z7ClashPolicy clash;
 /// 建包成功后立即用同一个引擎回读校验一遍（面板上的「验证压缩完整性」）
 @property (nonatomic, assign) BOOL verifyAfterCreate;
 
 /// 打开 / 列表类任务的结果回传
-@property (nonatomic, strong) NSArray<Z7Item *> *openedItems;
+@property (nonatomic, strong) Z7Archive *archiveOut;
 @property (nonatomic, copy) NSArray<NSNumber *> *statsOut;
 @property (nonatomic, assign) BOOL headerEncryptedOut;
 
@@ -567,7 +673,7 @@ typedef NS_ENUM(NSInteger, Z7TaskKind) {
         _stateLock = [[NSLock alloc] init];
         _cancelRequested = NO;
         _didTimeout = NO;
-        _overwrite = YES;
+        _clash = Z7ClashPolicyOverwrite;
         _lastProgressAt = [NSDate timeIntervalSinceReferenceDate];
     }
     return self;
@@ -690,8 +796,12 @@ typedef NS_ENUM(NSInteger, Z7TaskKind) {
                               callback:self error:error];
     if (!a) return NO;
     self.archive = a;
-    self.openedItems = [a allItems];
+    // archiveOut 是结果回传通道：execute: 结束时会清掉 self.archive（任务内部引用，
+    // 用完即清），但调用方还要拿这份归档逐条取条目建树，所以另存一份引用。
+    self.archiveOut = a;
     self.headerEncryptedOut = a.headerEncrypted;
+    // 不再在这里 allItems 攒一份完整条目数组：条目改由调用方建树时逐条向
+    // 这份 archive 取（见 BuildTree），十万条目因此省下约 58 MB 峰值内存。
     // 打开只是读元数据，取消请求要即时生效
     if (self.cancelRequested) {
         if (error) *error = [NSError errorWithDomain:Z7ErrorDomain code:-1 userInfo:
@@ -712,7 +822,7 @@ typedef NS_ENUM(NSInteger, Z7TaskKind) {
     BOOL ok = [a extractItems:self.indices
                            to:self.destDir
                      testMode:self.testMode
-                    overwrite:self.overwrite
+                        clash:self.clash
                   atomicFiles:YES
                   createLinks:YES
                      callback:self
@@ -752,7 +862,7 @@ typedef NS_ENUM(NSInteger, Z7TaskKind) {
         return NO;
     }
     self.archive = a;
-    if (![a extractItems:nil to:@"" testMode:YES overwrite:NO atomicFiles:NO
+    if (![a extractItems:nil to:@"" testMode:YES clash:Z7ClashPolicySkip atomicFiles:NO
              createLinks:NO callback:self error:&verr]) {
         if (error) *error = verr ?: [NSError errorWithDomain:Z7ErrorDomain code:-1 userInfo:
                                      @{NSLocalizedDescriptionKey: @"完整性校验未通过"}];
@@ -1173,7 +1283,6 @@ static NSImage *FileIcon(NSString *name, BOOL isDir, BOOL isLink)
 @property (nonatomic, strong) NSArray<Z7Node *> *roots;
 @property (nonatomic, strong) NSArray<Z7Node *> *displayRoots; // 搜索结果时扁平列表
 @property (nonatomic, assign) BOOL filtering;
-@property (nonatomic, strong) NSMutableDictionary<NSString *, NSValue *> *indexByPath;
 
 // 任务
 @property (nonatomic, strong) NSOperationQueue *queue;
@@ -1218,7 +1327,9 @@ static NSImage *FileIcon(NSString *name, BOOL isDir, BOOL isLink)
                options:(Z7CompressionOptions *)opts;
 - (void)trashPaths:(NSArray<NSString *> *)paths;
 - (void)updateAdvancedToggleStyle;
-- (void)buildTreeAndIndexInBackground:(NSArray<Z7Item *> *)items then:(void (^)(void))then;
+- (void)buildTreeInBackground:(Z7Archive *)archive
+                        count:(NSUInteger)count
+                         then:(void (^)(void))then;
 - (void)runSearch;
 @end
 
@@ -1251,8 +1362,6 @@ static NSImage *FileIcon(NSString *name, BOOL isDir, BOOL isLink)
     self.subtitlePercent = NSNotFound;
     self.roots = @[];
     self.displayRoots = @[];
-    self.indexByPath = [NSMutableDictionary dictionary];
-
     [self buildCompressionControls];
     [self buildTreeAndEmptyState];
     [self buildLogDrawer];
@@ -2190,6 +2299,10 @@ static NSString *LevelNameForTick(NSInteger tick)
     // 拖出提取（§6.6）
     [self.outline setDraggingSourceOperationMask:NSDragOperationCopy forLocal:NO];
     [self.outline registerForDraggedTypes:@[NSPasteboardTypeFileURL]];
+    // 双击：目录展开/收起，文件交给系统 Quick Look 预览——与 Finder、Keka 的手感一致。
+    // （此前没有设 doubleAction，双击行毫无反应。）
+    self.outline.target = self;
+    self.outline.doubleAction = @selector(outlineDoubleClicked:);
 
     // §6.2 列：默认只展示 Finder 风格三列（名称/大小/修改时间），其余开发向
     // 技术列（压缩后/压缩率/CRC/方法/属性）默认隐藏，可在列头右键菜单中开启。
@@ -3069,7 +3182,7 @@ static const NSUInteger kZ7LogCharLimit = 200000;
 
 /// 密码错误或无密码时，向用户索取密码后重试（§8.2：密码不落盘、用完即清）
 - (void)promptPasswordWithMessage:(NSString *)message
-                       completion:(void (^)(NSString *password))done
+                       completion:(void (^)(NSString *password, BOOL remember))done
 {
     NSAlert *alert = [[NSAlert alloc] init];
     alert.messageText = @"需要密码";
@@ -3077,13 +3190,26 @@ static const NSUInteger kZ7LogCharLimit = 200000;
     [alert addButtonWithTitle:@"确定"];
     [alert addButtonWithTitle:@"取消"];
 
-    NSSecureTextField *field = [[NSSecureTextField alloc] initWithFrame:NSMakeRect(0, 0, 260, 24)];
+    NSSecureTextField *field = [[NSSecureTextField alloc] initWithFrame:NSMakeRect(0, 26, 260, 24)];
     field.placeholderString = @"密码";
-    alert.accessoryView = field;
+    // 「记住密码」复选框：勾选才写入钥匙串（默认勾选，随手取消即可）
+    NSButton *rememberBox = [NSButton checkboxWithTitle:@"在此 Mac 上记住该归档的密码"
+                                                 target:nil
+                                                 action:nil];
+    rememberBox.frame = NSMakeRect(0, 0, 260, 18);
+    rememberBox.state = NSControlStateValueOn;
+    NSView *box = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 260, 52)];
+    [box addSubview:field];
+    [box addSubview:rememberBox];
+    alert.accessoryView = box;
     [alert.window setInitialFirstResponder:field];
 
     NSModalResponse r = [alert runModal];
-    done(r == NSAlertFirstButtonReturn ? field.stringValue : nil);
+    if (r != NSAlertFirstButtonReturn) {
+        done(nil, NO);
+        return;
+    }
+    done(field.stringValue, rememberBox.state == NSControlStateValueOn);
 }
 
 - (void)openArchive:(NSString *)path
@@ -3141,12 +3267,28 @@ static const NSUInteger kZ7LogCharLimit = 200000;
             [me showStatus:msg];
             [me updateEmptyState];
 
-            // 需要密码 / 密码错误时提示重试
+            // 需要密码 / 密码错误时：先试钥匙串里记住的，再提示输入
             BOOL needsPassword = [msg containsString:@"需要正确密码"] || [msg containsString:@"密码错误"];
             if (needsPassword) {
-                [me promptPasswordWithMessage:msg completion:^(NSString *pw) {
-                    if (pw.length) [me openArchive:path password:pw then:then];
-                    else if (then) then(NO);
+                NSString *saved = Z7KeychainLoadPassword(path);
+                // 记住的密码就是本次用的这份、却仍被拒 → 它已失效，清掉免得下次白试
+                if (saved.length && [saved isEqualToString:password]) {
+                    Z7KeychainForgetPassword(path);
+                    saved = nil;
+                }
+                // 本次还没试过密码而钥匙串里有 → 直接拿它重开一次，不必打断用户
+                if (!password.length && saved.length) {
+                    [me appendLog:[NSString stringWithFormat:@"用钥匙串中记住的密码重试「%@」\n",
+                                   path.lastPathComponent ?: path]
+                           reveal:NO];
+                    [me openArchive:path password:saved then:then];
+                    return;
+                }
+                [me promptPasswordWithMessage:msg completion:^(NSString *pw, BOOL remember) {
+                    if (!pw.length) { if (then) then(NO); return; }
+                    if (remember) Z7KeychainStorePassword(path, pw);
+                    else Z7KeychainForgetPassword(path);
+                    [me openArchive:path password:pw then:then];
                 }];
             } else if (then) {
                 then(NO);
@@ -3158,52 +3300,47 @@ static const NSUInteger kZ7LogCharLimit = 200000;
         me.filtering = NO;
         me.searchField.stringValue = @"";
         Z7NoteRecentPath(path);     // 只有真的打开成功才计入「最近使用」
-        // 建树与建索引都是整棵树的全量遍历，十万条目的归档在主线程做会明显卡住
-        // （表还没刷新，窗口就像死了一样）。挪到后台，回主线程只赋值 + 刷新。
-        [me buildTreeAndIndexInBackground:t.openedItems then:^{
+        // 建树是整棵树的全量遍历，十万条目的归档在主线程做会明显卡住（表还没刷新，
+        // 窗口就像死了一样）。挪到后台，回主线程只赋值 + 刷新。归档对象由任务的
+        // archiveOut 带到建树完成，期间逐条向它取条目，不再先攒一份完整条目数组。
+        Z7Archive *opened = t.archiveOut;
+        if (!opened) { if (then) then(NO); return; }
+        [me buildTreeInBackground:opened count:opened.itemCount then:^{
             if (then) then(YES);
         }];
     }];
 }
 
-/// 把「条目数组 -> 树 + 路径索引」这两遍全量遍历放到后台队列，完成后回主线程刷新。
+/// 把「引擎条目表 -> 树」这一次全量遍历放到后台队列，完成后回主线程刷新。
 ///
-/// 为什么值得单开一条队列：这一段是 O(n) 的两遍遍历（建树一遍、建索引一遍），n 是
-/// 归档里的条目数。几百项无感，十万项就是肉眼可见的卡顿，而且卡在主线程上时窗口
-/// 连重绘都做不到。索引是提取阶段「树节点 -> 引擎条目号」的映射，必须与树一起
-/// 原子地换掉，否则两者会短暂不一致。
-- (void)buildTreeAndIndexInBackground:(NSArray<Z7Item *> *)items
-                                 then:(void (^)(void))then
+/// 为什么值得单开一条队列：这一段是 O(n) 的遍历，n 是归档里的条目数。几百项无感，
+/// 十万项就是肉眼可见的卡顿，而且卡在主线程上时窗口连重绘都做不到。
+///
+/// 这里不再另外维护「路径 -> 条目号」的字典：树节点自带 index（Z7Node.index 在
+/// BuildTree 里就已写入），提取时 indicesForNodes: 直接读节点自身的值。原先那份
+/// 字典只写不读，十万条目下白白占着内存与建表时间。
+///
+/// 也不再需要一份完整的条目数组：archive 直接透给 BuildTree 逐条取用。
+- (void)buildTreeInBackground:(Z7Archive *)archive
+                        count:(NSUInteger)count
+                         then:(void (^)(void))then
 {
     NSUInteger gen = ++self.contentGeneration;   // 让在途的旧搜索作废
     __weak MainViewController *weakSelf = self;
     [self.workQueue addOperationWithBlock:^{
-        NSArray<Z7Node *> *tree = BuildTree(items);
-        NSMutableDictionary<NSString *, NSValue *> *idx =
-            [NSMutableDictionary dictionaryWithCapacity:items.count];
-        NSMutableArray<Z7Node *> *stack = [NSMutableArray arrayWithArray:tree];
-        while (stack.count) {
-            Z7Node *n = stack.lastObject;
-            [stack removeLastObject];
-            if (n.index != UINT32_MAX) {
-                idx[n.path] = [NSValue valueWithBytes:&(uint32_t){n.index}
-                                             objCType:@encode(uint32_t)];
-            }
-            [stack addObjectsFromArray:n.children];
-        }
+        NSArray<Z7Node *> *tree = BuildTree(archive, count);
         dispatch_async(dispatch_get_main_queue(), ^{
             MainViewController *me = weakSelf;
             if (!me) return;
             if (me.contentGeneration != gen) return;   // 已有更新的一次打开，丢弃本次
             me.roots = tree;
             me.displayRoots = tree;
-            me.indexByPath = idx;
             [me.outline reloadData];
             [me.outline expandItem:nil expandChildren:NO];
             [me setControlsEnabled:YES];
             [me updateArchiveChrome];
             [me updateEmptyState];
-            [me showStatus:[NSString stringWithFormat:@"已载入 %lu 项", (unsigned long)items.count]];
+            [me showStatus:[NSString stringWithFormat:@"已载入 %lu 项", (unsigned long)count]];
             if (then) then();
         });
     }];
@@ -3347,6 +3484,24 @@ static const NSUInteger kZ7LogCharLimit = 200000;
     p.allowsMultipleSelection = NO;
     p.message = @"选择解压目标文件夹";
     p.directoryURL = [NSURL fileURLWithPath:[self.archivePath stringByDeletingLastPathComponent]];
+
+    // 「目标已存在同名文件」时的处理策略：此前这里硬编码为覆盖，用户无从选择。
+    // 对应 7-Zip 命令行的 -ao 系列（覆盖 / 跳过 / 都保留），选择结果记住以便下次沿用。
+    static NSString *const kClashKey = @"Z7ExtractClashPolicy";
+    NSPopUpButton *clashPop = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(12, 4, 276, 25)
+                                                         pullsDown:NO];
+    [clashPop addItemsWithTitles:@[@"覆盖已存在的文件", @"跳过已存在的文件", @"两者都保留（自动改名）"]];
+    NSInteger savedClash = [[NSUserDefaults standardUserDefaults] integerForKey:kClashKey];
+    [clashPop selectItemAtIndex:(savedClash < 0 || savedClash > 2) ? 0 : savedClash];
+    NSTextField *clashLabel = [NSTextField labelWithString:@"目标已存在同名文件时："];
+    clashLabel.frame = NSMakeRect(14, 33, 270, 16);
+    clashLabel.font = [NSFont systemFontOfSize:11];
+    clashLabel.textColor = [NSColor secondaryLabelColor];
+    NSView *clashAccessory = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 300, 56)];
+    [clashAccessory addSubview:clashLabel];
+    [clashAccessory addSubview:clashPop];
+    p.accessoryView = clashAccessory;
+
     if ([p runModal] != NSModalResponseOK) return;
 
     NSString *dest = p.URL.path;
@@ -3365,7 +3520,9 @@ static const NSUInteger kZ7LogCharLimit = 200000;
     t.archivePath = self.archivePath;
     t.indices = indices;
     t.destDir = dest;
-    t.overwrite = YES;
+    t.clash = (Z7ClashPolicy)clashPop.indexOfSelectedItem;
+    [[NSUserDefaults standardUserDefaults] setInteger:clashPop.indexOfSelectedItem
+                                              forKey:kClashKey];
     // 解压既有归档：密码取自打开该归档时的输入，而不是压缩面板里的口令。
     Z7CompressionOptions *opts = [self currentOptions];
     opts.password = [self archivePassword];
@@ -3490,8 +3647,11 @@ static const NSUInteger kZ7LogCharLimit = 200000;
         [self showStatus:@"该归档已加密文件名，删除需要密码"];
         __weak MainViewController *weakSelf = self;
         [self promptPasswordWithMessage:@"该归档已加密文件名，删除会重新打包，需要密码。"
-                             completion:^(NSString *pw) {
-            if (pw.length) { weakSelf.openPassword = pw; [weakSelf doDelete:nil]; }
+                             completion:^(NSString *pw, BOOL remember) {
+            if (!pw.length) return;
+            if (remember) Z7KeychainStorePassword(weakSelf.archivePath, pw);
+            weakSelf.openPassword = pw;
+            [weakSelf doDelete:nil];
         }];
         return;
     }
@@ -3872,8 +4032,9 @@ static NSString *UniqueArchivePath(NSString *dir, NSString *base, NSString *ext)
             bv = b.modified ? b.modified.timeIntervalSinceReferenceDate : 0;
         }
         else if ([key isEqualToString:@"CRC"]) {
-            av = (double)strtoul(a.crcText.UTF8String, NULL, 16);
-            bv = (double)strtoul(b.crcText.UTF8String, NULL, 16);
+            // 直接用标量：不必先把十六进制串造出来再解析回去
+            av = (double)a.crc;
+            bv = (double)b.crc;
         }
         else if ([key isEqualToString:@"方法"]) {
             NSComparisonResult r = [(a.method ?: @"") localizedStandardCompare:(b.method ?: @"")];
@@ -3888,28 +4049,69 @@ static NSString *UniqueArchivePath(NSString *dir, NSString *base, NSString *ext)
         return (less == asc) ? NSOrderedAscending : NSOrderedDescending;
     };
 
-    // 用显式栈逐层排序（同 BuildTree，避免递归 block 自捕获）
-    NSMutableArray<Z7Node *> *rootsMut = [self.roots mutableCopy];
-    NSMutableArray<Z7Node *> *stack = [NSMutableArray arrayWithArray:rootsMut];
+    // 逐层排序。比较是这一段里最贵的部分（十万条目下是 O(n log n) 次比较，且
+    // 中文名用的是 localizedStandardCompare，单次不便宜），所以把它放到后台队列，
+    // 主线程只做 O(n) 的指针搬运：
+    //   1) 下面先收集各层（根层 + 每个有子节点的 children 数组），只搬指针；
+    //   2) 后台用 sortedArrayUsingComparator: 生成有序副本，**不改动原数组**——
+    //      这是关键：后台运算期间主线程继续按旧顺序渲染是安全的；
+    //   3) 回主线程把有序副本写回各层再刷新。
+    NSMutableArray<NSMutableArray<Z7Node *> *> *levels = [NSMutableArray array];
+    NSMutableArray<Z7Node *> *rootLevel = [self.roots mutableCopy];
+    [levels addObject:rootLevel];
+    NSMutableArray<Z7Node *> *stack = [NSMutableArray arrayWithArray:rootLevel];
     while (stack.count) {
         Z7Node *n = stack.lastObject;
         [stack removeLastObject];
-        [n.children sortUsingComparator:cmp];
+        if (!n.children.count) continue;
+        [levels addObject:n.children];
         [stack addObjectsFromArray:n.children];
     }
-    [rootsMut sortUsingComparator:cmp];
-    self.roots = rootsMut;
-    if (self.filtering) {
-        NSMutableArray<Z7Node *> *hits = [self.displayRoots mutableCopy];
-        [hits sortUsingComparator:cmp];
-        self.displayRoots = hits;
-    } else {
-        self.displayRoots = self.roots;
-    }
-    [self.outline reloadData];
+
+    NSUInteger gen = ++self.contentGeneration;   // 期间若换了归档，本次排序作废
+    BOOL wasFiltering = self.filtering;
+    __weak MainViewController *weakSelf = self;
+    [self.workQueue addOperationWithBlock:^{
+        NSMutableArray<NSArray<Z7Node *> *> *sorted =
+            [NSMutableArray arrayWithCapacity:levels.count];
+        for (NSMutableArray<Z7Node *> *level in levels) {
+            [sorted addObject:[level sortedArrayUsingComparator:cmp]];
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            MainViewController *me = weakSelf;
+            if (!me) return;
+            if (me.contentGeneration != gen) return;
+            for (NSUInteger i = 0; i < levels.count; i++) {
+                [levels[i] setArray:sorted[i]];
+            }
+            me.roots = rootLevel;
+            if (wasFiltering) {
+                // 搜索结果是扁平列表，用同一比较器重排
+                me.displayRoots = [me.displayRoots sortedArrayUsingComparator:cmp];
+            } else {
+                me.displayRoots = me.roots;
+            }
+            [me.outline reloadData];
+        });
+    }];
 }
 
 #pragma mark 空格预览（§6.5）
+
+/// 双击行：目录就地展开/收起；文件走系统 Quick Look 预览面板。
+- (void)outlineDoubleClicked:(id)s
+{
+    NSInteger row = self.outline.clickedRow;
+    if (row < 0) return;
+    Z7Node *n = [self.outline itemAtRow:row];
+    if (!n) return;
+    if (n.isDirectory) {
+        if ([self.outline isItemExpanded:n]) [self.outline collapseItem:n];
+        else [self.outline expandItem:n];
+        return;
+    }
+    [self doPreview:nil];
+}
 
 - (void)outlineDidPressSpace
 {
