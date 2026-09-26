@@ -212,14 +212,14 @@ static int CmdTest(const std::string &path) {
     return 1;
   }
   std::vector<uint32_t> none;
-  const bool ok = a->extract(none, std::string(), true, true, &cb, err);
+  const bool ok = a->extract(none, std::string(), true, ClashPolicy::Overwrite, &cb, err);
   printf("%s\n", ok ? "OK" : "FAIL");
   if (!ok) fprintf(stderr, "%s\n", err.c_str());
   delete a;
   return ok ? 0 : 1;
 }
 
-static int CmdExtract(const std::string &path, const std::string &dest, bool overwrite) {
+static int CmdExtract(const std::string &path, const std::string &dest, ClashPolicy clash) {
   ConsoleCallback cb;
   std::string err;
   Archive *a = Archive::Open(path, &cb, err);
@@ -228,7 +228,7 @@ static int CmdExtract(const std::string &path, const std::string &dest, bool ove
     return 1;
   }
   std::vector<uint32_t> none;
-  const bool ok = a->extract(none, dest, false, overwrite, &cb, err);
+  const bool ok = a->extract(none, dest, false, clash, &cb, err);
   if (!ok) fprintf(stderr, "解压失败: %s\n", err.c_str());
   delete a;
   return ok ? 0 : 1;
@@ -507,10 +507,14 @@ int main(int argc, char **argv) {
   if (cmd == "list" && argc >= 3) return CmdList(argv[2]);
   if (cmd == "test" && argc >= 3) return CmdTest(argv[2]);
   if (cmd == "extract" && argc >= 4) {
-    bool overwrite = true;
-    for (int i = 4; i < argc; i++)
-      if (strcmp(argv[i], "--overwrite") == 0) overwrite = true;
-    return CmdExtract(argv[2], argv[3], overwrite);
+    // 目标已存在时的策略，对应 7-Zip 的 -ao 系列；缺省沿用覆盖（与旧行为一致）。
+    ClashPolicy clash = ClashPolicy::Overwrite;
+    for (int i = 4; i < argc; i++) {
+      if (strcmp(argv[i], "--overwrite") == 0) clash = ClashPolicy::Overwrite;
+      else if (strcmp(argv[i], "--skip") == 0) clash = ClashPolicy::Skip;
+      else if (strcmp(argv[i], "--rename") == 0) clash = ClashPolicy::Rename;
+    }
+    return CmdExtract(argv[2], argv[3], clash);
   }
   if (cmd == "extractone" && argc >= 5) return CmdExtractOne(argv[2], (unsigned)atoi(argv[3]), argv[4]);
   if (cmd == "extractmem" && argc >= 5)

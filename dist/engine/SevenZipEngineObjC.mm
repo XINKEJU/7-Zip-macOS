@@ -59,11 +59,8 @@ NSString *const Z7ErrorDomain = @"org.7-zip.engine";
 @property (nonatomic, readwrite, strong, nullable) NSDate *creationDate;
 @property (nonatomic, readwrite) BOOL hasAttributes;
 @property (nonatomic, readwrite) uint32_t attributes;
-@property (nonatomic, readwrite, copy) NSString *permissionText;
-@property (nonatomic, readwrite, copy) NSString *attributeText;
 @property (nonatomic, readwrite) BOOL hasCRC;
 @property (nonatomic, readwrite) uint32_t crc;
-@property (nonatomic, readwrite, copy) NSString *crcText;
 @property (nonatomic, readwrite) BOOL encrypted;
 @property (nonatomic, readwrite, copy) NSString *method;
 @property (nonatomic, readwrite) double compressionRatio;
@@ -246,18 +243,60 @@ NSString *AttributeTextFromMode(uint32_t attrib, BOOL isDir, BOOL isSymLink) {
 
 #pragma mark - Z7Item
 
-@implementation Z7Item
+@implementation Z7Item {
+    // 属性串与 CRC 串按需构造并缓存。
+    //
+    // 这三个串原本在创建条目时就无条件算好（crcText 还是 stringWithFormat），
+    // 但应用侧「CRC / 方法 / 属性」三列默认隐藏——十万条目的归档会白白常驻
+    // 十几 MB 字符串（实测每条约 190 B）。改为惰性后，隐藏时零开销，
+    // 可见时也只构造一次（表格重绘会反复取用，故必须缓存而非每次现算）。
+    NSString *_attributeTextCache;
+    NSString *_permissionTextCache;
+    NSString *_crcTextCache;
+}
+
++ (NSString *)attributeTextFromMode:(uint32_t)attrib
+                        isDirectory:(BOOL)isDir
+                          isSymLink:(BOOL)isSymLink
+{
+    return AttributeTextFromMode(attrib, isDir, isSymLink);
+}
+
 - (instancetype)init {
     if ((self = [super init])) {
         _linkTarget = @"";
         _parentPath = @"";
-        _permissionText = @"";
-        _attributeText = @"";
-        _crcText = @"";
         _method = @"";
         _compressionRatio = -1.0;
     }
     return self;
+}
+
+- (NSString *)attributeText {
+    if (_attributeTextCache) return _attributeTextCache;
+    if (self.hasAttributes) {
+        _attributeTextCache = AttributeTextFromMode(self.attributes, self.isDirectory, self.isSymLink);
+    } else {
+        // 无属性位时，目录给一个占位串，其余保持空（与惰性化之前的取值一致）
+        _attributeTextCache = self.isDirectory ? @"d---------" : @"";
+    }
+    return _attributeTextCache;
+}
+
+- (NSString *)permissionText {
+    if (_permissionTextCache) return _permissionTextCache;
+    NSString *full = self.attributeText;
+    // 只有真的解析出属性位时才从属性串派生权限位；否则为空串
+    _permissionTextCache = (self.hasAttributes && full.length > 1)
+                               ? [full substringFromIndex:1]
+                               : @"";
+    return _permissionTextCache;
+}
+
+- (NSString *)crcText {
+    if (_crcTextCache) return _crcTextCache;
+    _crcTextCache = self.hasCRC ? [NSString stringWithFormat:@"%08X", self.crc] : @"";
+    return _crcTextCache;
 }
 
 - (NSString *)displayName {
@@ -295,17 +334,11 @@ Z7Item *ItemFromInfo(const z7::ItemInfo &info) {
     }
     it.hasAttributes = info.hasAttrib;
     it.attributes = info.attrib;
-    if (info.hasAttrib) {
-        it.permissionText = [AttributeTextFromMode(info.attrib, info.isDir, info.isSymLink)
-            substringFromIndex:1];
-        it.attributeText = AttributeTextFromMode(info.attrib, info.isDir, info.isSymLink);
-    } else if (info.isDir) {
-        it.permissionText = @"";
-        it.attributeText = @"d---------";
-    }
+    // 属性串（attributeText / permissionText）不在这里预构造：技术列默认隐藏，
+    // 十万级归档为每个条目预先建串会显著推高内存。改由 Z7Item 的 getter 惰性计算。
     it.hasCRC = info.hasCRC;
     it.crc = info.crc;
-    if (info.hasCRC) it.crcText = [NSString stringWithFormat:@"%08X", info.crc];
+    // crcText 同上，同样交给惰性 getter。
     it.encrypted = info.encrypted;
     it.method = Utf8ToNSString(info.method);
     if (info.hasSize && info.hasPackSize && info.size > 0) {
@@ -438,7 +471,7 @@ z7::CompressionOptions OptionsToCxx(Z7CompressionOptions *o) {
 - (BOOL)extractItems:(nullable NSArray<NSNumber *> *)indices
                   to:(NSString *)destination
             testMode:(BOOL)testMode
-           overwrite:(BOOL)overwrite
+               clash:(Z7ClashPolicy)clash
          atomicFiles:(BOOL)atomicFiles
          createLinks:(BOOL)createLinks
             callback:(nullable id<Z7Callback>)callback
@@ -460,7 +493,8 @@ z7::CompressionOptions OptionsToCxx(Z7CompressionOptions *o) {
 
     _cbBridge->delegate = callback;
     std::string err;
-    const bool ok = _archive->extract(idx, StdStringFromUtf8(destination), testMode, overwrite,
+    const bool ok = _archive->extract(idx, StdStringFromUtf8(destination), testMode,
+                                      (z7::ClashPolicy)clash,
                                       _cbBridge, err, atomicFiles, createLinks);
     self.lastStats = StatsFromCxx(_archive->lastExtractStats());
     if (!ok && error) *error = MakeError(err);

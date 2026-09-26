@@ -138,7 +138,7 @@ int main(int argc, const char *argv[]) {
         [fm removeItemAtPath:outDir error:NULL];
         [fm createDirectoryAtPath:outDir withIntermediateDirectories:YES attributes:nil error:NULL];
 
-        BOOL extracted = [a extractItems:nil to:outDir testMode:NO overwrite:YES
+        BOOL extracted = [a extractItems:nil to:outDir testMode:NO clash:Z7ClashPolicyOverwrite
                              atomicFiles:YES createLinks:YES callback:cb error:&err];
         ok(extracted, extracted ? @"全部解压成功" : [NSString stringWithFormat:@"解压失败: %@", err.localizedDescription]);
         ok(FileExists([outDir stringByAppendingPathComponent:@"d1/a.txt"]), @"解压产物 d1/a.txt 存在");
@@ -260,7 +260,7 @@ int main(int argc, const char *argv[]) {
                     ok(NO, [NSString stringWithFormat:@"打开失败（%@）", tag]);
                     return YES;
                 }
-                [a extractItems:nil to:out testMode:NO overwrite:YES atomicFiles:YES
+                [a extractItems:nil to:out testMode:NO clash:Z7ClashPolicyOverwrite atomicFiles:YES
                     createLinks:YES callback:jcb error:&e];
                 return [fm fileExistsAtPath:
                         [out stringByAppendingPathComponent:@"src/.DS_Store"]]

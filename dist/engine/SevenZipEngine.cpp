@@ -235,6 +235,32 @@ static bool EnsureDir(const std::string &utf8Dir) {
   return NFile::NDir::CreateComplexDir(ToFString(utf8Dir));
 }
 
+// 目标文件已存在时，给出「名称 (2).扩展名」「名称 (3).扩展名」…… 的第一个空闲名字
+// （ClashPolicy::Rename 用，思路同 7-Zip 命令行的 -aou）。
+// 从 2 开始：1 就是原名本身。全部被占则原样返回，交由调用方按覆盖处理。
+static std::string MakeUniqueDestPath(const std::string &path) {
+  struct stat st;
+  if (stat(path.c_str(), &st) != 0) return path;   // 不存在，直接用原名
+
+  const size_t slash = path.find_last_of('/');
+  const size_t dot = path.find_last_of('.');
+  const std::string dir = (slash == std::string::npos) ? std::string() : path.substr(0, slash + 1);
+  std::string base, ext;
+  // 只有点出现在最后一段分隔符之后才算扩展名（"/a.b/c" 的 "c" 没有扩展名）
+  if (dot != std::string::npos && (slash == std::string::npos || dot > slash)) {
+    base = path.substr(dir.size(), dot - dir.size());
+    ext = path.substr(dot);
+  } else {
+    base = path.substr(dir.size());
+  }
+
+  for (int i = 2; i < 10000; i++) {
+    const std::string cand = dir + base + " (" + std::to_string(i) + ")" + ext;
+    if (stat(cand.c_str(), &st) != 0) return cand;
+  }
+  return path;
+}
+
 // 归一化路径（折叠 "." 与 ".."），不触盘。返回 false 表示 ".." 上溯越过了根。
 static std::string NormalizePath(const std::string &p, bool *escapedRoot) {
   if (escapedRoot) *escapedRoot = false;
@@ -443,7 +469,7 @@ class CExtractCallback Z7_final : public IArchiveExtractCallback,
   CMyComPtr<IInArchive> _archive;
   std::string _destDirUtf8;
   bool _testMode = false;
-  bool _overwrite = true;
+  ClashPolicy _clash = ClashPolicy::Overwrite;
   std::string _explicitDestFile; // 非空时只写该文件（单条目提取 / 预览）
 
   // 技术方案 §7.4：先写 .partial 再原子改名；§8.2：符号链接白名单创建
@@ -488,13 +514,13 @@ public:
   bool atomicFallback = false;
 
   void Init(IInArchive *archive, const std::string &destDirUtf8, bool testMode,
-            bool overwrite) {
+            ClashPolicy clash) {
     _archive = archive;
     _destDirUtf8 = destDirUtf8;
     while (_destDirUtf8.size() > 1 && _destDirUtf8[_destDirUtf8.size() - 1] == '/')
       _destDirUtf8.erase(_destDirUtf8.size() - 1);
     _testMode = testMode;
-    _overwrite = overwrite;
+    _clash = clash;
   }
   void SetExplicitDestFile(const std::string &f) { _explicitDestFile = f; }
   void SetPolicy(bool atomicFiles, bool createSymLinks) {
@@ -643,12 +669,21 @@ Z7_COM7F_IMF(CExtractCallback::GetStream(UInt32 index, ISequentialOutStream **ou
       }
     }
 
-    if (!_overwrite) {
+    // 目标已存在时的处理（-ao 系列语义）
+    if (_clash != ClashPolicy::Overwrite) {
       struct stat st;
       if (stat(_currentDiskPath.c_str(), &st) == 0) {
-        numSkipped++;
-        if (cb) cb->OnLog(LogLevel::Info, "已存在，跳过：" + _currentDiskPath);
-        return S_OK;
+        if (_clash == ClashPolicy::Skip) {
+          numSkipped++;
+          if (cb) cb->OnLog(LogLevel::Info, "已存在，跳过：" + _currentDiskPath);
+          return S_OK;
+        }
+        // Rename：改成一个空闲名字，后续写入、日志与统计都落在这个新名字上
+        const std::string renamed = MakeUniqueDestPath(_currentDiskPath);
+        if (renamed != _currentDiskPath) {
+          if (cb) cb->OnLog(LogLevel::Info, "已存在，改名为：" + renamed);
+          _currentDiskPath = renamed;
+        }
       }
     }
 
@@ -1625,7 +1660,7 @@ bool Archive::getAllItems(std::vector<ItemInfo> &out) const {
 }
 
 bool Archive::extract(const std::vector<uint32_t> &indices, const std::string &utf8DestDir,
-                      bool testMode, bool overwrite, Callback *cb, std::string &error,
+                      bool testMode, ClashPolicy clash, Callback *cb, std::string &error,
                       bool atomicFiles, bool createSymLinks) {
   error.clear();
   m_impl->canceled = false;
@@ -1664,7 +1699,7 @@ bool Archive::extract(const std::vector<uint32_t> &indices, const std::string &u
 
   CExtractCallback *spec = new CExtractCallback;
   CMyComPtr<IArchiveExtractCallback> holder(spec);
-  spec->Init(m_impl->archive, utf8DestDir, testMode, overwrite);
+  spec->Init(m_impl->archive, utf8DestDir, testMode, clash);
   spec->SetPolicy(atomicFiles, createSymLinks);
   spec->cb = cb;
   spec->bombLimit = bombLimit;
@@ -1753,7 +1788,7 @@ bool Archive::extractToFile(uint32_t index, const std::string &utf8DestFile, Cal
 
   CExtractCallback *spec = new CExtractCallback;
   CMyComPtr<IArchiveExtractCallback> holder(spec);
-  spec->Init(m_impl->archive, std::string(), false, true);
+  spec->Init(m_impl->archive, std::string(), false, ClashPolicy::Overwrite);
   spec->SetExplicitDestFile(utf8DestFile);
   // 单条目提取到任意路径：不建符号链接、不写 .partial（目标是用户明确指定的文件）
   spec->SetPolicy(false, false);
@@ -2351,7 +2386,8 @@ bool Archive::removeItems(const std::vector<std::string> &utf8ArcPaths,
   const std::string workDirNorm = workDir;
 
   std::string extractErr;
-  const bool extracted = extract(keep, workDir, false, true, cb, extractErr,
+  // 重建用的临时目录是空的，冲突策略无实际影响，沿用覆盖。
+  const bool extracted = extract(keep, workDir, false, ClashPolicy::Overwrite, cb, extractErr,
                                  true /*atomicFiles*/, true /*createSymLinks*/);
   if (!extracted) {
     RemoveDirRecursive(workDir);

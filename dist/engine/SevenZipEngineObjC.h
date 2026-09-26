@@ -84,6 +84,15 @@ typedef NS_ENUM(NSInteger, Z7LogLevel) {
 /// 用于 NSOutlineView 的显示名（目录/链接带后缀提示）
 @property (nonatomic, readonly, copy) NSString *displayName;
 
+/// POSIX 模式 -> ls -l 风格属性串（"-rw-r--r--" / "drwxr-xr-x" / "lrwxrwxrwx"）。
+///
+/// 暴露为类方法，是为了让上层（应用树模型）能在需要时才计算属性串：
+/// 属性列默认隐藏，若在建树阶段就为每个条目预先构造，十万条目会白白常驻
+/// 十几 MB 字符串（见 BUILD.md「大归档内存」）。
++ (NSString *)attributeTextFromMode:(uint32_t)attrib
+                        isDirectory:(BOOL)isDir
+                          isSymLink:(BOOL)isSymLink;
+
 @end
 
 #pragma mark - 统计
@@ -139,15 +148,22 @@ typedef NS_ENUM(NSInteger, Z7LogLevel) {
 /// 一次性取回全部条目。10 万级条目建议在后台线程调用。
 - (NSArray<Z7Item *> *)allItems;
 
+/// 解压时目标文件已存在的处理方式（对应 7-Zip 命令行的 -ao 系列）。
+typedef NS_ENUM(NSInteger, Z7ClashPolicy) {
+    Z7ClashPolicyOverwrite = 0,  // -aoa：直接覆盖
+    Z7ClashPolicySkip = 1,       // -aos：跳过已存在的文件
+    Z7ClashPolicyRename = 2,     // 自动改名为「名称 (2).扩展名」
+};
+
 /// 提取。indices 为 nil 表示全部。
 ///   testMode    仅校验完整性，不写盘（方案 §5 的「测试」）
-///   overwrite   NO 时已存在的文件被跳过
+///   clash       目标文件已存在时：覆盖 / 跳过 / 自动改名
 ///   atomicFiles YES 时先写 .partial 再原子改名（方案 §7.4）
 ///   createLinks YES 时允许创建符号链接，但目标必须落在目标目录内（方案 §8.2）
 - (BOOL)extractItems:(nullable NSArray<NSNumber *> *)indices
                   to:(NSString *)destination
             testMode:(BOOL)testMode
-           overwrite:(BOOL)overwrite
+               clash:(Z7ClashPolicy)clash
          atomicFiles:(BOOL)atomicFiles
          createLinks:(BOOL)createLinks
             callback:(nullable id<Z7Callback>)callback

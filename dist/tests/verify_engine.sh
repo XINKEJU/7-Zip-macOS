@@ -158,6 +158,43 @@ for fmt in gzip bzip2 xz; do
 done
 
 # ---------------------------------------------------------------------------
+head1 "3.5 目标已存在同名文件时的策略（覆盖 / 跳过 / 自动改名）"
+
+CLASH_ARC="$WORK/clash.7z"
+CLASH_DEST="$WORK/clash_dest"
+rm -f "$CLASH_ARC"
+rm -rf "$CLASH_DEST"
+mkdir -p "$CLASH_DEST"
+
+if "$T" create 7z "$CLASH_ARC" "$SRC/a.txt" >/dev/null 2>&1; then
+    # 先放一个同名但内容不同的文件，制造冲突
+    printf 'PRE-EXISTING' > "$CLASH_DEST/a.txt"
+
+    "$T" extract "$CLASH_ARC" "$CLASH_DEST" --skip >/dev/null 2>&1
+    if [ "$(cat "$CLASH_DEST/a.txt")" = "PRE-EXISTING" ]; then
+        ok "同名冲突：--skip 跳过已存在文件（内容未被改写）"
+    else
+        bad "同名冲突：--skip 仍然改写了已存在文件"
+    fi
+
+    "$T" extract "$CLASH_ARC" "$CLASH_DEST" --rename >/dev/null 2>&1
+    if [ -f "$CLASH_DEST/a (2).txt" ] && [ "$(cat "$CLASH_DEST/a.txt")" = "PRE-EXISTING" ]; then
+        ok '同名冲突：--rename 生成 "a (2).txt" 且原文件保留'
+    else
+        bad '同名冲突：--rename 未按预期生成 "a (2).txt"'
+    fi
+
+    "$T" extract "$CLASH_ARC" "$CLASH_DEST" --overwrite >/dev/null 2>&1
+    if cmp -s "$SRC/a.txt" "$CLASH_DEST/a.txt"; then
+        ok "同名冲突：--overwrite 覆盖已存在文件"
+    else
+        bad "同名冲突：--overwrite 未覆盖已存在文件"
+    fi
+else
+    bad "同名冲突：测试归档创建失败"
+fi
+
+# ---------------------------------------------------------------------------
 head1 "4. 加密（AES-256 + 文件名加密）"
 ENC="$WORK/enc.7z"
 rm -f "$ENC"

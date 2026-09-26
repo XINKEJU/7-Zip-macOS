@@ -145,6 +145,13 @@ struct CompressionOptions {
 // 归档读取
 // ---------------------------------------------------------------------------
 
+/// 解压时目标文件已存在的处理方式（对应 7-Zip 命令行的 -ao 系列）。
+enum class ClashPolicy {
+  Overwrite = 0,  // -aoa：直接覆盖
+  Skip = 1,       // -aos：跳过已存在的文件
+  Rename = 2,     // -aou 的思路：自动改名为「名称 (2).扩展名」
+};
+
 class Archive {
 public:
   // 解压统计（技术方案 §8.2：不安全条目必须可见、可上报）
@@ -179,13 +186,13 @@ public:
   bool getAllItems(std::vector<ItemInfo> &out) const;
 
   // 提取（indices 为空 = 全部）。testMode = true 时只做完整性校验（Test）。
-  // overwrite = false 时已存在的文件会被跳过（否则覆盖）。
+  // clash 决定目标文件已存在时怎么办（覆盖 / 跳过 / 自动改名）。
   //   atomicFiles    — 先写 "<目标>.partial" 再原子改名，失败即删除半成品
   //                    （技术方案 §7.4）；测试模式忽略该参数。
   //   createSymLinks — 允许创建符号链接，但目标必须落在目标目录内，否则拒绝
   //                    （技术方案 §8.2）。
   bool extract(const std::vector<uint32_t> &indices, const std::string &utf8DestDir,
-               bool testMode, bool overwrite, Callback *cb, std::string &error,
+               bool testMode, ClashPolicy clash, Callback *cb, std::string &error,
                bool atomicFiles = true, bool createSymLinks = true);
 
   // 最近一次 extract / extractToFile / extractToMemory 的统计。
