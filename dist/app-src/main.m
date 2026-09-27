@@ -1552,9 +1552,12 @@ static NSString *LevelNameForTick(NSInteger tick)
     // 格式
     // tar.* 是组合格式（tar + 单流外层），官方 7zz 无法一步生成，本移植自己做两段式。
     // 列表里必须与引擎 CanonicalFormatName / IsComposedTarFormat 认得的写法一致。
-    self.formatPop = [self popup:@[@"7z", @"zip", @"tar", @"wim",
-                                   @"tar.gz", @"tar.bz2", @"tar.xz",
-                                   @"xz", @"gz", @"bz2", @"iso", @"dmg"]
+    // 单流那一组（xz/gz/bz2/zstd/lz4/br/lzip/snappy）由引擎的外部编解码器实现，
+    // 短写（br/lzip 的 lz 等）在 CanonicalFormatName 里归一化，这里用最直白的写法。
+    self.formatPop = [self popup:@[@"7z", @"zip", @"tar", @"wim", @"iso", @"dmg",
+                                   @"tar.gz", @"tar.bz2", @"tar.xz", @"tar.zst",
+                                   @"xz", @"gz", @"bz2", @"zstd", @"lz4", @"br",
+                                   @"lzip", @"snappy"]
                           action:@selector(formatChanged:)];
 
     self.levelSlider = [[NSSlider alloc] initWithFrame:NSZeroRect];
@@ -2781,7 +2784,9 @@ static NSString *LevelNameForTick(NSInteger tick)
     // 故字典/字长/fastbytes/匹配器/固实/分卷/更新模式都不可用（仅压缩等级生效）。
     BOOL single = ([f isEqualToString:@"gz"] || [f isEqualToString:@"bz2"] ||
                    [f isEqualToString:@"xz"] || [f isEqualToString:@"zstd"] ||
-                   [f isEqualToString:@"lz4"] || [f isEqualToString:@"br"] || composed);
+                   [f isEqualToString:@"lz4"] || [f isEqualToString:@"br"] ||
+                   [f isEqualToString:@"lzip"] || [f isEqualToString:@"snappy"] ||
+                   composed);
     BOOL zipLike = [f isEqualToString:@"zip"];
     // 镜像格式（iso / dmg）：不是「压缩归档」而是文件系统映像。ISO 不做压缩；
     // DMG 的压缩由 hdiutil 固定（UDZO），也不支持原地「添加/更新」。因此方法/

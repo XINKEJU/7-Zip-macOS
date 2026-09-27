@@ -17,10 +17,12 @@
 #  12. 删除模式（§6.4）：级联删除、容器格式保持、加密保持、失败分类
 #  13. 容器级联（上游 CArchiveLink 语义）与进入内层归档
 #  14. wim 创建 + tar.gz / tar.bz2 / tar.xz / tgz 一步生成（组合格式）
-#  15. 新编解码器：zstd 创建、lz4 解压、单流与 decode-only 约束
+#  15. 新编解码器：zstd / lz4 / brotli 的创建与解压、单流约束、短写别名归一化
 #      （外部库未链入时对应断言自动 skip，不算失败）
 #  16. ISO 创建：自研 ISO9660 + Joliet（Python 解析 / 7zz / 挂载三重交叉验证）
 #  17. DMG 创建：调系统 hdiutil（唯一子进程例外）
+#  18. lzip：自研容器 + liblzma raw LZMA1（往返 / 外部产出 / 多成员 / 三因子完整性）
+#  19. snappy：自实现（分帧格式 / 裸格式 / 掩码 CRC-32C / 损坏检测）
 #
 # 用法：sh verify_engine.sh
 
@@ -854,7 +856,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-head1 "15. 新编解码器：zstd 创建 / lz4 解压 / 单流与解码-only 约束"
+head1 "15. 新编解码器：zstd / lz4 / brotli 的创建、单流约束与别名归一化"
 
 # 构建时到底链进了哪些外部库？ext_codecs.sh 的探测结果说了算 —— 引擎侧是按
 # Z7_HAVE_* 条件编译的，缺库时对应格式根本不在二进制里，此时必须 skip 而不是
@@ -926,31 +928,73 @@ else
     skip "lz4 工具执行失败，跳过 lz4 解码断言"
 fi
 
-# 15.4 解码-only 格式（lz4）创建必须被明确拒绝，不能静默产出错误格式。
-#      这条与库是否链入无关：格式表里 canEncode 恒为 false。
-rm -f "$EXT/rej.lz4"
-if "$T" create lz4 "$EXT/rej.lz4" "$EXT/in/a.txt" >/dev/null 2>&1; then
-    bad "lz4 创建竟被允许（应拒绝：仅支持解压）"
+# 15.4 lz4 创建：本移植的 lz4 是「读 + 写」全套（frame 容器）。编码器与解码器
+#      用的是同一套 LZ4F_* API，因此产物必须能被系统 lz4 工具独立解回 —— 只做
+#      「自产自解」是循环验证，证明不了容器合规。
+rm -f "$EXT/mk.lz4"
+if ! has_codec lz4; then
+    skip "构建时未链入 liblz4，跳过 lz4 创建断言（优雅降级）"
+elif "$T" create lz4 "$EXT/mk.lz4" "$EXT/in/a.txt" >/dev/null 2>&1 && [ -s "$EXT/mk.lz4" ]; then
+    ok "lz4 归档创建成功（上游完全没有 lz4）"
+    if [ -n "$LZ4BIN" ] && "$LZ4BIN" -dc "$EXT/mk.lz4" 2>/dev/null | grep -q '^AAA$'; then
+        ok "自产 lz4 被系统 lz4 工具独立解回且内容正确"
+    else
+        skip "无可用 lz4 命令，跳过 lz4 产物的独立交叉验证"
+    fi
 else
-    ok "lz4 创建被明确拒绝（仅支持解压）"
+    bad "lz4 归档创建失败"
 fi
 
-# 15.5 单流格式（zstd）多文件创建必须被拒绝并给出清晰报错。
-#      同样与库无关：单流约束在 CreateSingleArchive 入口就拦下了。
-rm -f "$EXT/multi.zst"
-if "$T" create zstd "$EXT/multi.zst" "$EXT/in/a.txt" "$EXT/in/b.txt" >/dev/null 2>&1; then
-    bad "zstd 多文件创建竟被允许（单流格式只能压一个文件）"
+# 15.5 brotli 创建 + 往返。brotli 没有魔数，只能按扩展名（.br / .brotli）认领；
+#      本机/CI 不一定链了 libbrotli，缺库时整段 skip。
+rm -f "$EXT/mk.br"
+if ! has_codec brotli; then
+    skip "构建时未链入 libbrotli，跳过 brotli 创建断言（优雅降级）"
+elif "$T" create brotli "$EXT/mk.br" "$EXT/in/a.txt" >/dev/null 2>&1 && [ -s "$EXT/mk.br" ]; then
+    ok "brotli 归档创建成功（上游完全没有 brotli）"
+    rm -rf "$EXT/brout"; mkdir -p "$EXT/brout"
+    if "$T" extract "$EXT/mk.br" "$EXT/brout" >/dev/null 2>&1 &&
+       [ "$(cat "$EXT/brout"/* 2>/dev/null | tr -d '\n')" = "AAA" ]; then
+        ok "brotli 往返（创建→解码→抽取）内容一致"
+    else
+        bad "brotli 往返内容不一致"
+    fi
 else
-    ok "zstd 多文件创建被拒绝（单流格式约束）"
+    bad "brotli 归档创建失败"
 fi
 
-# 15.6 brotli 是本移植补的 decode-only 格式，创建必须被明确拒绝（无论库在不在）
-rm -f "$EXT/rej.br"
-if "$T" create br "$EXT/rej.br" "$EXT/in/a.txt" >/dev/null 2>&1; then
-    bad "brotli 创建竟被允许（应拒绝：仅支持解压）"
-else
-    ok "brotli 创建被明确拒绝（仅支持解压）"
-fi
+# 15.6 所有外部编解码器都是单流格式，多文件创建必须被拒绝并给出清晰报错。
+#      这条与库无关：单流约束在 CreateSingleArchive 入口就拦下了。
+for cf in zstd lz4 brotli lzip snappy; do
+    if ! has_codec "$cf"; then
+        skip "构建时未链入 $cf，跳过 $cf 的多文件约束断言"
+        continue
+    fi
+    rm -f "$EXT/multi.$cf"
+    if "$T" create "$cf" "$EXT/multi.$cf" "$EXT/in/a.txt" "$EXT/in/b.txt" >/dev/null 2>&1; then
+        bad "$cf 多文件创建竟被允许（单流格式只能压一个文件）"
+    else
+        ok "$cf 多文件创建被拒绝（单流格式约束）"
+    fi
+done
+
+# 15.7 短写别名必须被归一化：br→brotli / lz→lzip / sz→snappy。
+#      不归一化时 FindExternalCodec 查不到，会掉进上游 CLSID 查找，报出
+#      「不支持的压缩格式」——症状完全联想不到是别名问题。
+for pair in "br:brotli" "lz:lzip" "sz:snappy"; do
+    short="${pair%%:*}"; long="${pair##*:}"
+    if ! has_codec "$long"; then
+        skip "构建时未链入 $long，跳过别名 $short 断言"
+        continue
+    fi
+    rm -f "$EXT/alias.$short"
+    if "$T" create "$short" "$EXT/alias.$short" "$EXT/in/a.txt" >/dev/null 2>&1 &&
+       [ -s "$EXT/alias.$short" ]; then
+        ok "短写 $short 被归一化为 $long 并成功创建"
+    else
+        bad "短写 $short 未被归一化（应等价于 $long）"
+    fi
+done
 
 # ---------------------------------------------------------------------------
 head1 "16. ISO 创建：自研 ISO9660 + Joliet 写入"
@@ -1173,6 +1217,298 @@ if command -v hdiutil >/dev/null 2>&1; then
     fi
 else
     skip "无 hdiutil，跳过 DMG 创建（本项目 DMG 依赖系统 hdiutil）"
+fi
+
+# ---------------------------------------------------------------------------
+head1 "18. lzip：自研容器 + liblzma raw LZMA1（上游完全没有）"
+
+LZ="$WORK/lzip"
+rm -rf "$LZ"; mkdir -p "$LZ/in"
+printf 'AAA\n' > "$LZ/in/a.txt"
+# 两份规模/可压缩性都不同的样本：大段可压缩文本（跨多个 64 KiB 输入块）
+# 与不可压缩的随机数据（走到 copy 之外的分支）
+python3 - "$LZ/in/big.txt" "$LZ/in/rand.bin" <<'PY'
+import sys, random
+open(sys.argv[1], 'w').write('The quick brown fox jumps over the lazy dog. ' * 20000)
+random.seed(7)
+open(sys.argv[2], 'wb').write(random.randbytes(200000))
+PY
+
+if ! has_codec lzip; then
+    skip "构建时未链入 liblzma，跳过 lzip 全部断言（优雅降级）"
+else
+    # 18.1 创建 + 自解往返
+    for f in big.txt rand.bin; do
+        A="$LZ/mk_$f.lz"
+        rm -f "$A"
+        if "$T" create lzip "$A" "$LZ/in/$f" >/dev/null 2>&1 && [ -s "$A" ]; then
+            rm -rf "$LZ/out"; mkdir -p "$LZ/out"
+            if (cd "$LZ/out" && "$T" extract "$A" . >/dev/null 2>&1) &&
+               cmp -s "$LZ/in/$f" "$LZ/out/mk_$f"; then
+                ok "lzip 往返一致（$f）"
+            else
+                bad "lzip 往返不一致（$f）"
+            fi
+        else
+            bad "lzip 创建失败（$f）"
+        fi
+    done
+
+    # 18.2 独立读取器：xz 支持 --format=lzip（只读）。自产文件必须能被它解出同一份字节
+    XZBIN="$(command -v xz || true)"
+    if [ -n "$XZBIN" ] &&
+       "$XZBIN" --format=lzip -dc "$LZ/mk_big.txt.lz" 2>/dev/null | cmp -s - "$LZ/in/big.txt"; then
+        ok "自产 lzip 被独立读取器 xz --format=lzip 解出且逐字节一致"
+    else
+        skip "无可用 xz --format=lzip，跳过 lzip 产物的独立交叉验证"
+    fi
+
+    # 18.3 外部产出 → 自解。xz 只能解 lzip、不能压，所以「外部产出」这一侧用
+    #      Python 的 liblzma 编出 LZMA1 原始流，再按规范拼头尾 —— 另一套实现。
+    if python3 - "$LZ/ext.lz" "$LZ/in/a.txt" <<'PY'
+import lzma, struct, zlib, sys
+want = 1 << 23
+best = bestv = None
+for ds in range(12, 30):                      # 低 5 位 = log2(基准大小)，12..29
+    base = 1 << ds
+    for frac in range(8):                     # 高 3 位 = 减掉的分数分子
+        v = base - (base // 16) * frac
+        if v >= want and (bestv is None or v < bestv):
+            bestv, best = v, (frac << 5) | ds
+data = open(sys.argv[2], 'rb').read()
+raw = lzma.compress(data, format=lzma.FORMAT_RAW, filters=[
+    {"id": lzma.FILTER_LZMA1, "preset": 6, "dict_size": want,
+     "lc": 3, "lp": 0, "pb": 2}])
+hdr = b'LZIP' + bytes([1, best])               # version 恒为 1
+trailer = struct.pack('<IQQ', zlib.crc32(data) & 0xffffffff, len(data),
+                      len(hdr) + len(raw) + 20)
+open(sys.argv[1], 'wb').write(hdr + raw + trailer)
+PY
+    then
+        rm -rf "$LZ/e1"; mkdir -p "$LZ/e1"
+        if (cd "$LZ/e1" && "$T" extract "$LZ/ext.lz" . >/dev/null 2>&1) &&
+           [ "$(cat "$LZ/e1"/* 2>/dev/null | tr -d '\n')" = "AAA" ]; then
+            ok "外部生成的 lzip（Python liblzma + 规范容器）可被解出"
+        else
+            bad "外部生成的 lzip 解压失败"
+        fi
+    else
+        skip "python3 构造外部 lzip 样本失败，跳过该断言"
+    fi
+
+    # 18.4 多成员：两个成员直接拼接，规范要求按顺序串接解出
+    cat "$LZ/mk_big.txt.lz" "$LZ/mk_rand.bin.lz" > "$LZ/multi.lz"
+    cat "$LZ/in/big.txt" "$LZ/in/rand.bin" > "$LZ/expect.bin"
+    rm -rf "$LZ/e2"; mkdir -p "$LZ/e2"
+    if (cd "$LZ/e2" && "$T" extract "$LZ/multi.lz" . >/dev/null 2>&1) &&
+       cmp -s "$LZ/expect.bin" "$LZ/e2/multi"; then
+        ok "多成员 lzip 按规范串接解出"
+    else
+        bad "多成员 lzip 解压结果不符"
+    fi
+
+    # 18.5 完整性三因子（CRC32 / 原始长度 / 成员总长）逐个篡改，都必须被拒。
+    #      这三条正是 BUILD.md 里 lzip 实现的验收点：只做 CRC 一项是不够的。
+    for what in crc datasize membersize; do
+        if python3 - "$LZ/mk_big.txt.lz" "$LZ/bad_$what.lz" "$what" <<'PY'
+import sys
+d = bytearray(open(sys.argv[1], 'rb').read())
+off = {"crc": -20, "datasize": -16, "membersize": -8}[sys.argv[3]]
+d[off] ^= 0x5A
+open(sys.argv[2], 'wb').write(d)
+PY
+        then
+            if "$T" test "$LZ/bad_$what.lz" >/dev/null 2>&1; then
+                bad "lzip 尾部 $what 被篡改却仍被接受"
+            else
+                ok "lzip 尾部 $what 被篡改时正确报错"
+            fi
+        fi
+    done
+
+    # 18.6 截断与尾部垃圾：前者要求「成员没解完」，后者要求「残余无法解释」，都必须拒
+    SZ="$(wc -c < "$LZ/mk_big.txt.lz" | tr -d ' ')"
+    head -c $((SZ - 5)) "$LZ/mk_big.txt.lz" > "$LZ/trunc.lz"
+    if "$T" test "$LZ/trunc.lz" >/dev/null 2>&1; then
+        bad "截断的 lzip 竟被接受"
+    else
+        ok "截断的 lzip 被拒绝"
+    fi
+    cp "$LZ/mk_big.txt.lz" "$LZ/junk.lz"; printf 'X' >> "$LZ/junk.lz"
+    if "$T" test "$LZ/junk.lz" >/dev/null 2>&1; then
+        bad "尾部多出垃圾的 lzip 竟被接受"
+    else
+        ok "尾部垃圾被拒绝"
+    fi
+
+    # 18.7 lzip 有强魔数（"LZIP" + 版本 1），改名后仍应按内容认出
+    cp "$LZ/mk_big.txt.lz" "$LZ/renamed.bin"
+    if "$T" info "$LZ/renamed.bin" 2>/dev/null | grep -q '^format=lzip'; then
+        ok "lzip 按内容（魔数）识别，与扩展名无关"
+    else
+        bad "改名后的 lzip 未被识别"
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+head1 "19. snappy：自实现（裸格式 + 分帧格式），上游完全没有"
+
+SN="$WORK/snappy"
+rm -rf "$SN"; mkdir -p "$SN"
+printf 'AAA\n' > "$SN/a.txt"
+
+# 19.1 创建（分帧）+ 自解往返
+rm -f "$SN/mk.sz"
+if "$T" create snappy "$SN/mk.sz" "$SN/a.txt" >/dev/null 2>&1 && [ -s "$SN/mk.sz" ]; then
+    ok "snappy 归档创建成功（上游完全没有）"
+    rm -rf "$SN/o1"; mkdir -p "$SN/o1"
+    if (cd "$SN/o1" && "$T" extract "$SN/mk.sz" . >/dev/null 2>&1) &&
+       [ "$(cat "$SN/o1"/* 2>/dev/null | tr -d '\n')" = "AAA" ]; then
+        ok "snappy 往返（创建→解码→抽取）内容一致"
+    else
+        bad "snappy 往返内容不一致"
+    fi
+else
+    bad "snappy 归档创建失败"
+fi
+
+# 19.2 产物必须是规范里的分帧格式：以 10 字节流标识开头
+#      （0xFF 06 00 00 + "sNaPpY"）；裸格式没有这个头。
+if python3 - "$SN/mk.sz" <<'PY'
+import sys
+d = open(sys.argv[1], 'rb').read()
+sys.exit(0 if d[:10] == bytes([0xFF, 0x06, 0x00, 0x00]) + b'sNaPpY' else 1)
+PY
+then
+    ok "snappy 产物以规范的 10 字节分帧流标识开头"
+else
+    bad "snappy 产物缺少分帧流标识"
+fi
+
+# 19.3 分帧块结构与掩码 CRC 自洽：
+#      * 每块长度不超过 65540（65536 数据 + 4 字节校验），遍历必须正好走到文件尾；
+#      * 存的 mask(crc32c(原始数据)) 必须等于独立算出来的值。
+#      注意是 CRC-32C（Castagnoli），与 zlib 的 CRC-32 不是同一个多项式。
+if python3 - "$SN/mk.sz" "$SN/a.txt" <<'PY'
+import sys
+POLY = 0x82F63B78
+tab = []
+for i in range(256):
+    c = i
+    for _ in range(8):
+        c = (POLY ^ (c >> 1)) if (c & 1) else (c >> 1)
+    tab.append(c)
+def crc32c(b):
+    c = 0xFFFFFFFF
+    for x in b:
+        c = tab[(c ^ x) & 0xFF] ^ (c >> 8)
+    return c ^ 0xFFFFFFFF
+def mask(x):
+    return (((x >> 15) | (x << 17)) + 0xA282EAD8) & 0xFFFFFFFF
+src = open(sys.argv[2], 'rb').read()
+d = open(sys.argv[1], 'rb').read()
+p, seen, crc_ok = 10, 0, False
+while p < len(d):
+    if p + 4 > len(d):
+        sys.exit(1)
+    t = d[p]; ln = d[p+1] | (d[p+2] << 8) | (d[p+3] << 16)
+    if p + 4 + ln > len(d) or ln > 65540:
+        sys.exit(1)
+    body = d[p+4:p+4+ln]
+    if t in (0x00, 0x01):
+        seen += 1
+        if int.from_bytes(body[:4], 'little') != mask(crc32c(src)):
+            sys.exit(1)
+        crc_ok = True
+    p += 4 + ln
+sys.exit(0 if (seen >= 1 and crc_ok and p == len(d)) else 1)
+PY
+then
+    ok "snappy 分帧块结构合规且掩码 CRC-32C 与独立计算一致"
+else
+    bad "snappy 分帧块结构或校验值不符"
+fi
+
+# 19.4 测试模式（-t）：7-Zip 在这种模式下**不给输出流**，解码器必须照常跑完
+#      （只校验、不落盘）。曾经因为直接对空输出流解引用而段错误，这里专门钉住。
+if "$T" test "$SN/mk.sz" >/dev/null 2>&1; then
+    ok "snappy 在测试模式（无输出流）下正常通过完整性校验"
+else
+    bad "snappy 在测试模式（无输出流）下失败"
+fi
+for f in zstd lzip lz4 brotli; do
+    has_codec "$f" || continue
+    # ⚠️ 输出名必须带该格式认识的扩展名：brotli 没有魔数，只能按扩展名认领，
+    # 写成一个没有点号的名字会让产物事后打不开（这不是引擎的问题，是格式本身的属性）。
+    case "$f" in
+        zstd)   vext=zst ;;
+        lzip)   vext=lz ;;
+        lz4)    vext=lz4 ;;
+        brotli) vext=br ;;
+    esac
+    A="$EXT/val_$f.$vext"
+    if "$T" create "$f" "$A" "$SN/a.txt" >/dev/null 2>&1 && "$T" test "$A" >/dev/null 2>&1; then
+        ok "$f 在测试模式（无输出流）下正常通过完整性校验"
+    else
+        bad "$f 在测试模式（无输出流）下失败"
+    fi
+done
+
+# 19.5 裸格式：分帧产物里的**压缩块**本身就是一条合法的裸 snappy 流
+#      （varint 长度 + 元素流），去掉 4 字节掩码 CRC 后改名 .snappy 应能独立解出。
+#      用可压缩的输入，保证编码器选的是压缩块（压不动时会退化成未压缩块，
+#      那种块的数据是裸字节、不是 snappy 流）。
+python3 - "$SN/ap.txt" <<'PY'
+import sys
+open(sys.argv[1], 'w').write('A\n' * 2000)
+PY
+if "$T" create snappy "$SN/mk2.sz" "$SN/ap.txt" >/dev/null 2>&1 &&
+   python3 - "$SN/mk2.sz" "$SN/raw.snappy" <<'PY'
+import sys
+d = open(sys.argv[1], 'rb').read()
+p = 10
+while p < len(d):
+    t = d[p]; ln = d[p+1] | (d[p+2] << 8) | (d[p+3] << 16)
+    if t == 0x00:
+        open(sys.argv[2], 'wb').write(d[p+4+4:p+4+ln])   # 跳过 4 字节掩码 CRC
+        sys.exit(0)
+    p += 4 + ln
+sys.exit(1)
+PY
+then
+    rm -rf "$SN/o2"; mkdir -p "$SN/o2"
+    if (cd "$SN/o2" && "$T" extract "$SN/raw.snappy" . >/dev/null 2>&1) &&
+       cmp -s "$SN/ap.txt" "$SN/o2/raw"; then
+        ok "裸格式 snappy 走独立解码分支且内容正确"
+    else
+        bad "裸格式 snappy 解压失败"
+    fi
+else
+    skip "无法从分帧产物提取裸块，跳过裸格式断言"
+fi
+
+# 19.6 损坏检测：改动最后一个字节（落在块数据里）后 CRC 必然不符，必须报错
+if python3 - "$SN/mk.sz" "$SN/bad.sz" <<'PY'
+import sys
+d = bytearray(open(sys.argv[1], 'rb').read())
+d[-1] ^= 0x5A
+open(sys.argv[2], 'wb').write(d)
+PY
+then
+    if "$T" test "$SN/bad.sz" >/dev/null 2>&1; then
+        bad "snappy 数据被篡改却仍被接受"
+    else
+        ok "snappy 数据被篡改时正确报错"
+    fi
+fi
+
+# 19.7 byExtOnly 约定：snappy 只按扩展名（.sz / .snappy）认领，改名后不再认出。
+#      这是刻意的取舍 —— 裸格式没有魔数，靠内容认领会把任意二进制误判成 snappy。
+cp "$SN/mk.sz" "$SN/renamed.bin"
+if "$T" info "$SN/renamed.bin" 2>/dev/null | grep -q '^format=snappy'; then
+    bad "snappy 竟然按内容认领了（byExtOnly 约定被破坏）"
+else
+    ok "snappy 依约只按扩展名认领，改名后不误认"
 fi
 
 # ---------------------------------------------------------------------------

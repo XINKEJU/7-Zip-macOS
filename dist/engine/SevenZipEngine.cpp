@@ -1404,9 +1404,10 @@ static void EnumerateHandlers(std::vector<HandlerEntry> &out) {
     out.push_back(e);
   }
 
-  // 注入外部链入的解码器（lz4 / brotli）。它们不在上游注册表里，必须显式登记，
-  // 否则 Open 路径不会尝试它们。zstd 上游已有解码器，这里不重复注入；它只通过
-  // FindExternalCodec 用于「创建」（上游的 zstd 处理器没有 IOutArchive）。
+  // 注入外部链入的编解码器（lz4 / brotli / lzip / snappy）。它们不在上游注册表
+  // 里，必须显式登记，否则 Open 路径不会尝试它们。zstd 上游已有解码器，这里不
+  // 重复注入；它只通过 FindExternalCodec 用于「创建」（上游的 zstd 处理器没有
+  // IOutArchive）。
   const std::vector<ExternalCodec> &exts = GetExternalCodecs();
   for (size_t k = 0; k < exts.size(); k++) {
     const ExternalCodec &c = exts[k];
@@ -1417,7 +1418,8 @@ static void EnumerateHandlers(std::vector<HandlerEntry> &out) {
     e.name = c.name;
     e.extensions = c.extensions;
     e.canUpdate = c.canEncode;
-    // byExtOnly（无魔数）的编解码器只能按扩展名认领；有魔数的（lz4）靠内容探测。
+    // byExtOnly（无魔数）的编解码器只能按扩展名认领；有魔数的（lz4 / lzip）
+    // 靠内容探测，扩展名不是必要条件。
     if (c.byExtOnly) e.flags = NArcInfoFlags::kByExtOnlyOpen;
     out.push_back(e);
   }
@@ -2442,6 +2444,13 @@ static std::string CanonicalFormatName(const std::string &format) {
   if (f == "bz2" || f == "bzip2") return "bzip2";
   if (f == "xz") return "xz";
   if (f == "zst" || f == "zstd") return "zstd";
+  // 外部编解码器的别名。界面/命令行可能给出短写，而处理器注册名是长写
+  // —— 不归一化的话 FindExternalCodec 找不到，会掉进 CLSID 查找然后报
+  // 「不支持的压缩格式」，症状很难联想到是别名问题。
+  if (f == "lz4") return "lz4";
+  if (f == "br" || f == "brotli") return "brotli";
+  if (f == "lz" || f == "lzip") return "lzip";
+  if (f == "sz" || f == "snappy") return "snappy";
   return f;
 }
 
@@ -2564,27 +2573,31 @@ static bool CreateSingleArchive(const std::vector<std::string> &utf8InputPaths,
     return false;
   }
 
-  // 外部编解码器里只解压、不编码的格式（lz4 / brotli）：明确拒绝创建，避免落到
-  // 上游 CLSID 查找给出含糊的「不支持的压缩格式」。
-  if (const ExternalCodec *ext = FindExternalCodec(options.format)) {
-    if (!ext->canEncode) {
-      error = "「" + options.format + "」仅支持解压，无法创建归档";
-      return false;
-    }
+  // 外部编解码器里只解压、不编码的格式：明确拒绝创建，避免落到上游 CLSID 查找
+  // 给出含糊的「不支持的压缩格式」。（当前实现里几种都是既能解也能编，
+  // 这条是给将来「只加解码器」的格式留的兜底。）
+  // 查表用归一化后的名字 —— 界面可能给短写（br / lz / sz），注册名却是长写。
+  const ExternalCodec *extCodec = FindExternalCodec(CanonicalFormatName(options.format));
+  if (extCodec && !extCodec->canEncode) {
+    error = "「" + options.format + "」仅支持解压，无法创建归档";
+    return false;
   }
 
-  // 单流格式（gz/bz2/xz 上游限制；zstd/lz4/br 是我们外部编解码器，本质单流）
-  // 只能装一个文件。多个输入时官方 7zz 给 E_INVALIDARG，这里提前给清晰的中文报错。
+  // 单流格式（归档里只有一个条目、没有元数据表）一次只能压一个文件。
+  // 上游的 gz / bz2 / xz 本身就有限制；外部编解码器（zstd / lz4 / brotli /
+  // lzip / snappy）按格式定义全是单流，所以只要命中 extCodec 就一并拦截。
   const std::string cf = CanonicalFormatName(options.format);
-  if ((cf == "gzip" || cf == "bzip2" || cf == "xz" || cf == "zstd" ||
-       cf == "lz4" || cf == "br") &&
-      utf8InputPaths.size() > 1) {
+  const bool singleStream =
+      (extCodec != NULL) || cf == "gzip" || cf == "bzip2" || cf == "xz" || cf == "zstd";
+  if (singleStream && utf8InputPaths.size() > 1) {
     error = "「" + cf + "」是单流格式，一次只能压缩一个文件";
     return false;
   }
 
+  // 只有上游处理器才需要 CLSID。外部编解码器由我们自己 new 出来，上游注册表里
+  // 没有它的条目 —— 去查只会失败，把明明能用的格式误判成「不支持」。
   GUID clsid;
-  if (!FormatToClsid(options.format, clsid, error)) return false;
+  if (!extCodec && !FormatToClsid(options.format, clsid, error)) return false;
 
   std::vector<SDirItem> items;
   for (size_t i = 0; i < utf8InputPaths.size(); i++) {
@@ -2611,9 +2624,8 @@ static bool CreateSingleArchive(const std::vector<std::string> &utf8InputPaths,
   }
 
   // 外部编解码器优先：上游注册表里 zstd 的处理器没有 IOutArchive（7-Zip 只带
-  // 解码器），创建必须走我们自己的实现。FindExternalCodec 在库没链进来时
-  // 返回 NULL，此时自然回落到注册表路径。
-  const ExternalCodec *extCodec = FindExternalCodec(options.format);
+  // 解码器），创建必须走我们自己的实现。lz4 / brotli / lzip / snappy 更是上游
+  // 完全没有的格式，注册表里连名字都查不到。extCodec 在上面已经查过，复用即可。
   CMyComPtr<IOutArchive> outArchive =
       extCodec ? CreateExternalOutHandler(extCodec) : CMyComPtr<IOutArchive>();
   if (!outArchive) {
@@ -3136,7 +3148,9 @@ bool listFormats(std::vector<FormatInfo> &out) {
   std::vector<HandlerEntry> handlers;
   EnumerateHandlers(handlers);
   // 外部编解码器的「可创建」能力：zstd 上游只报可解（canUpdate=0），我们补了
-  // 编码器，这里按真实能力覆盖。lz4 / brotli 是纯解码，保持 canUpdate=false。
+  // 编码器，这里按真实能力覆盖。
+  // 其余外部格式（lz4 / brotli / lzip / snappy）在 EnumerateHandlers 里就是按
+  // ExternalCodec::canEncode 注入的，canUpdate 已经是对的，不需要在这里再改。
   bool zstdCanEncode = (FindExternalCodec("zstd") != NULL);
   for (size_t i = 0; i < handlers.size(); i++) {
     FormatInfo fi;

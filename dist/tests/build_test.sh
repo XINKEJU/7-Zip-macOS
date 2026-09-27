@@ -25,6 +25,23 @@ for f in "$LIB/lib7zbridge.a" "$LIB/lib7z.dylib" "$HERE/engine_test.cpp"; do
     fi
 done
 
+# ⚠️ 桥接层源码可能比 lib7zbridge.a 新。`make test` 刻意不依赖 `bridge`（那会连带
+# 全量重编上游引擎，太慢），于是「改了 C++ 却在测旧库」会静默发生 —— 本次踩过一次：
+# 测试报告的失败现象与刚改的代码完全对不上。这里做一个廉价的新鲜度检查。
+BRIDGE_SRC="$(find "$DIST/engine" -maxdepth 1 \
+        \( -name '*.cpp' -o -name '*.h' -o -name '*.mm' -o -name '*.sh' \) \
+        -newer "$LIB/lib7zbridge.a" -print -quit 2>/dev/null)"
+if [ -n "$BRIDGE_SRC" ]; then
+    echo "  桥接层源码（$(basename "$BRIDGE_SRC")）比产物新，先重建"
+    BLOG="${TMPDIR:-/tmp}/z7bridge_build.log"
+    if ! sh "$DIST/engine/build_engine.sh" >"$BLOG" 2>&1; then
+        echo "  重建桥接层失败，日志：$BLOG" >&2
+        cat "$BLOG" >&2
+        exit 1
+    fi
+    echo "  已重建 $LIB/lib7zbridge.a"
+fi
+
 # 外部压缩库（zstd / lz4 / brotli）的静态库：桥接层引用了它们的符号，
 # 缺了会链接失败。库不存在时探测结果为空，链接照旧（对应格式已被编译出去）。
 . "$DIST/engine/ext_codecs.sh"
