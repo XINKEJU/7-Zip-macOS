@@ -454,6 +454,31 @@ otool -L dist/7-Zip.app/Contents/MacOS/7-Zip                          # 不应�
 对应格式编译出去**（`Z7_HAVE_*` 未定义），构建照常成功——CI 与本机无 Homebrew
 的环境都靠这个降级路径过门禁。
 
+### 链 Homebrew 静态库会带来「minos 不一致」警告（已知取舍）
+
+Homebrew 的 `/opt/homebrew/lib/libzstd.a` 等是**针对较新 macOS 构建**的，链接时
+会刷一屏（本机与 CI 都如此）：
+
+```
+ld: warning: object file (/opt/homebrew/lib/libzstd.a[3](entropy_common.c.o))
+  was built for newer 'macOS' version (14.0) than being linked (11.0)
+```
+
+**这是警告不是错误，可以接受**：最终产物的 minos 仍由 `-mmacosx-version-min`
+决定（应用 11.0、扩展 12.0），而 zstd / lz4 / brotli 只用到 libc 里最古老的一批
+符号（`malloc` / `memcpy` / …），不依赖新版系统 API，因此在 11.0 上实际可用。
+
+但它意味着「macOS 11.0 起可用」这个声明**只在功能层面成立，不再由工具链逐符号
+保证**。若将来升级到真正依赖新系统 API 的库版本，必须改为自行以正确的
+deployment target 编译这三个库（或把其源码 vendored 进构建），不能继续链
+Homebrew 的产物。
+
+⚠️ **不要为了清爽在构建脚本里加 `-Wl,-w` 之类把这类警告整体静音**——它是这里
+唯一的提示。要过滤也只该在阅读日志时过滤，不该在构建时过滤。
+（本项目的构建脚本没有做任何过滤，CI 日志里能看到原文。）
+
+### 外部压缩库链到哪里（容易搞混）
+
 `build_app.sh` 会把 `lib7z.dylib` 放进 `Contents/Frameworks/`，并把主程序的
 `LC_RPATH` 设为 `@executable_path/../Frameworks`。
 

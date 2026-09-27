@@ -362,16 +362,22 @@ pkgutil --expand-full dist/7-Zip-26.03-macOS.pkg /tmp/exp    # 检查载荷与�
    原样，`7zz a -tzstd` / `-tiso` 会报错退出。取舍理由见第一节。
 3. **brotli 需要构建时链入 `libbrotli`。** 本机未安装该库时，对应格式会整体
    编译出去（构建仍成功），此时 `.br` 文件无法打开。zstd 与 lz4 同理。
-4. **DMG 创建是全项目唯一的子进程调用。** 它通过 `posix_spawn` 调系统
+4. **链入的第三方静态库可能抬高实际系统要求。** 官方发行的二进制是链着
+   Homebrew 的 `libzstd` / `liblz4` / `libbrotli` 构建的，而这些库本身是按较新
+   macOS 编译的，链接时会出现 `was built for newer 'macOS' version (14.0) than
+   being linked (11.0)` 警告。三个库只依赖 libc 中最早期的接口，因此实测在 11.0
+   上可用；但若将来某个库版本真的用到新系统 API，就需要自行以正确 deployment
+   target 重新编译。详见 `BUILD.md`。
+5. **DMG 创建是全项目唯一的子进程调用。** 它通过 `posix_spawn` 调系统
    `/usr/bin/hdiutil`——DMG 是 Apple 专有格式，没有进程内等价实现。其余所有
    归档操作（含 ISO 创建）都在进程内完成，`make appcheck` 对此有断言。
-5. **只支持 Apple Silicon。** 2026-09-24 起不再构建 x86_64 切片——它占每个
+6. **只支持 Apple Silicon。** 2026-09-24 起不再构建 x86_64 切片——它占每个
    可执行体体积的近一半，而 Intel Mac 已无在售机型。Intel 机器会直接报
    「bad CPU type in executable」（Rosetta 2 是把 x86_64 翻译成 arm64，方向相反，
    帮不上忙）。上游源码未改，恢复 x86_64 只需把各构建脚本里的分支加回来。
-6. **最低系统版本 11.0**（首个支持 Apple Silicon 的版本）；应用扩展为 12.0。
-7. **不提供 32 位支持。**
-8. **钥匙串的一次性授权提示。** ad-hoc 签名没有固定的团队标识，因此重新构建后
+7. **最低系统版本 11.0**（首个支持 Apple Silicon 的版本）；应用扩展为 12.0。
+8. **不提供 32 位支持。**
+9. **钥匙串的一次性授权提示。** ad-hoc 签名没有固定的团队标识，因此重新构建后
    首次读取已记住的密码时，系统会询问一次是否允许访问（点「始终允许」后不再
    打扰）。换成 Developer ID 正式签名即可消除该提示。
 
