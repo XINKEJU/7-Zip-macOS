@@ -335,6 +335,84 @@ osascript -e 'tell application "System Events" to tell process "7-Zip" \
 运算期间主线程继续渲染是安全的），回主线程再 `setArray:` 写回并 `reloadData`。
 作废机制沿用搜索那套 `contentGeneration`。
 
+### 坑点 16：写 ISO9660 时六处「看不出来但读取器一定会挑」的地方
+
+`dist/engine/Z7IsoWriter.cpp` 是自研的 ISO9660 + Joliet 写入器。格式本身不复杂，
+但下面六条要么是「写错了自己解析也对、只有别的读取器报错」，要么会让产物每次
+都不一样，全部实机踩过。**判别工具是上游 `7zz l` + `hdiutil attach`，不要只看
+自己的解析器**（自研解析器与自研写入器很容易犯同一个错）。
+
+1. **目录记录的日期字段是 7 字节，不是 8 字节。** 这 7 字节是
+   `年-1900, 月, 日, 时, 分, 秒, GMT 偏移(以 15 分钟为单位)`——**时区就在第 7 字节**。
+   多写一个时区字节，后面所有字段整体后移一位，`namelen` 落到偏移 33 而不是 32，
+   于是「自己能解析、7zz 报错」。
+2. **卷描述符里路径表的四个字段顺序是 L / L-可选用 / M / M-可选用**，即偏移
+   **140 / 144 / 148 / 152**（不是 L、M、0、0）。写错顺序，7-Zip 会把 M 的值
+   当成「L 的可选路径表」读，指向一个越界扇区，直接报
+   `Cannot open the file as archive`。相关字段：逻辑块大小在 128，路径表大小在
+   132（LE）/136（BE）。另注意 **M 路径表的位置是大端存储**（148），按小端读会
+   得到 `0x14000000` 这种荒谬值。
+3. **`.` 与 `..` 必须是单字节 `0x00` 与 `0x01`，不是 UTF-16 的 `"."` / `".."`。**
+   7-Zip 的 `IsSystemItem()` 判据是「标识符长度 == 1 且字节 < 2」。写成 UTF-16
+   时它不认，会把 `.` 当成真目录递归下去，报 **`Self-linked directory`**，并且
+   列表里每个目录都会多出一份重复条目。卷描述符内嵌的根目录记录同理：标识符
+   长度 1、值 `0x00`。
+4. **路径表要按（层级 → 父目录号 → 标识符）升序，父号是「父目录的编号」而不是
+   自身编号。** 编号就是条目在路径表中的 1-based 位置（**路径表条目里没有「编号」
+   字段**，这点很容易搞混）。父号写成自身编号时，`7zz` 和 `hdiutil` 都能容忍，
+   但 Windows CDFS 等会按此顺序做二分查找，顺序不对就查不到目录。实现见
+   `orderDirs()`：先真 BFS 定层，再逐层按（父号, 名字）排序并重编号，父目录
+   总在更小的层，所以处理到第 L 层时父号已经是最终值。
+5. **目录记录不能跨越扇区边界。** 一条记录若会跨到下一个 2048 字节扇区，必须
+   先用 0 把当前扇区填满。计算大小（`computeSizes`）与写入（`writeDirRecord`）
+   必须用**同一套**填充规则，否则算出的 `dirBytes` 与实际写入不符。
+6. **同一目录内的目录记录要按标识符升序**（ECMA-119 9.3），且子项顺序不能跟着
+   `readdir` 走——那样同一输入每次产出的 ISO 字节都不同。做法是：先按原始名排序
+   再做重名去重（`_2`/`_3` 后缀的分配顺序因此确定），最后按 Joliet 标识符排序。
+
+验证手段（`verify_engine.sh` 第 16 节）：自研 Python 解析器逐字节比对 + 上游
+`7zz` 读取解包比对 + `hdiutil` 真实挂载读回，三条独立路径；另有 ECMA-119
+6.9.1 路径表合规断言。
+
+### 坑点 17：DMG 与「零子进程」原则的唯一边界
+
+本项目全程进程内运行引擎（`lib7z.dylib`），`make appcheck` 有双向断言。**DMG
+创建是唯一被许可的子进程例外**，理由与约束都写在这里，改代码前先读：
+
+- **为什么必须例外**：DMG（UDIF/UDZO）是 Apple 专有格式，公开文档不足，没有可
+  依赖的进程内实现。`hdiutil` 是系统自带工具，不引入第三方依赖。
+- **怎么调**：`dist/engine/Z7DmgWriter.cpp` 用 **`posix_spawn`**（不是 `NSTask`），
+  因此主程序仍然**不引用 `NSTask` 类**，`verify_app.sh` 那条「未引用 NSTask」
+  的断言依旧成立。
+- **把子进程数量压到 1**：暂存目录的建立、文件递归拷贝、以及事后清理全部用
+  C++ 完成，不额外派生 `cp` / `rm`。整条 DMG 创建路径只起一个 `hdiutil`。
+- **断言怎么放宽**：`verify_app.sh` 第 5 节统计子进程时把 `hdiutil` 列入白名单，
+  `7zz` 仍然一律禁止。打开归档不会触发 `hdiutil`，所以常规路径下子进程数仍是 0。
+- **不要在别处模仿这条例外**。任何新的子进程调用都必须先回到这里更新理由，
+  否则两条断言会立刻变红——那是设计意图，不是障碍。
+
+### 坑点 18：外部编解码器的两个「静默失败」陷阱
+
+上游 26.03 没有 lz4 / brotli，zstd 也只有解码器。补法是在 `Z7ExtCodec.cpp` 里
+做独立于上游注册表的处理器（约定：不改上游源码）。踩到两个表面症状相似、根因
+完全不同的坑：
+
+1. **悬垂指针。** 注入处理器列表时若用**局部** `std::vector<ExternalCodec>` 再
+   把 `&vec[k]` 存进 `HandlerEntry`，函数返回后指针立刻失效——症状是「处理器
+   枚举得到、一到打开就报无法识别」。必须让
+   `GetExternalCodecs()` 返回**静态**向量的引用。
+2. **去重把外部处理器误删。** `OrderHandlersForPath` 按 `memcmp(clsid)` 去重，
+   而外部处理器的 `clsid` 从未初始化（栈垃圾），会偶然与某个上游格式（如 gzip）
+   的 CLSID 相等，于是被当成重复项丢掉——症状同样是「打不开」，但根因在排序
+   阶段。规则改为：**只要比较双方有一方是 `extCodec`，就改用指针判重**，外部
+   处理器与上游永不相等，直接放行。
+3. 相关的还有 `ClsidByHandlerName`：它按名字找 CLSID 创建归档，遇到外部条目会
+   返回一个占位 GUID，导致「`create lz4` 返回成功却产出一个 ZIP」。枚举时必须
+   `if (hs[i].extCodec) continue;`，并在创建入口对 decode-only 格式直接报错。
+
+判定技巧：**看症状分不开「没进候选」与「进了又被丢」，就在候选列表与最终选中
+处各打一条日志**。本次两次误判都是靠这个区分开的。
+
 ## 二·补：内嵌引擎库的构建顺序
 
 应用依赖三个产物，顺序固定：
@@ -353,6 +431,28 @@ make bridge     # 引擎库 + 桥接层
 make app        # 全部 + 应用包
 make appcheck   # 应用包验收（依赖解析 / 部署目标 / 签名 / 真实启动）
 ```
+
+### 外部压缩库链到哪里（容易搞混）
+
+`lib7z.dylib` 是**上游 Format7zF Bundle** 的产物，**不含桥接层**；桥接层
+（`lib7zbridge.a` + `lib7zbridgeobjc.a`，也就是 `SevenZipEngine.*`、
+`Z7ExtCodec.*`、`Z7IsoWriter.*`、`Z7DmgWriter.*`）链进的是**应用主程序**
+`7-Zip.app/Contents/MacOS/7-Zip`。
+
+因此 zstd / lz4 / brotli 的静态库由 `build_app.sh` 与各测试脚本通过
+`EXT_CODEC_LIBS` 链入，**不在 `lib7z.dylib` 里**。想核对是否真的链上了，别去看
+dylib，要看主程序：
+
+```bash
+nm -gU dist/7-Zip.app/Contents/MacOS/7-Zip | grep -cE 'ZSTD_|LZ4_'   # 应为几百
+nm -u  dist/7-Zip.app/Contents/MacOS/7-Zip | grep -cE 'ZSTD_|LZ4_'   # 应为 0
+otool -L dist/7-Zip.app/Contents/MacOS/7-Zip                          # 不应出现 libzstd 等
+```
+
+`dist/engine/ext_codecs.sh` 探测 `/opt/homebrew/lib` 与 `/usr/local/lib` 下的
+静态库，输出 `EXT_CODEC_DEFS` / `EXT_CODEC_INCS` / `EXT_CODEC_LIBS`。**缺库就把
+对应格式编译出去**（`Z7_HAVE_*` 未定义），构建照常成功——CI 与本机无 Homebrew
+的环境都靠这个降级路径过门禁。
 
 `build_app.sh` 会把 `lib7z.dylib` 放进 `Contents/Frameworks/`，并把主程序的
 `LC_RPATH` 设为 `@executable_path/../Frameworks`。
@@ -547,7 +647,7 @@ sh dist/build/package.sh && shasum -a 256 dist/7zip-macos-26.03-macos-arm64.tar.
 自动化入口：
 
 ```bash
-make test        # 桥接层验收，对照官方 7zz 逐项比对（88 个用例）
+make test        # 桥接层验收，对照官方 7zz 逐项比对（126 个用例，共 17 节）
 make objc-test   # ObjC 适配层验收（App 实际调用的那一层，44 个用例）
 make appcheck    # 应用包验收（含真实启动与进程模型检查，20 个用例）
 make verify      # 离线校验：安装/卸载脚本逻辑 + Homebrew 公式一致性
@@ -581,9 +681,12 @@ xcrun stapler staple 7-Zip-26.03-macOS-signed.pkg
 
 - 应用包本身也需先用 Developer ID Application 证书签名，再构建安装包，
   否则嵌套的 Quick Look 扩展无法通过 `com.apple.security.inherit` 获得团队身份，
-  也就无法派生辅助进程。当前实现因此改为**扩展内直接解析归档**
-  （`ql-src/ArchiveReader.c`），不再依赖任何子进程——好处是 ad-hoc 签名的分发
-  版本同样能正常预览（2026-09-24 实测确认，见上文"为什么应用包里一份 7zz 都没有"）。
+  也就无法派生辅助进程。当前实现因此让扩展**直接链接 `lib7z.dylib`、在扩展
+  自己的进程内列举条目**（`ql-src/EngineListing.mm`），不依赖任何子进程；引擎
+  拒绝该文件时才回退到内置的纯 C 解析器（`ql-src/ArchiveReader.c`）。好处是
+  ad-hoc 签名的分发版本同样能正常预览，且对**引擎支持的所有格式**都给出完整
+  列表（2026-09-24 实测确认，见上文"为什么应用包里一份 7zz 都没有"）。
+- **DMG 创建的 `hdiutil` 是唯一子进程例外**，理由与断言放宽方式见「坑点 17」。
 - 本机仅存在 `IBOS Local Signing` 身份，与 7-Zip 无关，不应挪用签名。
 
 ---

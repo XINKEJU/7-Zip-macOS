@@ -29,9 +29,38 @@
 | **手册页** | `man 7zz`（完整命令与开关说明）、`man 7z`（别名页） | `/usr/local/share/man/man1/` |
 | **命令补全** | zsh / bash / fish 三套，按子命令区分可用开关 | `/usr/local/share/{zsh,bash-completion,fish}/` |
 | **图形界面** | 原生 AppKit 应用，**引擎内嵌于进程**（`Contents/Frameworks/lib7z.dylib`，不派生 `7zz` 子进程）：拖放、归档树浏览（八列、排序、搜索、右键菜单、拖出、空格或双击预览）、压缩、追加与**删除条目**、解压（同名文件可选覆盖 / 跳过 / 自动改名）、完整性校验、加密归档可**记住密码**（存入登录钥匙串），以及完整的压缩参数面板（格式/等级/方法/字典/字长/快速字节/匹配查找器/固实与分块/线程/分卷/加密算法/文件名加密/压缩头/完整路径） | `/Applications/7-Zip.app` |
+| **格式补齐** | 在**不改动上游源码**的前提下补上游缺失的能力：**zstd 创建**（上游只有解码器）、**lz4 与 brotli 解压**（上游完全没有）、**ISO 与 DMG 创建**（上游两者都只能读）。详见下文「扩展格式」与第七节验证 | 随应用（**不在 `7zz` 命令行**内，见下） |
 | **Quick Look** | 按空格即预览归档内容，不再显示十六进制乱码 | `7-Zip.app/Contents/PlugIns/7ZipQuickLook.appex` |
 | **Finder 服务** | 右键「服务」中的**用 7-Zip 压缩** / **用 7-Zip 解压** | 随应用注册 |
 | **文档类型** | 向 LaunchServices 声明 `.7z`、`.zip`、`.tar`、`.gz`、`.bz2`、`.xz`、`.zst`、`.rar`、`.cab`、`.iso` 等 | 随应用注册 |
+
+> **`7zz` 命令行刻意保持上游原样**：它是上游 makefile 的直接产物，不含本移植补的
+> 新格式（`7zz a -tzstd` / `-tiso` 会报错退出）。这样上游升级时无需改一行 makefile。
+> 新格式只在应用（与 `lib7zbridge.a` 引擎接口）中提供。
+
+### 扩展格式（本移植新增）
+
+上游 7-Zip 26.03 有几处能力空缺。本移植在**一行上游源码都不改**的前提下补齐，
+做法是把新格式做成独立于上游注册表的外部处理器（`dist/engine/Z7ExtCodec.cpp`）
+与自研写入器，由引擎直接实例化：
+
+| 格式 | 上游 26.03 | 本移植 | 做法 |
+|---|---|---|---|
+| zstd | 只能解压 | **可创建 + 解压** | 静态链入 `libzstd` 补上编码器 |
+| lz4 | 完全不支持 | **可解压**（创建明确拒绝） | 静态链入 `liblz4` |
+| brotli | 完全不支持 | **可解压**（创建明确拒绝） | 静态链入 `libbrotli`；无魔数，仅按扩展名认领 |
+| ISO 9660 | 只能读 | **可创建**（ISO9660 + Joliet） | 自研写入器，进程内、零依赖 |
+| DMG | 只能读 | **可创建**（UDZO） | 调系统 `hdiutil`（唯一子进程例外） |
+
+几点约定：
+
+- **库缺失即降级**：`dist/engine/ext_codecs.sh` 探测 Homebrew 静态库，缺哪个就把
+  对应格式编译出去，构建照常成功。没有装 Homebrew 的机器与 CI 都能过门禁。
+- **单流格式一次只能压一个文件**：gz / bz2 / xz / zstd / lz4 / br 都是单流格式，
+  多文件压缩会被明确拒绝（与官方 `7zz` 行为一致），不会静默只压第一个。
+- **静态链接**：三个库都以 `.a` 链入应用主程序，产物**不新增任何动态库依赖**，
+  `.app` 与 Quick Look 扩展保持自包含。许可归属见 `THIRD_PARTY.md` 1.2 节。
+- **仅限应用**：如上文所述，`7zz` 命令行保持上游原样，不含这些新格式。
 
 ### 命令行补全示例
 
@@ -82,17 +111,22 @@
 │   │   ├── build_dylib.sh     由上游 Format7zF Bundle 构建 lib7z.dylib
 │   │   ├── SevenZipEngine.{h,cpp}      C++ 桥接层（归档读写、安全策略、任务取消）
 │   │   ├── SevenZipEngineObjC.{h,mm}   Objective-C 适配层（App 实际调用的一层）
+│   │   ├── Z7ExtCodec.{h,cpp}  外部编解码器处理器（zstd 创建 / lz4、brotli 解压）
+│   │   ├── Z7IsoWriter.{h,cpp} 自研 ISO9660 + Joliet 写入器（进程内，零子进程）
+│   │   ├── Z7DmgWriter.{h,cpp} DMG 写入器（调系统 hdiutil，唯一子进程例外）
+│   │   ├── ext_codecs.sh       探测 Homebrew 静态库（缺失则降级，构建照常成功）
 │   │   └── build_engine.sh    构建 lib7zbridge.a + lib7zbridgeobjc.a
 │   ├── tests/                 验收测试与工具
 │   │   ├── engine_test.cpp    桥接层验收程序（对照官方 7zz 逐项比对）
 │   │   ├── objc_test.m        ObjC 适配层验收程序
-│   │   ├── verify_engine.sh   桥接层验收套件（88 个用例）
+│   │   ├── verify_engine.sh   桥接层验收套件（126 个用例）
 │   │   ├── verify_app.sh      应用包验收（依赖解析 / 部署目标 / 签名 / 真实启动）
 │   │   └── build_test.sh, build_objc_test.sh
 │   ├── lib/                   构建产物：lib7z.dylib、lib7zbridge*.a
 │   ├── ql-src/                Quick Look 扩展源码
 │   │   ├── SevenZipPreviewProvider.m   预览提供者（Objective-C）
-│   │   ├── ArchiveReader.c/.h          纯 C 归档解析器（进程内，不派生子进程）
+│   │   ├── EngineListing.mm            进程内引擎列举（链接 lib7z.dylib）
+│   │   ├── ArchiveReader.c/.h          纯 C 归档解析器（引擎拒绝时的兜底）
 │   │   └── build_ql.sh
 │   ├── app-res/               应用图标（.iconset 源 + 生成的 .icns）
 │   ├── build/                 打包脚本、手册页、说明文档、卸载脚本
@@ -210,7 +244,7 @@ make app         # 组装 7-Zip.app，并构建内嵌 Quick Look 扩展
 make ql          # 只重建 Quick Look 扩展
 make pkg         # 生成 .pkg / .dmg / .tar.xz / checksums.txt
 make tarball     # 生成 Homebrew 分发包
-make test        # 桥接层验收（对照官方 7zz 逐项比对，88 个用例）
+make test        # 桥接层验收（对照官方 7zz 逐项比对，126 个用例）
 make objc-test   # ObjC 适配层验收（App 实际调用的那一层，44 个用例）
 make appcheck    # 应用包验收：依赖解析 / 部署目标 / 签名 / 真实启动（20 个用例）
 make verify      # 离线校验：安装/卸载脚本逻辑 + 公式一致性
@@ -254,27 +288,52 @@ macOS 26 起，旧式 `.qlgenerator` 插件已不再被 `quicklookd` 加载，�
 1. **扩展必须编译为 `MH_EXECUTE` 而非 `MH_BUNDLE`。** 以 `-bundle` 链接时，
    ad-hoc 签名会静默丢弃 `com.apple.security.app-sandbox` 权限，ExtensionKit
    随即拒绝注册。构建脚本因此显式使用 `-Wl,-e,_NSExtensionMain`。
-2. **ad-hoc 签名下扩展不能派生子进程。** 调用内嵌 `7zz` 需要
-   `com.apple.security.inherit`，而该权限只在具备真实团队身份的签名下生效；
-   `posix_spawn` 会以 `EPERM` 失败。扩展因此改为**在进程内**用纯 C 解析归档
-   （`ArchiveReader.c`），完全不依赖外部进程。
+2. **列表由进程内引擎给出，不调用 `7zz`。** 调用内嵌 `7zz` 需要
+   `com.apple.security.inherit`，而该权限只在具备真实团队身份的签名下生效，
+   `posix_spawn` 会以 `EPERM` 失败。扩展因此直接链接 `@rpath/lib7z.dylib`
+   （`EngineListing.mm`），由引擎在**扩展自己的进程内**读条目表——当前产物里
+   已不含任何 `7zz` 引用。只有当引擎拒绝该文件时，才回退到内置的轻量解析器
+   （`ArchiveReader.c`，读 ZIP/TAR/GZIP 条目表；其余仅识别容器）。
 
-据此得到的预览能力：
+因此与早期版本不同，Quick Look 现在对**引擎支持的所有格式**都给出完整文件
+列表，而不再只覆盖 ZIP / TAR / GZIP：
 
 | 类型 | 行为 |
 |---|---|
-| ZIP / ZIP64、TAR（ustar、GNU 长名、pax）、GZIP | 完整文件列表：名称、原始大小、压缩后大小、修改时间、属性；含总文件数/文件夹数 |
-| 7z、XZ、BZip2、Zstd、RAR、CAB、ISO 9660、DMG | 容器识别与元信息（如 7z 容器版本与头大小），并提示需用命令行列出完整内容 |
+| 引擎支持的全部格式（7z、ZIP/ZIP64、TAR 各变体、GZIP、BZip2、XZ、Zstd、RAR、CAB、ISO 9660、DMG、WIM …） | 完整文件列表：名称、原始大小、压缩后大小、修改时间、属性；含总文件数/文件夹数 |
+| 引擎拒绝、但内置解析器认得（ZIP / TAR / GZIP 系列） | 由 `ArchiveReader.c` 兜底给出条目表 |
+| 只能识别容器（如分卷不完整） | 给出容器元信息与明确说明 |
 | 截断或损坏 | 明确报错（例如「ZIP 结束记录（EOCD）缺失」），不静默失败 |
 
-若以 Developer ID 正式签名并授予 `com.apple.security.inherit`，扩展会优先调用
-内嵌 `7zz`，从而对**所有**格式给出完整列表；这条路径已在代码中实现并保留。
+> 「扩展不派生子进程」是这条设计背后的硬约束：ad-hoc 签名下 `7zz` 起不来。
+> 这也是本项目把引擎做成 `lib7z.dylib`、全程进程内调用的根本原因，DMG 创建是
+> 唯一的例外（DMG 无进程内等价实现，见第八节）。
 
 ---
 
 ## 七、验证
 
-`make verify` 覆盖无需提权即可执行的全部检查：
+三条门禁都不需要提权，全部通过才算改动完成：
+
+| 门禁 | 内容 | 规模 |
+|---|---|---|
+| `make test` | 桥接层对照官方 `7zz` 逐项比对（`engine_test.cpp` + `verify_engine.sh`，共 17 节） | **126 项** |
+| `make objc-test` | Objective-C 适配层（`objc_test.m`） | **44 项** |
+| `make appcheck` | 应用包：包结构、动态库依赖解析（真正解析到磁盘）、部署目标、签名、进程模型 | **20 项** |
+
+其中 ISO / DMG 用三重独立手段交叉验证，避免「自己写、自己验」的循环论证：
+
+1. **结构解析**：自研 Python 解析器按 Joliet 卷描述符还原完整目录树，与源目录
+   逐字节比对（含中文文件名），并断言 `.` / `..` 为 ECMA-119 要求的单字节
+   `0x00` / `0x01`。
+2. **上游交叉**：用上游 `7zz` 的 ISO / DMG 读取器打开自产镜像，列出条目并解包
+   比对内容。
+3. **系统挂载**：`hdiutil attach` 真实挂载，读回文件核对内容。
+
+ISO 另有 ECMA-119 6.9.1 路径表合规性断言（父目录号自洽且小于自身编号、条目按
+「层级 → 父目录号 → 标识符」升序）。DMG 另用 `hdiutil imageinfo` 验证产物结构。
+
+`make verify` 另行覆盖安装/卸载逻辑与 Homebrew 公式一致性：
 
 - **脚本逻辑**：解包真实安装载荷，在临时前缀上重放安装与卸载流程，断言
   16 项包内文件全部被删除、6 项无关文件（相邻补全、其他应用等）全部保留。
@@ -298,15 +357,21 @@ pkgutil --expand-full dist/7-Zip-26.03-macOS.pkg /tmp/exp    # 检查载荷与�
 
 1. **未签名、未公证。** 产物为 ad-hoc 签名，其他用户首次安装需右键打开。
    正式分发须自备 Apple Developer ID，步骤见 `BUILD.md`。
-2. **Quick Look 的 7z 完整列表**需要正式签名（见第六节）；当前对 7z 给出容器
-   概要而非文件清单。ZIP / TAR / GZIP 不受影响，均为完整列表。
-3. **只支持 Apple Silicon。** 2026-09-24 起不再构建 x86_64 切片——它占每个
+2. **新增格式只在应用里，`7zz` 命令行没有。** zstd 创建、lz4 / brotli 解压、
+   ISO 与 DMG 创建都由应用（`lib7zbridge.a` 引擎接口）提供；`7zz` 保持上游
+   原样，`7zz a -tzstd` / `-tiso` 会报错退出。取舍理由见第一节。
+3. **brotli 需要构建时链入 `libbrotli`。** 本机未安装该库时，对应格式会整体
+   编译出去（构建仍成功），此时 `.br` 文件无法打开。zstd 与 lz4 同理。
+4. **DMG 创建是全项目唯一的子进程调用。** 它通过 `posix_spawn` 调系统
+   `/usr/bin/hdiutil`——DMG 是 Apple 专有格式，没有进程内等价实现。其余所有
+   归档操作（含 ISO 创建）都在进程内完成，`make appcheck` 对此有断言。
+5. **只支持 Apple Silicon。** 2026-09-24 起不再构建 x86_64 切片——它占每个
    可执行体体积的近一半，而 Intel Mac 已无在售机型。Intel 机器会直接报
    「bad CPU type in executable」（Rosetta 2 是把 x86_64 翻译成 arm64，方向相反，
    帮不上忙）。上游源码未改，恢复 x86_64 只需把各构建脚本里的分支加回来。
-4. **最低系统版本 11.0**（首个支持 Apple Silicon 的版本）；应用扩展为 12.0。
-5. **不提供 32 位支持。**
-6. **钥匙串的一次性授权提示。** ad-hoc 签名没有固定的团队标识，因此重新构建后
+6. **最低系统版本 11.0**（首个支持 Apple Silicon 的版本）；应用扩展为 12.0。
+7. **不提供 32 位支持。**
+8. **钥匙串的一次性授权提示。** ad-hoc 签名没有固定的团队标识，因此重新构建后
    首次读取已记住的密码时，系统会询问一次是否允许访问（点「始终允许」后不再
    打扰）。换成 Developer ID 正式签名即可消除该提示。
 
@@ -320,6 +385,8 @@ pkgutil --expand-full dist/7-Zip-26.03-macOS.pkg /tmp/exp    # 检查载荷与�
 - **unRAR 许可证限制** —— 二进制编入了 RAR 解压引擎，因此随附该限制文本；
   可解压 RAR，但**不得**用于开发 RAR 兼容压缩器
 - 源码中个别文件适用 BSD 2/3-clause（LZFSE、Zstandard、XXH64 解码）
+- 本移植新链入的 zstd / lz4 / brotli 静态库适用 BSD 3-clause / BSD 2-clause /
+  MIT（仅当构建机装有对应库时才被链入；见 `THIRD_PARTY.md` 1.2 节）
 
 完整声明见 [`NOTICE`](NOTICE)、[`THIRD_PARTY.md`](THIRD_PARTY.md)（逐组件归属与
 许可对照表，随安装包、应用包与 Homebrew 分发包一同分发）与上游原文件
@@ -339,4 +406,5 @@ Igor Pavlov 及 RARLAB 无隶属或背书关系。
 
 - **Igor Pavlov** —— 7-Zip 及其全部压缩算法实现
 - **Alexander Roshal** —— unRAR 解压代码
-- **Apple / Facebook / Yann Collet** —— LZFSE、Zstandard、XXH64 解码实现
+- **Apple / Facebook / Yann Collet / Google** —— LZFSE、Zstandard、LZ4、Brotli、
+  XXH64 的算法与实现

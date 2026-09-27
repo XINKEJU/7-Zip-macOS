@@ -53,7 +53,9 @@ USING THE APPLICATION
 
 The application is a native AppKit front end. The compression engine runs
 inside the application process: it is loaded as an embedded library
-(Contents/Frameworks/lib7z.dylib) and never spawns a helper process.
+(Contents/Frameworks/lib7z.dylib) and never spawns a helper process. The one
+deliberate exception is DMG creation, which calls the system hdiutil (see
+"Additional formats" above).
 
   Browsing
     Drag an archive onto the window, or open one from Finder. The list shows
@@ -169,26 +171,61 @@ Codecs compiled into this build:
   Filters: BCJ, BCJ2, ARM, ARM64, ARMT, PPC, IA64, SPARC, RISCV,
            Delta, Swap2, Swap4
 
+Additional formats added by this port (the GUI application only — see the
+note below):
+
+  zstd      creation (upstream 26.03 ships a decoder only)
+  lz4       extraction
+  brotli    extraction
+  ISO 9660  creation, with Joliet (UCS-2) long file names
+  DMG       creation (UDZO), delegated to the system hdiutil
+
+Three notes on these:
+
+  * zstd / lz4 / brotli are provided by statically linked third-party
+    libraries (libzstd, liblz4, libbrotli). If a library was not present
+    when this package was built, the corresponding format was simply left
+    out of the binary — the build still succeeds. Attribution is in
+    THIRD_PARTY.md.
+
+  * gz, bz2, xz, zstd, lz4 and br are single-stream formats: they can hold
+    one file at a time. Compressing several files into one of them is
+    rejected with a clear message instead of silently keeping only the
+    first.
+
+  * The bundled `7zz` command-line tool is a stock upstream build and does
+    NOT have these formats. `7zz a -tzstd` / `-tiso` fails by design; the
+    new formats are reachable from the application (and from the engine API
+    in lib7zbridge.a). Keeping the CLI pristine is what makes upstream
+    upgrades a no-op.
+
+  * Creating a DMG runs the system /usr/bin/hdiutil as a child process. This
+    is the single deliberate exception to the "no helper process" rule
+    (DMG is an Apple-proprietary format with no in-process equivalent);
+    everything else, including ISO creation, runs in-process.
+
 
 ARCHIVE PREVIEW (QUICK LOOK)
 ----------------------------
 
 Pressing Space on an archive in Finder opens a preview panel that lists the
-archive contents. The extension reads the container directly, inside its own
-sandbox, and never launches a helper process.
+archive contents. The extension links the bundled 7-Zip engine
+(lib7z.dylib) and enumerates entries inside its own process — it never
+launches a helper process, and no copy of `7zz` is shipped for it.
 
-Contents are reported for these containers:
+Because the engine does the reading, the preview gives a complete file
+listing for every format the engine supports:
 
-  ZIP / ZIP64, TAR, TAR.GZ, GZ        complete file listing, with sizes,
-                                      packed sizes, timestamps and methods
-  7z, XZ, BZip2, Zstd, RAR, CAB,      container identification, format and
-  cpio, ISO 9660, DMG, .Z, lzip       compression method, plus a note when
-                                      the entry list requires decompression
+  all engine formats                  complete file listing, with sizes,
+  (7z, ZIP/ZIP64, TAR variants,       packed sizes, timestamps, attributes,
+  GZ, BZip2, XZ, Zstd, RAR, CAB,      plus file and folder totals
+  ISO 9660, DMG, WIM, …)
 
-For containers whose directory cannot be read without decompressing, the
-panel shows the detected format and parameters instead of an entry table.
-This is a deliberate limitation: reading a 7z entry list would require
-running the archiver outside the sandbox.
+If the engine rejects a file, the extension falls back to a built-in
+lightweight parser that reads ZIP / TAR / GZIP tables and merely identifies
+other containers. Truncated or damaged archives produce an explicit error
+(for example "ZIP end-of-central-directory record (EOCD) missing") rather
+than a blank panel.
 
 
 SIGNING STATUS — PLEASE READ
@@ -212,8 +249,8 @@ Consequences:
 
   3. Because the Quick Look extension is only ad-hoc signed, it cannot
      launch helper processes (the sandbox requires a real team identity for
-     inherited entitlements). This is why the preview reader is implemented
-     in-process. See "ARCHIVE PREVIEW" above.
+     inherited entitlements). This is why the extension links the engine and
+     reads archives in-process. See "ARCHIVE PREVIEW" above.
 
 For distribution to other people you should sign with a Developer ID
 Installer certificate and notarize with Apple:

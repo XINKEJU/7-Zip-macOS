@@ -46,6 +46,34 @@
 
 BSD 组件的完整文本位于 `7z2603-src/DOC/`。
 
+### 1.2 本移植新增的外部压缩库
+
+上游 7-Zip 26.03 只带 Zstandard **解码器**，且完全没有 LZ4 / Brotli。本移植在不改动
+上游源码的前提下补上了这些格式（zstd 创建、lz4 与 brotli 解压），实现放在
+`dist/engine/Z7ExtCodec.cpp`，算法本身调用下列第三方库。
+
+这些库以**静态库**形式链入应用主程序（`7-Zip.app/Contents/MacOS/7-Zip`），
+因此发行包不会多出任何动态库依赖，`.app` 与 Quick Look 扩展仍自包含。
+链入与否由构建脚本 `dist/engine/ext_codecs.sh` 探测决定：库缺失时对应格式直接
+不编译进来（构建照常成功，只是少一种格式），因此下表并非每个构建都包含。
+
+| 库 | 版本（本机构建） | 版权 | 许可 |
+| --- | --- | --- | --- |
+| Zstandard（`libzstd.a`） | 1.5.7 | Meta Platforms, Inc. 及贡献者 | BSD 3-clause |
+| LZ4（`liblz4.a`） | 1.10.0 | Yann Collet | BSD 2-clause |
+| Brotli（`libbrotli{dec,enc,common}.a`） | 视构建环境 | Google LLC | MIT |
+
+三者的许可均为宽松许可，允许以二进制形式再分发，条件是保留版权声明与许可文本。
+上游许可文本见各自项目主页：
+
+- Zstandard — <https://github.com/facebook/zstd/blob/dev/LICENSE>
+- LZ4 — <https://github.com/lz4/lz4/blob/dev/LICENSE>
+- Brotli — <https://github.com/google/brotli/blob/master/LICENSE>
+
+> 这些库**不属于** 7-Zip 上游源码，也不在 `7z2603-src/` 内；它们由构建者从
+> Homebrew（或自行编译）取得。若需要完全自由许可的构建，可不安装这些库，
+> 构建会自动降级为「不含上述三种格式」。
+
 ---
 
 ## 2. unRAR 许可限制（重要）
