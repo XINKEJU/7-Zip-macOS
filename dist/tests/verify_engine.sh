@@ -16,6 +16,11 @@
 #  11. 更新模式（新增/跳过/替换）与 §5.1 扩展字段（-spf / -ms=…）
 #  12. 删除模式（§6.4）：级联删除、容器格式保持、加密保持、失败分类
 #  13. 容器级联（上游 CArchiveLink 语义）与进入内层归档
+#  14. wim 创建 + tar.gz / tar.bz2 / tar.xz / tgz 一步生成（组合格式）
+#  15. 新编解码器：zstd 创建、lz4 解压、单流与 decode-only 约束
+#      （外部库未链入时对应断言自动 skip，不算失败）
+#  16. ISO 创建：自研 ISO9660 + Joliet（Python 解析 / 7zz / 挂载三重交叉验证）
+#  17. DMG 创建：调系统 hdiutil（唯一子进程例外）
 #
 # 用法：sh verify_engine.sh
 
@@ -851,6 +856,15 @@ fi
 # ---------------------------------------------------------------------------
 head1 "15. 新编解码器：zstd 创建 / lz4 解压 / 单流与解码-only 约束"
 
+# 构建时到底链进了哪些外部库？ext_codecs.sh 的探测结果说了算 —— 引擎侧是按
+# Z7_HAVE_* 条件编译的，缺库时对应格式根本不在二进制里，此时必须 skip 而不是
+# fail（否则没装 Homebrew 的 CI 会误报）。整段放在 $( ) 子 shell 里执行，探测脚本
+# 设的内部变量不会污染本脚本。
+CODECS_AT_BUILD="$( . "$DIST/engine/ext_codecs.sh" >/dev/null 2>&1; printf '%s' "$EXT_CODEC_NAMES" )"
+has_codec() {
+    case " $CODECS_AT_BUILD " in *" $1 "*) return 0 ;; *) return 1 ;; esac
+}
+
 EXT="$WORK/extcodec"
 mkdir -p "$EXT/in/sub"
 printf 'AAA\n' > "$EXT/in/a.txt"
@@ -858,32 +872,42 @@ printf 'BBB\n' > "$EXT/in/b.txt"
 printf 'CCC\n' > "$EXT/in/sub/c.txt"
 
 # 15.1 zstd 创建：上游只有解码器、没有编码器，这是本移植真正补足的「创建」能力
-if "$T" create zstd "$EXT/mk.zst" "$EXT/in/a.txt" >/dev/null 2>&1 && [ -s "$EXT/mk.zst" ]; then
+if ! has_codec zstd; then
+    skip "构建时未链入 libzstd，跳过 zstd 创建断言（优雅降级）"
+elif "$T" create zstd "$EXT/mk.zst" "$EXT/in/a.txt" >/dev/null 2>&1 && [ -s "$EXT/mk.zst" ]; then
     ok "zstd 归档创建成功（上游做不到）"
 else
     bad "zstd 归档创建失败"
 fi
-if "$Z" l "$EXT/mk.zst" 2>/dev/null | grep -q '^Type = zstd' ||
-   "$Z" l "$EXT/mk.zst" 2>/dev/null | grep -q '^Type = Zstd'; then
-    ok "zstd 产物被官方 7zz 识别为 zstd"
-else
-    bad "zstd 产物未被官方 7zz 识别"
+
+if has_codec zstd; then
+    if "$Z" l "$EXT/mk.zst" 2>/dev/null | grep -qi '^Type = zstd'; then
+        ok "zstd 产物被官方 7zz 识别为 zstd"
+    else
+        bad "zstd 产物未被官方 7zz 识别"
+    fi
 fi
 
 # 15.2 zstd 往返：自产自解，内容必须逐字节一致
-rm -rf "$EXT/zstout"
-mkdir -p "$EXT/zstout"
-if "$T" extract "$EXT/mk.zst" "$EXT/zstout" >/dev/null 2>&1 &&
-   [ "$(cat "$EXT/zstout"/* 2>/dev/null | tr -d '\n')" = "AAA" ]; then
-    ok "zstd 往返（创建→解码→抽取）内容一致"
-else
-    bad "zstd 往返内容不一致"
+if has_codec zstd; then
+    rm -rf "$EXT/zstout"
+    mkdir -p "$EXT/zstout"
+    if "$T" extract "$EXT/mk.zst" "$EXT/zstout" >/dev/null 2>&1 &&
+       [ "$(cat "$EXT/zstout"/* 2>/dev/null | tr -d '\n')" = "AAA" ]; then
+        ok "zstd 往返（创建→解码→抽取）内容一致"
+    else
+        bad "zstd 往返内容不一致"
+    fi
 fi
 
 # 15.3 lz4 解压：上游完全没有 lz4 处理器，这是本移植新接入的解码能力。
-#      样本用系统 lz4 工具生成；若该工具或 lz4 静态库不可用则跳过（CI 上无 Homebrew）。
+#      样本用系统 lz4 工具生成。链入与否、工具在不在，任一条件不满足都只 skip。
 LZ4BIN="$(command -v lz4 || true)"
-if [ -n "$LZ4BIN" ] && "$LZ4BIN" -q "$EXT/in/a.txt" "$EXT/sample.lz4" >/dev/null 2>&1; then
+if ! has_codec lz4; then
+    skip "构建时未链入 liblz4，跳过 lz4 解码断言（优雅降级）"
+elif [ -z "$LZ4BIN" ]; then
+    skip "无 lz4 命令行工具（无法生成样本），跳过 lz4 解码断言"
+elif "$LZ4BIN" -q "$EXT/in/a.txt" "$EXT/sample.lz4" >/dev/null 2>&1; then
     if "$T" info "$EXT/sample.lz4" 2>/dev/null | grep -q '^format=lz4' &&
        "$T" info "$EXT/sample.lz4" 2>/dev/null | grep -q '^items=1'; then
         ok "lz4 归档被识别为 format=lz4、1 条目"
@@ -899,10 +923,11 @@ if [ -n "$LZ4BIN" ] && "$LZ4BIN" -q "$EXT/in/a.txt" "$EXT/sample.lz4" >/dev/null
         bad "lz4 解码内容不一致"
     fi
 else
-    skip "lz4 工具/库不可用，跳过 lz4 解码断言（优雅降级）"
+    skip "lz4 工具执行失败，跳过 lz4 解码断言"
 fi
 
-# 15.4 解码-only 格式（lz4）创建必须被明确拒绝，不能静默产出错误格式
+# 15.4 解码-only 格式（lz4）创建必须被明确拒绝，不能静默产出错误格式。
+#      这条与库是否链入无关：格式表里 canEncode 恒为 false。
 rm -f "$EXT/rej.lz4"
 if "$T" create lz4 "$EXT/rej.lz4" "$EXT/in/a.txt" >/dev/null 2>&1; then
     bad "lz4 创建竟被允许（应拒绝：仅支持解压）"
@@ -910,7 +935,8 @@ else
     ok "lz4 创建被明确拒绝（仅支持解压）"
 fi
 
-# 15.5 单流格式（zstd）多文件创建必须被拒绝并给出清晰报错
+# 15.5 单流格式（zstd）多文件创建必须被拒绝并给出清晰报错。
+#      同样与库无关：单流约束在 CreateSingleArchive 入口就拦下了。
 rm -f "$EXT/multi.zst"
 if "$T" create zstd "$EXT/multi.zst" "$EXT/in/a.txt" "$EXT/in/b.txt" >/dev/null 2>&1; then
     bad "zstd 多文件创建竟被允许（单流格式只能压一个文件）"
@@ -918,12 +944,12 @@ else
     ok "zstd 多文件创建被拒绝（单流格式约束）"
 fi
 
-# 15.6 brotli 未链入库时：创建必须报错而非崩溃（优雅降级，CI 上无 Homebrew 即此路径）
+# 15.6 brotli 是本移植补的 decode-only 格式，创建必须被明确拒绝（无论库在不在）
 rm -f "$EXT/rej.br"
 if "$T" create br "$EXT/rej.br" "$EXT/in/a.txt" >/dev/null 2>&1; then
-    bad "brotli 创建竟被允许（库未链入时应拒绝）"
+    bad "brotli 创建竟被允许（应拒绝：仅支持解压）"
 else
-    ok "brotli 未链入库时创建被拒绝（优雅降级）"
+    ok "brotli 创建被明确拒绝（仅支持解压）"
 fi
 
 # ---------------------------------------------------------------------------
