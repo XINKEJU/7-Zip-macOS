@@ -87,6 +87,74 @@ case "$LOCS" in
     *)             bad "CFBundleLocalizations 缺 zh-Hans：$LOCS" ;;
 esac
 
+# --- 访达服务（NSServices）---
+# 这一节守的是一条**纯静默**的失败路径：声明看起来齐全、pbs 也登记成功、
+# `pbs -read_bundle` 照样打印完整条目、应用照常启动 —— 只有访达的「服务」里
+# 永远不出现那两项，没有任何报错。
+#
+# 实测根因（macOS 27，同一 Info.plist 内放只差单个键的变体、一次启动对比）：
+#   NSSendFileTypes(public.item)，无 NSRequiredContext      → 不出现
+#   同上 + NSRequiredContext{NSTextContent=FilePath}        → 出现
+#   NSSendTypes(NSFilenamesPboardType)，无 NSRequiredContext → 不出现
+#   两个 send 键都有，无 NSRequiredContext                   → 不出现
+# 即决定因素是 NSRequiredContext，与用哪个 send 键无关。故在此钉死它。
+#
+# 同时钉死两件同样静默的事：
+#   * NSMenuItem 的语言键按「最具体者胜出」解析（zh_CN > zh-Hans > en > default）。
+#     只写 default + en，中文系统会显示英文；只写中文键，英文系统会露出中文。
+#   * NSMessage 写错既不是编译错误、也没有运行期报错，只是点了没反应 —— 因此
+#     逐个回到源码里核对处理器确实存在。
+SVC_ISSUES="$(python3 - "$APP/Contents/Info.plist" "$DIST/app-src/main.m" <<'PY'
+import plistlib, sys
+
+plist_path, main_m = sys.argv[1], sys.argv[2]
+d = plistlib.load(open(plist_path, 'rb'))
+src = open(main_m, encoding='utf-8').read()
+svcs = d.get('NSServices') or []
+issues = []
+
+if not svcs:
+    issues.append("Info.plist 未声明 NSServices（访达「服务」里不会有压缩/解压）")
+
+for i, s in enumerate(svcs):
+    mi = s.get('NSMenuItem') or {}
+    label = mi.get('default') or "第 %d 条" % (i + 1)
+
+    ctx = s.get('NSRequiredContext')
+    text_content = ctx.get('NSTextContent') if isinstance(ctx, dict) else None
+    if text_content != 'FilePath':
+        issues.append("%s：缺 NSRequiredContext.NSTextContent=FilePath —— "
+                      "访达「服务」里永远不会出现，且没有任何报错" % label)
+
+    if not mi.get('default'):
+        issues.append("%s：NSMenuItem 缺 default（未列出语言无兜底）" % label)
+    if not mi.get('en'):
+        issues.append("%s：NSMenuItem 缺 en（英文系统会露出中文）" % label)
+    if not (mi.get('zh-Hans') or mi.get('zh_CN')):
+        issues.append("%s：NSMenuItem 缺中文键 zh-Hans/zh_CN"
+                      "（有 en 时中文系统会显示英文）" % label)
+
+    for k in ('NSMessage', 'NSPortName'):
+        if not s.get(k):
+            issues.append("%s：缺 %s" % (label, k))
+    if not (s.get('NSSendTypes') or s.get('NSSendFileTypes')):
+        issues.append("%s：既无 NSSendTypes 也无 NSSendFileTypes（无从匹配选中内容）" % label)
+
+    msg = s.get('NSMessage')
+    if msg and ("%s:(NSPasteboard" % msg) not in src:
+        issues.append("%s：主程序里找不到 %s:(NSPasteboard… 处理器"
+                      "（菜单会出现，但点了没反应）" % (label, msg))
+
+print("\n".join(issues))
+PY
+)"
+if [ -z "$SVC_ISSUES" ]; then
+    ok "访达服务声明完整（NSRequiredContext / 语言键 / NSMessage 处理器均在）"
+else
+    bad "访达服务声明有问题：
+$SVC_ISSUES"
+fi
+
 # --- Help Book ---
 # 帮助菜单里那个系统搜索框，前提是 CFBundleHelpBookFolder 指向一份**能被找到**的
 # 帮助书。帮助书按本地化规则放在 <语言>.lproj/ 下——不是 Resources 根目录，所以

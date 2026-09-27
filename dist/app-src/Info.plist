@@ -252,6 +252,27 @@
 
     <!-- ============================ Finder services ============================ -->
 
+    <!-- ⚠️ NSRequiredContext 是**必须**的，不是可选项。
+         实测（同一 Info.plist 里放五个只差一个键的变体，一次启动对比，macOS 27）：
+           public.item，无 ctx           → 访达「服务」里不出现
+           public.item  + ctx{FilePath}  → 出现
+           NSSendTypes(NSFilenames) + ctx→ 出现
+           NSSendTypes(NSFilenames)，无  → 不出现
+           两个 send 键都有，无 ctx      → 不出现
+         即：**决定因素是 NSRequiredContext，与用 NSSendTypes 还是 NSSendFileTypes 无关**。
+         缺了它的失败是完全静默的：pbs 照样登记、`pbs -read_bundle` 照样打印完整条目、
+         应用照样启动，只有访达菜单里永远没有那两项。Keka 与 Terminal 都带着这个键。
+
+         NSTextContent = FilePath 的语义是「当前内容是一段文件路径」，正是访达选中文件
+         的场景，也正是系统给服务分组用的依据（菜单里会落到「文件和文件夹」一组）。
+
+         NSMenuItem 里的语言键按**最具体者胜出**解析，顺序实测为
+             zh_CN  >  zh-Hans  >  en  >  default
+         （系统语言 zh-Hans-CN 上四个变体一次对比得出）。
+         ⚠️ 因此**只写 default + en 会让中文系统显示英文**（实测如此）。要中文正确，
+         必须显式写 zh-Hans / zh_CN；default 只负责兜底给未列出的语言。
+         另：服务菜单条目数有上限，超出部分会被静默丢弃（实测约 12 项）——做这类对比
+         实验时务必先清掉干扰项，否则会把「被截断」误判成「被过滤」。 -->
     <key>NSServices</key>
     <array>
 
@@ -259,6 +280,12 @@
             <key>NSMenuItem</key>
             <dict>
                 <key>default</key>
+                <string>用 7-Zip 压缩</string>
+                <key>en</key>
+                <string>Compress with 7-Zip</string>
+                <key>zh-Hans</key>
+                <string>用 7-Zip 压缩</string>
+                <key>zh_CN</key>
                 <string>用 7-Zip 压缩</string>
             </dict>
             <key>NSMessage</key>
@@ -269,12 +296,23 @@
             <array>
                 <string>public.item</string>
             </array>
+            <key>NSRequiredContext</key>
+            <dict>
+                <key>NSTextContent</key>
+                <string>FilePath</string>
+            </dict>
         </dict>
 
         <dict>
             <key>NSMenuItem</key>
             <dict>
                 <key>default</key>
+                <string>用 7-Zip 解压</string>
+                <key>en</key>
+                <string>Extract with 7-Zip</string>
+                <key>zh-Hans</key>
+                <string>用 7-Zip 解压</string>
+                <key>zh_CN</key>
                 <string>用 7-Zip 解压</string>
             </dict>
             <key>NSMessage</key>
@@ -285,6 +323,11 @@
             <array>
                 <string>public.item</string>
             </array>
+            <key>NSRequiredContext</key>
+            <dict>
+                <key>NSTextContent</key>
+                <string>FilePath</string>
+            </dict>
         </dict>
 
     </array>

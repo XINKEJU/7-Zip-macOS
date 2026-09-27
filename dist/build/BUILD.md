@@ -706,6 +706,86 @@ NSString * const Z7ListSelPreview = @"doPreview:";   // 拼错？编译器不会
 
 负向测试是本项目对门禁的一贯要求：把 `doPreview:` 改成 `doPreveiw:`，构建必须红。
 
+### 坑点 33：`NSServices` 缺 `NSRequiredContext` 时，访达「服务」里永远不会出现
+
+`Info.plist` 里声明访达服务，**只写 `NSSendTypes` / `NSSendFileTypes` 是不够的**。
+本移植从首发起就带着这两条声明，`pbs` 也登记得好好的，但服务在访达菜单里从未出现过。
+
+实测（macOS 27，在同一个 `Info.plist` 内放只差单个键的变体、一次启动对比，访达里选中
+文件后真正展开「服务」菜单逐个看）：
+
+| 声明 | 是否出现 |
+|---|---|
+| `NSSendFileTypes=(public.item)`，无 `NSRequiredContext` | **不出现** |
+| 同上 **＋** `NSRequiredContext={NSTextContent=FilePath}` | **出现** |
+| `NSSendTypes=(NSFilenamesPboardType)`，无 `NSRequiredContext` | **不出现** |
+| 两个 send 键都写，无 `NSRequiredContext` | **不出现** |
+
+即：**决定因素是 `NSRequiredContext`，与用哪个 send 键无关**。Keka 与系统自带的
+Terminal 都带着它。正确的写法：
+
+```xml
+<key>NSRequiredContext</key>
+<dict>
+    <key>NSTextContent</key>
+    <string>FilePath</string>
+</dict>
+```
+
+`NSTextContent = FilePath` 的语义是「当前内容是一段文件路径」，系统据此把条目归到
+「文件和文件夹」一组。
+
+**这条失败路径完全静默**，所以四道取证全都指向「正常」：`pbs` 照样登记成功、
+`pbs -read_bundle <app>` 照样打印出完整条目、`pbs -dump_pboard` 里能查到、
+应用照常启动 —— 只有菜单里没有。排查时不要以「服务库里查得到」当作「服务可用」。
+
+同一处还有两个静默陷阱：
+
+- **`NSMenuItem` 的语言键按「最具体者胜出」解析**，实测顺序为
+  `zh_CN` > `zh-Hans` > `en` > `default`。因此只写 `default` + `en` 会让**中文系统
+  显示英文**（`en` 压过 `default`）；反过来只写中文键，英文系统会露出中文。
+  两边都要显式写，`default` 只负责兜底给未列出的语言。
+- **服务菜单有条目数上限**（实测约 12 项），超出部分被静默丢弃。做上面这类对比实验时
+  必须先清掉干扰项（删掉探针 bundle 并 `pbs -flush`），否则会把「被截断」误判成
+  「被过滤」——我第一次实验就差点因此下错结论。
+
+排查手法（可复现，无需管理员权限）：
+
+```bash
+# 1. 直接问系统怎么解析这个 bundle（对照一个已知可用的 App）
+/System/Library/CoreServices/pbs -read_bundle /Applications/7-Zip.app
+/System/Library/CoreServices/pbs -read_bundle /Applications/Keka.app
+
+# 2. 看服务库里的实际登记内容
+/System/Library/CoreServices/pbs -dump_pboard | grep -A14 org.7-zip.macos.app
+
+# 3. 改完声明后必须刷新缓存，否则 pbs 不会重新读取
+/System/Library/CoreServices/pbs -flush
+
+# 4. 验证：访达里选中文件 → 点开菜单栏「访达 → 服务」（这一步必须真的把菜单
+#    「点开」再读，见下）
+osascript -e 'tell application "System Events" to tell process "Finder"
+    click menu bar item "访达" of menu bar 1
+    delay 0.8
+    click menu item "服务" of menu 1 of menu bar item "访达" of menu bar 1
+    delay 2.5
+    return name of every menu item of menu 1 of menu item "服务" of menu 1 of menu bar item "访达" of menu bar 1
+  end tell' | tr ',' '\n' | grep 7-Zip
+```
+
+⚠️ **必须真正点开菜单再读**：不展开、直接 `AX` 去读子菜单，同一时刻可能拿到
+「没有服务可应用 / 服务设置…」的占位内容 —— 那时服务其实是存在的，读到的却是空。
+本次排查中这个假象出现过一次。另外读取前要确保**访达是最前应用**，否则读到的同样是
+空（菜单是按当前前后台状态现场构建的）。
+
+⚠️ **`NSRequiredContext` 缺失这件事，靠本地构建无法自测**：登记的服务指向的是
+LaunchServices 认定的「首选副本」（本机是 `/Applications/7-Zip.app`），
+`dist/` 里的新构建**不会**顶替它。因此改完 `Info.plist` 要么重新安装，要么把新构建
+复制成另一个 bundle id 的副本单独验证（本次即用后者端到端验证通过）。`make appcheck`
+里的静态断言（每个服务条目必须带 `NSRequiredContext.NSTextContent=FilePath`、
+必须同时有中英语言键、`NSMessage` 必须能在源码里找到对应处理器）就是为防止将来又被
+改回去而设的。
+
 ## 二·补：内嵌引擎库的构建顺序
 
 应用依赖三个产物，顺序固定：
