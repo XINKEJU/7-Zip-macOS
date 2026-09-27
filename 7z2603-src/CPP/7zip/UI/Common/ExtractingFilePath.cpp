@@ -1,5 +1,16 @@
 // ExtractingFilePath.cpp
 
+// ---------------------------------------------------------------------------
+// MODIFIED FOR THE macOS PORT - 2026-09-21
+//   This file is NOT byte-identical to upstream 7-Zip 26.03.
+//   Change: extracted paths are normalized to Unicode NFD on macOS, matching the form the native file system
+//     and Spotlight already use
+//   All other upstream code is untouched. The byte-exact change set is
+//   dist/build/upstream-macos.patch in https://github.com/XINKEJU/7-Zip-macOS
+//   7-Zip Copyright (C) 1999-2026 Igor Pavlov.
+//   Licensed under GNU LGPL-2.1-or-later with the unRAR license restriction.
+// ---------------------------------------------------------------------------
+
 #include "StdAfx.h"
 
 #include "../../../Common/Wildcard.h"

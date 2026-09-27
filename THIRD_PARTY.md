@@ -3,14 +3,18 @@
 本文件随本移植的**全部**发行方式一同分发，应用内可通过
 **7-Zip → 致谢与许可…** 查看。
 
-| 发行方式 | 本文件的位置 |
-| --- | --- |
-| 集成安装包 `7-Zip-26.03-macOS.pkg` / `.dmg` | `/usr/local/share/doc/7zip/THIRD_PARTY.md` |
-| 应用包 `7-Zip.app` | `Contents/Resources/THIRD_PARTY.md` |
-| Homebrew 分发包（`package.sh` 产出） | `share/doc/7zip/THIRD_PARTY.md` |
+| 发行方式 | 归属声明的位置 | 许可正文的位置 |
+| --- | --- | --- |
+| 集成安装包 `7-Zip-26.03-macOS.pkg` / `.dmg` | `/usr/local/share/doc/7zip/THIRD_PARTY.md` | 同目录（`copying.txt`、`License.txt`、`unRarLicense.txt`、`third-party/`）；应用副本另在 `Contents/Resources/licenses/` |
+| 应用包 `7-Zip.app` | `Contents/Resources/THIRD_PARTY.md` | `Contents/Resources/licenses/`（`COPYING`、`License.txt`、`unRarLicense.txt`、`third-party/`） |
+| Homebrew 分发包（`package.sh` 产出） | `share/doc/7zip/THIRD_PARTY.md` | `share/doc/7zip/`（`copying.txt`、`License.txt`、`unRarLicense.txt`、`third-party/`） |
 
-三个通道的副本内容一致；打包脚本在文件缺失时会直接失败，而不是发行一个
-缺少归属声明的产物。
+三个通道的副本内容一致；打包脚本在归属声明或任一许可正文缺失时会直接失败，
+而不是发行一个缺少归属或正文的产物。
+
+`.app` **单独**被拷贝分发时也自带全部许可正文 —— 这是刻意的：用户经常只取
+`7-Zip.app` 而不装安装包，若正文只放在安装包的 doc 目录里，那条分发路径就拿不到
+LGPL 全文与 unRAR 限制。`make appcheck` 会逐项断言这些文件确实在包内。
 
 本移植（macOS 前端 + 内嵌引擎）以上游 7-Zip 26.03 为基础，整体按
 **GNU LGPL-2.1-or-later** 分发，并附带下文的 unRAR 许可限制。
@@ -33,6 +37,12 @@
 命令行工具 `7zz` 由 `CPP/7zip/Bundles/Alone2` 编译，供命令行安装包与
 沙盒化的 Quick Look 预览扩展使用。
 
+> ⚠️ **发行出去的 `lib7z.dylib` 是「修改过的 7-Zip」，不是上游原样副本。**
+> 仓库内的上游源码树带一份 8 改 2 增、共 10 个文件的 macOS 适配补丁
+> （逐字节变更集：`dist/build/upstream-macos.patch`），其中被修改的翻译单元
+> 会被编进该动态库。LGPL-2.1 §1 要求就这类修改作出声明，故在此明示；
+> 每个被改文件头部也带「已修改 + 日期」提示。
+
 ### 1.1 引擎内部的许可构成
 
 | 文件组 | 许可 |
@@ -44,34 +54,63 @@
 | 标注 "public domain" 的文件 | 公有领域 |
 | 其余全部文件 | GNU LGPL |
 
+### 1.2 本移植对上游源码的修改（10 个文件）
+
+上游源码树**不是**逐字节原样的上游发布包。以下改动全部由
+`dist/build/upstream-macos.patch` 描述，可施加到官方 tarball 上逐字节复现，
+也可用 `dist/build/regen_upstream_patch.sh` 重新生成：
+
+| 文件 | 改动 |
+| --- | --- |
+| `CPP/Common/StringConvert.cpp` | 非 UTF-8 字节串按 GB18030 解码（中文 Windows 压出的 zip 文件名全靠它） |
+| `CPP/7zip/UI/Common/ExtractingFilePath.cpp` | 解压时按 Unicode NFD 规范化名字 |
+| `CPP/7zip/UI/Common/ArchiveExtractCallback.cpp` | 解压后传播 macOS 隔离属性（quarantine） |
+| `CPP/7zip/UI/Common/ArchiveExtractCallback.h` | 上述传播钩子的声明 |
+| `CPP/7zip/7zip_gcc.mak` | `MacOsNative.o` 编译规则 |
+| `CPP/7zip/Bundles/Alone2/makefile.gcc` | 把 `MacOsNative.o` 加入 `7zz` 目标 |
+| `CPP/7zip/var_mac_arm64.mak`、`var_mac_x64.mak` | macOS 原生语义所需的构建变量 |
+| `CPP/7zip/UI/Common/MacOsNative.h`、`MacOsNative.cpp` | **新增文件**（非上游），xattr 与名字规范化实现 |
+
+**这些改动不涉及任何压缩、解压、加密或校验算法** —— 全部是 macOS 文件系统语义
+适配与构建接线。
+
 BSD 组件的完整文本位于 `7z2603-src/DOC/`。
 
-### 1.2 本移植新增的外部压缩库
+### 1.3 本移植新增的外部压缩库
 
 上游 7-Zip 26.03 只带 Zstandard **解码器**，且完全没有 LZ4 / Brotli / lzip / Snappy。
-本移植在不改动上游源码的前提下补上了这些格式（五种格式全部**可创建 + 可解压**），
-实现放在 `dist/engine/Z7ExtCodec.cpp`，算法本身调用下列第三方库；Snappy 没有合适
-的库，算法为自实现，因此不占外部依赖。
+本移植在**上游树外**补上了这些格式（五种格式全部**可创建 + 可解压**）：
+新增文件全部位于 `dist/engine/`，**不修改上游任何编解码实现**；算法本身调用下列
+第三方库，Snappy 没有合适的库，算法为自实现，因此不占外部依赖。
 
 这些库以**静态库**形式链入应用主程序（`7-Zip.app/Contents/MacOS/7-Zip`），
 因此发行包不会多出任何动态库依赖，`.app` 与 Quick Look 扩展仍自包含。
 链入与否由构建脚本 `dist/engine/ext_codecs.sh` 探测决定：库缺失时对应格式直接
 不编译进来（构建照常成功，只是少一种格式），因此下表并非每个构建都包含。
 
-| 库 | 版本（本机构建） | 版权 | 许可 |
-| --- | --- | --- | --- |
-| Zstandard（`libzstd.a`） | 1.5.7 | Meta Platforms, Inc. 及贡献者 | BSD 3-clause |
-| LZ4（`liblz4.a`） | 1.10.0 | Yann Collet | BSD 2-clause |
-| Brotli（`libbrotli{dec,enc,common}.a`） | 视构建环境 | Google LLC | MIT |
-| liblzma / XZ Utils（`liblzma.a`） | 5.8.3 | Lasse Collin 及贡献者 | 0BSD（`liblzma` 部分） |
+| 库 | 版本（本机构建） | 版权 | 许可 | 随包分发的正文 |
+| --- | --- | --- | --- | --- |
+| Zstandard（`libzstd.a`） | 1.5.7 | Meta Platforms, Inc. 及贡献者 | BSD 3-clause | `third-party/zstd-BSD-3-Clause.txt` |
+| LZ4（`liblz4.a`） | 1.10.0 | Yann Collet | BSD 2-clause | `third-party/lz4-BSD-2-Clause.txt` |
+| Brotli（`libbrotli{dec,enc,common}.a`） | 1.2.0 | Google LLC | MIT | `third-party/brotli-MIT.txt` |
+| liblzma / XZ Utils（`liblzma.a`） | 5.8.3 | Lasse Collin 及贡献者 | 0BSD（`liblzma` 部分） | `third-party/liblzma-0BSD.txt` |
 
-四者的许可均为宽松许可，允许以二进制形式再分发，条件是保留版权声明与许可文本。
-上游许可文本见各自项目主页：
+四者的许可均为宽松许可，允许以二进制形式再分发，条件是**保留版权声明与许可文本**。
+BSD 与 MIT 明确要求复现版权声明与许可正文，因此上表末列的正文**随每个发行通道
+一并分发** —— 只列出项目主页 URL 并不构成满足。0BSD 不附带任何条件，其正文
+随包仅出于透明。正文取自本机构建所用的那份库（`/opt/homebrew/Cellar/<库>/…`），
+上游也可见于各自项目主页：
 
 - Zstandard — <https://github.com/facebook/zstd/blob/dev/LICENSE>
 - LZ4 — <https://github.com/lz4/lz4/blob/dev/LICENSE>
 - Brotli — <https://github.com/google/brotli/blob/master/LICENSE>
 - XZ Utils / liblzma — <https://github.com/tukaani-project/xz/blob/master/COPYING>
+
+**`libzstd.a` 内部还编入了 xxHash**（发行二进制中实测有 38 个 `XXH*` 符号）。
+xxHash 采用与 zstd 同一份 BSD-style 许可，其文件头另注
+`Copyright (c) Yann Collet - Meta Platforms, Inc`，因此 `zstd-BSD-3-Clause.txt`
+的正文同时覆盖它。`libzstd.a` 里另有 `divsufsort`（MIT），但实测**未被链接进
+发行二进制**（符号与字符串均为 0 处），故不构成额外归属义务。
 
 > **Snappy 不在此表内。** 上游与 Homebrew 都没有可直接静态链入的 snappy 编解码封装，
 > 因此裸格式与分帧格式（`.sz`）的编解码由本移植**自行实现**（`Z7ExtCodec.cpp` 内的
@@ -99,8 +138,12 @@ RAR 解压引擎源自 unRAR 程序的源代码，其版权归 Alexander Roshal 
 
 **据此：本软件可以解压 RAR 归档，但不得用于开发 RAR（WinRAR）兼容的压缩器。**
 
-完整文本：`7z2603-src/DOC/unRarLicense.txt`，安装后位于
-`/usr/local/share/doc/7zip/unRarLicense.txt`。
+完整文本：源码树 `7z2603-src/DOC/unRarLicense.txt`；安装后位于
+`/usr/local/share/doc/7zip/unRarLicense.txt`（Homebrew 分发包在
+`share/doc/7zip/unRarLicense.txt`），**应用包内也带一份**：
+`7-Zip.app/Contents/Resources/licenses/unRarLicense.txt`。上文的限制同样写在
+每个发行包的源码注释与文档中，以满足该许可「clearly stated in the documentation
+and source comments」的要求。
 
 ---
 

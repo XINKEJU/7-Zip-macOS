@@ -108,6 +108,36 @@ else
     echo "缺少 $THIRD，应用包将不满足许可完整性要求" >&2
     exit 1
 fi
+
+# 许可正文（同上，P5）。应用是**可以单独分发**的 —— 用户经常只把 .app 拷走，
+# 所以 LGPL 全文、上游的复合许可声明与 unRAR 限制必须随 .app 一起走。此前
+# Resources/ 里只有 THIRD_PARTY.md，而它指向的 ./LICENSE 与 7zXXXX-src/DOC/
+# 都在 .app 之外，那条分发路径等于拿不到许可正文。缺正文直接失败，不发行缺口。
+LICDIR="$APP/Contents/Resources/licenses"
+mkdir -p "$LICDIR/third-party"
+
+SRC_UP="$(sh "$DIST/build/upstream_dir.sh")"
+
+require_copy() {
+    if [ -f "$1" ]; then
+        cp -f "$1" "$2"
+    else
+        echo "缺少许可正文：$1（应用包将不满足许可完整性要求）" >&2
+        exit 1
+    fi
+}
+
+# 仓库根的 LICENSE 就是 GNU LGPL-2.1（与上游 DOC/copying.txt 逐字节相同）。
+require_copy "$DIST/../LICENSE"                  "$LICDIR/COPYING"
+require_copy "$SRC_UP/DOC/License.txt"           "$LICDIR/License.txt"
+require_copy "$SRC_UP/DOC/unRarLicense.txt"      "$LICDIR/unRarLicense.txt"
+
+# 静态链入的第三方库（zstd / lz4 / brotli / liblzma）的正文。BSD 与 MIT 要求
+# 二进制分发时复现版权声明与许可文本，只给项目 URL 是不够的。
+for f in "$DIST"/resources/third-party/*.txt; do
+    [ -f "$f" ] || { echo "缺少第三方许可正文目录：$DIST/resources/third-party" >&2; exit 1; }
+done
+cp -f "$DIST"/resources/third-party/*.txt "$LICDIR/third-party/"
 chmod 755 "$APP/Contents/MacOS/7-Zip" \
           "$APP/Contents/Frameworks/lib7z.dylib"
 printf 'APPL????' > "$APP/Contents/PkgInfo"

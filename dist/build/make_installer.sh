@@ -131,6 +131,14 @@ else
     echo "缺少 THIRD_PARTY.md，安装包将不满足许可完整性要求" >&2
     exit 1
 fi
+
+# 静态链入的 zstd / lz4 / brotli / liblzma 的许可正文（BSD/MIT 要求二进制
+# 分发时复现版权声明与许可文本，THIRD_PARTY.md 里的 URL 不能替代正文）。
+install -d "$DOC/third-party"
+for f in "$DIST"/resources/third-party/*.txt; do
+    [ -f "$f" ] || { echo "缺少第三方许可正文目录：$DIST/resources/third-party" >&2; exit 1; }
+done
+install -m 0644 "$DIST"/resources/third-party/*.txt "$DOC/third-party/"
 install -m 0644 "$HERE/README-macos.txt"    "$DOC/README-macos.txt"
 install -m 0644 "$HERE/BUILD.md"            "$DOC/BUILD.md"
 install -m 0755 "$HERE/uninstall.sh"        "$DOC/uninstall.sh"
@@ -272,10 +280,25 @@ cp "$HERE/uninstall.sh"         "$DMGSTAGE/uninstall.sh"
 chmod 755 "$DMGSTAGE/uninstall.sh"
 
 # hdiutil 已带 -ov（覆盖），无需预先删除
+#
+# ⚠️ 必须显式给 -size，不能让 hdiutil 自己估。
+# 实测（2026-09-27）：自动估尺寸时输出体积有**台阶**，内容只要多出几 KB 就能让
+# 成品从 4.05 MB 跳到 4.94 MB —— 只因为内嵌 pkg 从 3,989,090 涨到 4,011,978
+# 字节（给 .app 补 LGPL/unRAR/第三方许可正文所致），DMG 却大了 890 KB。
+# 原因是自动估出的卷偏小，稀疏布局的元数据压不下去。
+# 显式指定一个**宽裕**的大小时，卷内空闲区域全是零，UDZO 把它压没了：
+#   内容 3940 KiB 时，卷 = 内容+1 MiB → 4,262,709（更差）
+#                    卷 = 内容+4 MiB → 4,055,028
+#                    卷 = 内容+16 MiB → 4,049,604（趋近下限）
+# 故取「内容 + 8 MiB」：既远离台阶，又随内容增长自动扩容，不会哪天突然装不下。
+# 卷偏大不花代价（只有压缩后的 UDZO 会被分发），偏小才会踩台阶。
+DMG_SLACK_KB=8192
+DMG_SIZE_KB=$(( $(du -sk "$DMGSTAGE" | awk '{print $1}') + DMG_SLACK_KB ))
 hdiutil create -quiet \
          -volname "7-Zip $VERSION" \
          -srcfolder "$DMGSTAGE" \
          -fs HFS+ \
+         -size "${DMG_SIZE_KB}k" \
          -format UDZO \
          -ov \
          "$DMG"
@@ -350,8 +373,16 @@ payload_has() {   # $1 = 组件包名, $2 = 载荷内路径
         || { echo "   $1 载荷缺少 $2" >&2; exit 1; }
 }
 payload_has "7-Zip-cli.pkg" "usr/local/share/doc/7zip/THIRD_PARTY.md"
+payload_has "7-Zip-cli.pkg" "usr/local/share/doc/7zip/copying.txt"
+payload_has "7-Zip-cli.pkg" "usr/local/share/doc/7zip/unRarLicense.txt"
+payload_has "7-Zip-cli.pkg" "usr/local/share/doc/7zip/third-party/zstd-BSD-3-Clause.txt"
+payload_has "7-Zip-cli.pkg" "usr/local/share/doc/7zip/third-party/brotli-MIT.txt"
 payload_has "7-Zip-app.pkg" "Applications/7-Zip.app/Contents/Resources/THIRD_PARTY.md"
-echo "   [ok]   两类载荷均含 THIRD_PARTY.md"
+payload_has "7-Zip-app.pkg" "Applications/7-Zip.app/Contents/Resources/licenses/COPYING"
+payload_has "7-Zip-app.pkg" "Applications/7-Zip.app/Contents/Resources/licenses/License.txt"
+payload_has "7-Zip-app.pkg" "Applications/7-Zip.app/Contents/Resources/licenses/unRarLicense.txt"
+payload_has "7-Zip-app.pkg" "Applications/7-Zip.app/Contents/Resources/licenses/third-party/zstd-BSD-3-Clause.txt"
+echo "   [ok]   两类载荷均含 THIRD_PARTY.md、LGPL 全文、unRAR 限制与第三方许可正文"
 
 tar -xf "$SELF/product/7-Zip-cli.pkg/Payload" -C "$SELF/out-cli"
 tar -xf "$SELF/product/7-Zip-app.pkg/Payload" -C "$SELF/out-app"

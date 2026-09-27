@@ -42,6 +42,21 @@ head1 "1. 包结构"
 [ -f "$APP/Contents/Resources/THIRD_PARTY.md" ] \
     && ok "第三方归属文档已随包分发" || bad "缺少 THIRD_PARTY.md（应用内许可入口会回退到内置摘要）"
 
+# 许可正文必须随 .app 一起走：应用是可以被单独拷贝分发的，只留一份
+# THIRD_PARTY.md 而把 LGPL / unRAR / 第三方正文留在安装包里的做法，对
+# 「只拿 .app」的用户等于没给。LGPL-2.1 §1 与 BSD/MIT 都要求这些正文随二进制。
+for f in licenses/COPYING licenses/License.txt licenses/unRarLicense.txt \
+         licenses/third-party/zstd-BSD-3-Clause.txt \
+         licenses/third-party/lz4-BSD-2-Clause.txt \
+         licenses/third-party/brotli-MIT.txt \
+         licenses/third-party/liblzma-0BSD.txt; do
+    [ -f "$APP/Contents/Resources/$f" ] \
+        && ok "许可正文已随包分发：$f" || bad "缺少 $APP/Contents/Resources/$f"
+done
+# 正文不能是空壳。
+[ -s "$APP/Contents/Resources/licenses/COPYING" ] \
+    && ok "LGPL 正文非空" || bad "licenses/COPYING 为空"
+
 # 7zz 已全面移除（2026-09-24）。此前 appex 内嵌了一份 7zz 并签以
 # com.apple.security.inherit，但该权限属**受限权限**，ad-hoc 签名（本项目的
 # 分发方式，TeamIdentifier=not set）无法使其生效。实测扩展自身日志：

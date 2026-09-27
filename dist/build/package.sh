@@ -99,6 +99,14 @@ else
     exit 1
 fi
 
+# 静态链入的 zstd / lz4 / brotli / liblzma 的许可正文。BSD 与 MIT 要求二进制
+# 分发时复现版权声明与许可文本 —— THIRD_PARTY.md 里的项目 URL 不能替代正文。
+install -d "$STAGE/share/doc/7zip/third-party"
+for f in "$DIST"/resources/third-party/*.txt; do
+    [ -f "$f" ] || { echo "缺少第三方许可正文目录：$DIST/resources/third-party" >&2; exit 1; }
+done
+install -m 0644 "$DIST"/resources/third-party/*.txt "$STAGE/share/doc/7zip/third-party/"
+
 echo "== 3. 归档 =="
 # 归档由 mk_tarball.py 完成，而不是 /usr/bin/tar。macOS 自带的是 bsdtar
 # 3.5.3，既不支持 GNU tar 的 --sort=name 也不支持 --mtime，因此无法在命令行

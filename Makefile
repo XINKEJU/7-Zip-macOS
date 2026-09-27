@@ -46,7 +46,7 @@ DEPLOY  ?= 11.0
 VERSION := 26.03
 
 .DEFAULT_GOAL := all
-.PHONY: all engine enginebin dylib bridge app ql pkg tarball test objc-test appcheck verify check upstream upstream-patch clean distclean help
+.PHONY: all engine enginebin dylib bridge app ql pkg tarball test objc-test appcheck verify check upstream upstream-patch upstream-patch-regen clean distclean help
 
 # ---------------------------------------------------------------------------
 # all — the default pipeline
@@ -228,6 +228,26 @@ upstream-patch:
 	sh '$(ROOT)/dist/build/apply_upstream_patch.sh' '$(SRC)' --check
 	@printf '\n补丁清单（%s）：\n' '$(notdir $(SRC))'
 	@grep '^diff -ruN a/' '$(ROOT)/dist/build/upstream-macos.patch' | sed 's|^diff -ruN a/||;s| b/.*||' | sed 's/^/   /'
+
+# ---------------------------------------------------------------------------
+# upstream-patch-regen — 由「官方原版源码」重新生成 macOS 补丁
+#
+# **改过上游源码树就必须跑一次**。补丁与树一旦分叉，升级上游时施加的是旧改动，
+# 而 --check 的标记仍在，问题看不出来。脚本自带自校验：把新补丁施加到干净原版上，
+# 要求结果与当前工作树逐字节一致；并用固定时间戳保证补丁文件本身可复现。
+#
+# 需要一个干净的原版树：
+#   tar -xJf 7z2603-src.tar.xz -C /tmp/z7pristine
+#   make upstream-patch-regen PRISTINE=/tmp/z7pristine
+# ---------------------------------------------------------------------------
+upstream-patch-regen:
+	@if [ -z '$(PRISTINE)' ]; then \
+	    printf '用法: make upstream-patch-regen PRISTINE=<干净原版源码目录>\n'; \
+	    printf '  例如: tar -xJf 7z2603-src.tar.xz -C /tmp/z7pristine && \\\n'; \
+	    printf '        make upstream-patch-regen PRISTINE=/tmp/z7pristine\n'; \
+	    exit 2; \
+	fi
+	sh '$(ROOT)/dist/build/regen_upstream_patch.sh' '$(PRISTINE)' '$(SRC)'
 
 # ---------------------------------------------------------------------------
 # clean / distclean

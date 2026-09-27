@@ -1,3 +1,13 @@
+# ---------------------------------------------------------------------------
+# MODIFIED FOR THE macOS PORT - 2026-09-21
+#   This file is NOT byte-identical to upstream 7-Zip 26.03.
+#   Change: adds a compile rule for MacOsNative.o
+#   All other upstream code is untouched. The byte-exact change set is
+#   dist/build/upstream-macos.patch in https://github.com/XINKEJU/7-Zip-macOS
+#   7-Zip Copyright (C) 1999-2026 Igor Pavlov.
+#   Licensed under GNU LGPL-2.1-or-later with the unRAR license restriction.
+# ---------------------------------------------------------------------------
+
 # USE_CLANG=1
 # USE_ASM = 1
 # IS_X64 = 1
