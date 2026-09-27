@@ -19,7 +19,7 @@ __MACOSX/
 
 # Finder's custom-folder-icon file. Deliberately anchored to the repository
 # root: the conventional unanchored glob "Icon?" would also match the upstream
-# source directory 7z2603-src/CPP/7zip/Archive/Icons/ and silently drop the 27
+# source directory 7zXXXX-src/CPP/7zip/Archive/Icons/ and silently drop the 27
 # asset files inside it.
 /Icon?
 
@@ -27,17 +27,19 @@ __MACOSX/
 .workbuddy/
 
 # --- upstream 7-Zip source archives ---------------------------------------
-# The unpacked tree 7z2603-src/ is vendored, so the archives are redundant.
+# The unpacked tree 7zXXXX-src/ is vendored, so the archives are redundant.
+# 用 7z*-src 而不是写死版本号：升级上游（dist/build/upgrade_upstream.sh）之后
+# 不该还需要回来改忽略规则，漏改的后果是把新版本的源码归档误提交进仓库。
 # Re-download from https://github.com/ip7z/7zip/releases if you need them.
-7z2603-src.7z
-7z2603-src.tar.xz
-7z2603-src.tar.bz2
-7z2603-src.zip
+7z*-src.7z
+7z*-src.tar.xz
+7z*-src.tar.bz2
+7z*-src.zip
 
 # --- upstream build output ------------------------------------------------
 # Upstream keeps compiler products in <target>/b/. One was produced locally
 # while building the engine; it must never enter the repository.
-7z2603-src/**/b/
+7z*-src/**/b/
 
 # --- port: command line engine --------------------------------------------
 dist/build/7zz

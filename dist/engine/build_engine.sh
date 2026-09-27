@@ -23,7 +23,7 @@ set -e
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 DIST="$(cd "$HERE/.." && pwd)"
-SRC="${1:-$DIST/../7z2603-src}"
+SRC="${1:-$(sh "$DIST/build/upstream_dir.sh")}"
 SRC="$(cd "$SRC" && pwd)"
 
 OUT="$DIST/lib"

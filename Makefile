@@ -21,7 +21,11 @@
 SHELL := /bin/sh
 
 ROOT    := $(patsubst %/,%,$(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
-SRC     := $(ROOT)/7z2603-src
+# 上游源码目录由 dist/build/upstream_dir.sh 解析（优先 $Z7_SRC，否则取版本号最高
+# 的 7zXXXX-src/）。这样升级上游只需运行 upgrade_upstream.sh，不必来改这里 ——
+# 以前这个字符串硬编码在 5 个文件里，漏改一处的症状是"找不到某个上游文件"，
+# 很难联想到是升级没做全。
+SRC     := $(shell sh $(ROOT)/dist/build/upstream_dir.sh)
 DIST    := $(ROOT)/dist
 BUNDLE  := $(SRC)/CPP/7zip/Bundles/Alone2
 BUILD   := $(DIST)/build
@@ -42,7 +46,7 @@ DEPLOY  ?= 11.0
 VERSION := 26.03
 
 .DEFAULT_GOAL := all
-.PHONY: all engine enginebin dylib bridge app ql pkg tarball test objc-test appcheck verify check clean distclean help
+.PHONY: all engine enginebin dylib bridge app ql pkg tarball test objc-test appcheck verify check upstream upstream-patch clean distclean help
 
 # ---------------------------------------------------------------------------
 # all — the default pipeline
@@ -197,6 +201,35 @@ check: verify
 	codesign --verify --deep --strict '$(APP)' && echo '   7-Zip.app 签名校验通过'
 
 # ---------------------------------------------------------------------------
+# upstream — 把上游引擎升级到指定版本
+#
+# 下载官方源码 → 校验（xz 完整性 / 版本号 / 结构）→ 解包到 7zXXXX-src/
+# → 自动施加本移植的 macOS 补丁。**不会**删除旧源码树（打印 git rm 命令由人执行），
+# 也不会碰 pkg/tarball。
+#
+# 用法: make upstream NEW=26.04          只做升级（含补丁）
+#       make upstream NEW=26.04 GATE=1   升级后立刻重建引擎并跑全部门禁
+# ---------------------------------------------------------------------------
+upstream:
+	@if [ -z '$(NEW)' ]; then \
+	    printf '用法: make upstream NEW=<版本号> [GATE=1]\n  例如: make upstream NEW=26.04 GATE=1\n'; \
+	    exit 2; \
+	fi
+	sh '$(ROOT)/dist/build/upgrade_upstream.sh' '$(NEW)' $(if $(GATE),--gate,)
+
+# ---------------------------------------------------------------------------
+# upstream-patch — 校验当前上游源码树是否已带上本移植的 macOS 补丁
+#
+# 补丁是承重的（GB18030 文件名解码 / NFD 规范化 / 隔离属性传播），缺了它
+# **构建照样成功但行为悄悄退化**。build_dylib.sh 每次构建前也会自动校验一次，
+# 这个目标用于单独复核。
+# ---------------------------------------------------------------------------
+upstream-patch:
+	sh '$(ROOT)/dist/build/apply_upstream_patch.sh' '$(SRC)' --check
+	@printf '\n补丁清单（%s）：\n' '$(notdir $(SRC))'
+	@grep '^diff -ruN a/' '$(ROOT)/dist/build/upstream-macos.patch' | sed 's|^diff -ruN a/||;s| b/.*||' | sed 's/^/   /'
+
+# ---------------------------------------------------------------------------
 # clean / distclean
 # ---------------------------------------------------------------------------
 clean:
@@ -235,6 +268,9 @@ help:
 	@printf '  appcheck    应用包验收（依赖解析 / 部署目标 / 签名 / 真实启动）\n'
 	@printf '  verify      离线校验脚本逻辑与公式一致性\n'
 	@printf '  check        verify + 产物校验和、DMG 完整性、应用签名\n'
+	@printf '  upstream    升级上游引擎（下载→校验→解包→施加移植补丁）\n'
+	@printf '  upstream-patch 校验上游源码是否已带移植补丁\n'
 	@printf '  clean       删除构建产物\n'
 	@printf '  distclean   clean + 删除上游编译目录 b/\n'
 	@printf '\n变量: JOBS=%s（并行度）  DEPLOY=%s（最低系统版本）\n' '$(JOBS)' '$(DEPLOY)'
+	@printf '      NEW=%s（make upstream 的目标版本，如 26.04）\n' '$(NEW)'

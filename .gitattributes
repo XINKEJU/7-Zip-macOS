@@ -45,7 +45,10 @@ dist/resources/License.txt  -text -eol
 # diff and make the vendored copy diverge from the signed release tarball.
 # -text disables normalisation, -eol removes the eol=lf inherited from the
 # *.txt rule above, so nothing can reintroduce conversion.
-7z2603-src/**  -text -eol
+#
+# 用 7z*-src 而不是写死版本号：升级上游之后不该还要回来改这里，漏改的后果是
+# 整棵新源码树被规范化换行、与上游发布的 tarball 不再逐字节一致。
+7z*-src/**  -text -eol
 
 # --- linguist: keep the vendored tree out of language statistics -----------
-7z2603-src/**  linguist-vendored
+7z*-src/**  linguist-vendored

@@ -28,7 +28,7 @@ set -e
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 DIST="$(cd "$HERE/.." && pwd)"
-SRC="$DIST/../7z2603-src"
+SRC="$(sh "$DIST/build/upstream_dir.sh")"
 VERSION="26.03"
 PKGID_CLI="com.7-zip.7zz"
 PKGID_APP="com.7-zip.7zip"

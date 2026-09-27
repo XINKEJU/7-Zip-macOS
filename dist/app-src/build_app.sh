@@ -85,6 +85,9 @@ echo "== 4. 组装 .app 包 =="
 # 该文件未被签名而失败，因此这一步本身就是"无残留"的守卫。
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Frameworks"
 cp -f "$BUILD/app-arm64"        "$APP/Contents/MacOS/7-Zip"
+# 剥离局部符号（−8.0%）。位置有讲究：必须在第 7 步的 codesign 之前，否则会破坏
+# 已封存的签名。lib7z.dylib 的剥离在 build_dylib.sh 里做过了，不重复。
+sh "$DIST/build/strip_local.sh" "$APP/Contents/MacOS/7-Zip"
 cp -f "$HERE/Info.plist"         "$APP/Contents/Info.plist"
 cp -f "$ICNS"                    "$APP/Contents/Resources/7zip.icns"
 cp -f "$LIB/lib7z.dylib"         "$APP/Contents/Frameworks/lib7z.dylib"

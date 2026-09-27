@@ -1,0 +1,409 @@
+diff -ruN a/CPP/7zip/7zip_gcc.mak b/CPP/7zip/7zip_gcc.mak
+--- a/CPP/7zip/7zip_gcc.mak	2025-11-05 16:00:00
++++ b/CPP/7zip/7zip_gcc.mak	2026-09-21 22:34:28
+@@ -904,6 +904,8 @@
+ 	$(CXX) $(CXXFLAGS) $<
+ $O/LoadCodecs.o: ../../UI/Common/LoadCodecs.cpp
+ 	$(CXX) $(CXXFLAGS) $<
++$O/MacOsNative.o: ../../UI/Common/MacOsNative.cpp
++	$(CXX) $(CXXFLAGS) $<
+ $O/OpenArchive.o: ../../UI/Common/OpenArchive.cpp
+ 	$(CXX) $(CXXFLAGS) $<
+ $O/PropIDUtils.o: ../../UI/Common/PropIDUtils.cpp
+diff -ruN a/CPP/7zip/Bundles/Alone2/makefile.gcc b/CPP/7zip/Bundles/Alone2/makefile.gcc
+--- a/CPP/7zip/Bundles/Alone2/makefile.gcc	2026-02-26 19:00:00
++++ b/CPP/7zip/Bundles/Alone2/makefile.gcc	2026-09-21 22:33:46
+@@ -54,6 +54,7 @@
+   $O/EnumDirItems.o \
+   $O/Extract.o \
+   $O/ExtractingFilePath.o \
++  $O/MacOsNative.o \
+   $O/HashCalc.o \
+   $O/LoadCodecs.o \
+   $O/OpenArchive.o \
+diff -ruN a/CPP/7zip/UI/Common/ArchiveExtractCallback.cpp b/CPP/7zip/UI/Common/ArchiveExtractCallback.cpp
+--- a/CPP/7zip/UI/Common/ArchiveExtractCallback.cpp	2026-09-03 17:00:00
++++ b/CPP/7zip/UI/Common/ArchiveExtractCallback.cpp	2026-09-21 22:33:32
+@@ -34,6 +34,7 @@
+ #include "../../Archive/Common/ItemNameUtils.h"
+ 
+ #include "../Common/ExtractingFilePath.h"
++#include "MacOsNative.h"
+ #include "../Common/PropIDUtils.h"
+ 
+ #include "ArchiveExtractCallback.h"
+@@ -382,6 +383,15 @@
+ 
+   _arc = arc;
+   _dirPathPrefix = directoryPath;
++
++  #if defined(__APPLE__)
++  /* Remember the quarantine attribute of the archive itself, if any.
++     CloseFile() applies it to every extracted item afterwards.  Doing this
++     here keeps the whole propagation independent of the archive format. */
++  _mac_Quarantine.Free();
++  if (_arc && !_arc->Path.IsEmpty())
++    MacOs_GetXattr(us2fs(_arc->Path), MACOS_QUARANTINE_XATTR_NAME, _mac_Quarantine);
++  #endif
+   _dirPathPrefix_Full = directoryPath;
+   #if defined(_WIN32) && !defined(UNDER_CE)
+   if (!NName::IsAltPathPrefix(_dirPathPrefix))
+@@ -2139,6 +2149,25 @@
+ 
+   RINOK(_outFileStreamSpec->Close())
+   _outFileStream.Release();
++
++#if defined(__APPLE__)
++  /* Propagate the quarantine attribute of the source archive to the file we
++     have just written.  macOS uses com.apple.quarantine to record where a
++     file came from, and losing it on extraction would silently drop that
++     marking - the same defect that was fixed for the Mark-of-the-Web on
++     Windows.  Failure is deliberately not reported: FAT, exFAT and some
++     network volumes cannot store extended attributes at all. */
++  if (_mac_Quarantine.Size() != 0
++      && !_stdOutMode
++      && !_testMode
++      && !_diskFilePath.IsEmpty())
++  {
++    MacOs_SetXattr(_diskFilePath,
++        MACOS_QUARANTINE_XATTR_NAME,
++        _mac_Quarantine.ConstData(),
++        _mac_Quarantine.Size());
++  }
++#endif
+ 
+ #if defined(_WIN32) && !defined(UNDER_CE)
+   if (!_altStream_NeedRestore_Attrib_for_parentFsPath.IsEmpty())
+diff -ruN a/CPP/7zip/UI/Common/ArchiveExtractCallback.h b/CPP/7zip/UI/Common/ArchiveExtractCallback.h
+--- a/CPP/7zip/UI/Common/ArchiveExtractCallback.h	2026-08-16 16:00:00
++++ b/CPP/7zip/UI/Common/ArchiveExtractCallback.h	2026-09-21 22:33:08
+@@ -483,6 +483,14 @@
+   CByteBuffer ZoneBuf;
+ #endif
+ 
++#if defined(__APPLE__)
++  /* Quarantine attribute taken from the source archive.  When it is set, the
++     same attribute is applied to every extracted item, so that the macOS
++     download-origin marking survives extraction.  This is the macOS
++     counterpart of the Mark-of-the-Web handling done for Windows above. */
++  CByteBuffer _mac_Quarantine;
++#endif
++
+   CMyComPtr2_Create<ICompressProgressInfo, CLocalProgress> LocalProgressSpec;
+ 
+   UInt64 NumFolders;
+diff -ruN a/CPP/7zip/UI/Common/ExtractingFilePath.cpp b/CPP/7zip/UI/Common/ExtractingFilePath.cpp
+--- a/CPP/7zip/UI/Common/ExtractingFilePath.cpp	2026-06-27 17:00:00
++++ b/CPP/7zip/UI/Common/ExtractingFilePath.cpp	2026-09-21 22:33:00
+@@ -7,6 +7,7 @@
+ #include "../../../Windows/FileName.h"
+ 
+ #include "ExtractingFilePath.h"
++#include "MacOsNative.h"
+ 
+ extern
+ bool g_PathTrailReplaceMode;
+@@ -269,7 +270,19 @@
+       CorrectUnsupportedName(s);
+       #endif
+     }
+-    
++
++    #if defined(__APPLE__)
++    /* macOS file systems keep names in Unicode Normalization Form D.
++       Archives made on Windows/Linux usually carry Form C, so extracting
++       them verbatim produces names that differ byte-wise from the ones
++       macOS itself creates for the same text.  Normalizing here makes the
++       extracted tree byte-identical to a native one, which avoids
++       look-alike duplicates in git, rsync, Node.js and on non-normalizing
++       volumes such as exFAT.  Both the created directories and the file
++       paths derive from these parts, so the whole tree stays consistent. */
++    MacOs_NormalizeName_NFD(s);
++    #endif
++
+     i++;
+   }
+ 
+diff -ruN a/CPP/7zip/UI/Common/MacOsNative.cpp b/CPP/7zip/UI/Common/MacOsNative.cpp
+--- a/CPP/7zip/UI/Common/MacOsNative.cpp	1970-01-01 08:00:00
++++ b/CPP/7zip/UI/Common/MacOsNative.cpp	2026-09-21 22:35:29
+@@ -0,0 +1,134 @@
++// MacOsNative.cpp
++//
++// Implementation of the macOS native semantic helpers declared in
++// MacOsNative.h.  The whole body is compiled only on macOS; on other
++// platforms this translation unit is empty.
++
++#include "StdAfx.h"
++
++#include "MacOsNative.h"
++
++#if defined(__APPLE__)
++
++#include <sys/xattr.h>
++#include <CoreFoundation/CoreFoundation.h>
++
++/* wchar_t is 32 bits wide on macOS and holds raw code points, so a UString
++   buffer is UTF-32 in host byte order.  CoreFoundation has no "native"
++   UTF-32 selector, therefore pick the byte order explicitly. */
++#if defined(__BYTE_ORDER__) && (__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)
++  #define MACOS_UTF32_ENCODING kCFStringEncodingUTF32BE
++#else
++  #define MACOS_UTF32_ENCODING kCFStringEncodingUTF32LE
++#endif
++
++/*
++  macOS file systems use Unicode Normalization Form D internally, while
++  archives produced on Windows and Linux normally carry Form C.  Extracting
++  an NFC name onto macOS yields a name that is byte-different from the one
++  the system itself would create for the same text, which shows up as
++  look-alike duplicates in tools that compare names byte-wise (git, rsync,
++  Node.js, build systems) and on non-normalizing volumes such as exFAT.
++
++  We therefore normalize every path component to Form D, matching what
++  macOS itself does.
++*/
++void MacOs_NormalizeName_NFD(UString &s)
++{
++  if (s.IsEmpty())
++    return;
++
++  /* UString uses wchar_t, which is 32 bits wide on macOS, so the buffer can
++     be handed to CoreFoundation directly as native-endian UTF-32. */
++  if (sizeof(wchar_t) != 4)
++    return;
++
++  const size_t srcSize = static_cast<size_t>(s.Len()) * sizeof(wchar_t);
++
++  CFStringRef src = CFStringCreateWithBytes(
++      kCFAllocatorDefault,
++      reinterpret_cast<const UInt8 *>(s.Ptr()),
++      static_cast<CFIndex>(srcSize),
++      MACOS_UTF32_ENCODING,
++      false);
++
++  if (!src)
++    return;
++
++  CFMutableStringRef norm = CFStringCreateMutableCopy(kCFAllocatorDefault, 0, src);
++  CFRelease(src);
++
++  if (!norm)
++    return;
++
++  CFStringNormalize(norm, kCFStringNormalizationFormD);
++
++  const unsigned numChars = static_cast<unsigned>(CFStringGetLength(norm));
++
++  UString res;
++  wchar_t *dest = res.GetBuf(numChars + 1);
++
++  CFIndex used = 0;
++  const CFIndex numConverted = CFStringGetBytes(
++      norm,
++      CFRangeMake(0, static_cast<CFIndex>(numChars)),
++      MACOS_UTF32_ENCODING,
++      0,
++      false,
++      reinterpret_cast<UInt8 *>(dest),
++      static_cast<CFIndex>((static_cast<size_t>(numChars) + 1) * sizeof(wchar_t)),
++      &used);
++
++  CFRelease(norm);
++
++  if (numConverted > 0)
++  {
++    res.ReleaseBuf_SetLen(
++        static_cast<unsigned>(used) / static_cast<unsigned>(sizeof(wchar_t)));
++    s = res;
++  }
++  else
++    res.ReleaseBuf_SetLen(0);
++}
++
++
++bool MacOs_GetXattr(const FString &path, const char *name, CByteBuffer &dest)
++{
++  dest.Free();
++
++  const char *p = path.Ptr();
++  if (!p || !p[0])
++    return false;
++
++  const ssize_t size = getxattr(p, name, NULL, 0, 0, 0);
++  if (size <= 0)
++    return false;
++
++  dest.Alloc(static_cast<size_t>(size));
++  if (dest.Size() != static_cast<size_t>(size))
++    return false;
++
++  const ssize_t res = getxattr(p, name, dest.NonConstData(), static_cast<size_t>(size), 0, 0);
++  if (res != size)
++  {
++    dest.Free();
++    return false;
++  }
++
++  return true;
++}
++
++
++bool MacOs_SetXattr(const FString &path, const char *name, const void *data, size_t size)
++{
++  if (!data || size == 0)
++    return false;
++
++  const char *p = path.Ptr();
++  if (!p || !p[0])
++    return false;
++
++  return setxattr(p, name, data, size, 0, 0) == 0;
++}
++
++#endif // __APPLE__
+diff -ruN a/CPP/7zip/UI/Common/MacOsNative.h b/CPP/7zip/UI/Common/MacOsNative.h
+--- a/CPP/7zip/UI/Common/MacOsNative.h	1970-01-01 08:00:00
++++ b/CPP/7zip/UI/Common/MacOsNative.h	2026-09-21 22:32:32
+@@ -0,0 +1,36 @@
++// MacOsNative.h
++//
++// macOS specific helpers that adapt 7-Zip to native macOS file-system
++// semantics.  All declarations are guarded so other platforms are
++// unaffected (the corresponding implementation file compiles empty there).
++
++#ifndef ZIP7_INC_MAC_OS_NATIVE_H
++#define ZIP7_INC_MAC_OS_NATIVE_H
++
++#include "../../../Common/MyString.h"
++#include "../../../Common/MyBuffer.h"
++
++// macOS stores this extended attribute on files that were downloaded by a
++// browser or received through a sandboxed application.  It is the macOS
++// counterpart of the Mark-of-the-Web stream that 7-Zip propagates on Windows.
++#define MACOS_QUARANTINE_XATTR_NAME "com.apple.quarantine"
++
++#if defined(__APPLE__)
++
++/*
++  Convert (in place) a single path component to Unicode Normalization Form D.
++  The function returns without changes if CoreFoundation cannot convert the
++  string, so it is always safe to call.
++*/
++void MacOs_NormalizeName_NFD(UString &s);
++
++/* Read a named extended attribute into (dest).  Returns false if the
++   attribute is absent, empty or unreadable. */
++bool MacOs_GetXattr(const FString &path, const char *name, CByteBuffer &dest);
++
++/* Write a named extended attribute.  Returns false on failure. */
++bool MacOs_SetXattr(const FString &path, const char *name, const void *data, size_t size);
++
++#endif // __APPLE__
++
++#endif
+diff -ruN a/CPP/7zip/var_mac_arm64.mak b/CPP/7zip/var_mac_arm64.mak
+--- a/CPP/7zip/var_mac_arm64.mak	2024-03-20 15:00:00
++++ b/CPP/7zip/var_mac_arm64.mak	2026-09-21 22:33:50
+@@ -11,3 +11,6 @@
+ CC=$(CROSS_COMPILE)clang
+ CXX=$(CROSS_COMPILE)clang++
+ USE_CLANG=1
++
++# macOS native semantic support (Unicode NFD normalization) needs CoreFoundation
++MY_LIBS = -framework CoreFoundation
+diff -ruN a/CPP/7zip/var_mac_x64.mak b/CPP/7zip/var_mac_x64.mak
+--- a/CPP/7zip/var_mac_x64.mak	2021-04-28 19:26:18
++++ b/CPP/7zip/var_mac_x64.mak	2026-09-21 22:33:54
+@@ -9,3 +9,6 @@
+ CC=$(CROSS_COMPILE)clang
+ CXX=$(CROSS_COMPILE)clang++
+ USE_CLANG=1
++
++# macOS native semantic support (Unicode NFD normalization) needs CoreFoundation
++MY_LIBS = -framework CoreFoundation
+diff -ruN a/CPP/Common/StringConvert.cpp b/CPP/Common/StringConvert.cpp
+--- a/CPP/Common/StringConvert.cpp	2024-02-19 18:00:00
++++ b/CPP/Common/StringConvert.cpp	2026-09-22 14:45:48
+@@ -259,18 +259,79 @@
+ 
+ bool g_ForceToUTF8 = true; // false;
+ 
++#ifdef __APPLE__
++#include <CoreFoundation/CoreFoundation.h>
++
++/*
++macOS 引擎补充：将非 UTF-8 字节串按 GB18030（GBK 的超集）解码。
++中文 Windows 系统创建的 zip 不带 UTF-8 标志位（NFlags::kUtf8），
++文件名为 GBK 编码；原逻辑在 g_ForceToUTF8 下强制按 UTF-8 转义，
++非法字节变成 escape 序列，列表里全是乱码。
++解出的文本若含 U+FFFD（CFString 对不可解码字节的占位），视为
++非 GBK 文本，返回 false 交由调用方回退，避免二次破坏。
++*/
++static bool ConvertFromGB18030_Apple(const AString &src, UString &dest)
++{
++  CFStringRef cs = CFStringCreateWithBytes(
++      kCFAllocatorDefault, (const UInt8 *)src.Ptr(), (CFIndex)src.Len(),
++      kCFStringEncodingGB_18030_2000, false);
++  if (!cs)
++    return false;
++  const CFIndex n = CFStringGetMaximumSizeForEncoding(
++      CFStringGetLength(cs), kCFStringEncodingUTF8) + 1;
++  char *buf = new char[n];
++  const bool got = CFStringGetCString(cs, buf, n, kCFStringEncodingUTF8) != 0;
++  CFRelease(cs);
++  if (!got) { delete[] buf; return false; }
++  AString utf8(buf);
++  delete[] buf;
++  if (!Convert_UTF8_Buf_To_Unicode(utf8, utf8.Len(), dest, 0))
++    return false;
++  if (dest.IsEmpty())
++    return false;
++  for (unsigned i = 0; i < dest.Len(); i++)
++    if (dest[i] == (wchar_t)0xFFFD)
++      return false;
++  return true;
++}
++#endif
++
+ void MultiByteToUnicodeString2(UString &dest, const AString &src, UINT codePage)
+ {
+   dest.Empty();
+   if (src.IsEmpty())
+     return;
+ 
+-  if (codePage == CP_UTF8 || g_ForceToUTF8)
++  if (codePage == CP_UTF8)
+   {
+-#if 1
+     ConvertUTF8ToUnicode(src, dest);
+     return;
++  }
++
++  // 非 UTF-8 代码页（CP_ACP / CP_OEMCP，典型来源：Windows 打包的 zip）：
++  // 1) 先按严格 UTF-8 尝试——Unix/macOS 打包的 zip 常不带 UTF-8 标志位；
++  //    但务必排除含 U+FFFD 的结果：flags=0 是宽松解码，遇到非法字节会静默
++  //    替换成 U+FFFD 并仍然返回 true，GBK 字节就会被判成"假 UTF-8"而错返。
++  // 2) 再按 GB18030（GBK 超集）解码——覆盖中文 Windows 打包的 zip；
++  // 3) 都失败才回退到原有的强制 UTF-8 escape 路径（原行为）。
++  {
++    UString u;
++    if (ConvertUTF8ToUnicode_Flags(src, u, 0) && u.Len() != 0)
++    {
++      bool clean = true;
++      for (unsigned i = 0; i < u.Len(); i++)
++        if (u[i] == (wchar_t)0xFFFD) { clean = false; break; }
++      if (clean) { dest = u; return; }
++    }
++  }
++#ifdef __APPLE__
++  if (ConvertFromGB18030_Apple(src, dest))
++    return;
+ #endif
++  if (g_ForceToUTF8)
++  {
++    ConvertUTF8ToUnicode(src, dest);
++    return;
+   }
+ 
+   const size_t limit = ((size_t)src.Len() + 1) * 2;

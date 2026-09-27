@@ -112,6 +112,8 @@ compile_slice arm64
 echo "==> assembling bundle"
 mkdir -p "$OUT/Contents/MacOS" "$OUT/Contents/Resources"
 cp "$BUILD/$EXEC_NAME" "$OUT/Contents/MacOS/$EXEC_NAME"
+# 剥离局部符号（−4.0%）。必须在下面的 codesign 之前，否则会破坏已封存的签名。
+sh "$DIST/build/strip_local.sh" "$OUT/Contents/MacOS/$EXEC_NAME"
 cp "$HERE/Info.plist" "$OUT/Contents/Info.plist"
 
 # The engine is not embedded (see the header comment). cp/ditto only ever

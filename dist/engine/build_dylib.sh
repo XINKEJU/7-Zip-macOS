@@ -16,7 +16,7 @@ set -e
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 DIST="$(cd "$HERE/.." && pwd)"
-SRC="${1:-$DIST/../7z2603-src}"
+SRC="${1:-$(sh "$DIST/build/upstream_dir.sh")}"
 SRC="$(cd "$SRC" && pwd)"
 
 BUNDLE="$SRC/CPP/7zip/Bundles/Format7zF"
@@ -27,6 +27,12 @@ if [ ! -d "$BUNDLE" ]; then
     echo "找不到 Format7zF Bundle: $BUNDLE" >&2
     exit 1
 fi
+
+# ⚠️ 上游源码必须已经打好本移植的 macOS 补丁（非 UTF-8 名字按 GB18030 解码、
+# 解压时按 NFD 规范化、隔离属性传播）。升级上游后最容易忘的就是这一步，
+# 而**忘了的后果是构建照样成功、行为悄悄退化** —— 所以在这里先挡一道。
+# 详见 dist/build/apply_upstream_patch.sh 的文件头。
+sh "$DIST/build/apply_upstream_patch.sh" "$SRC" --check || exit 1
 
 echo "=== 源码根目录: $SRC"
 echo "=== Bundle:      $BUNDLE"
@@ -56,6 +62,10 @@ cp -f b/m_arm64/7z.so "$OUT"
 # 若写成 @rpath/7z.dylib 而文件叫 lib7z.dylib，加载时会直接报
 # "Library not loaded: @rpath/7z.dylib"。
 install_name_tool -id @rpath/lib7z.dylib "$OUT"
+
+# 剥离局部符号（−8.9%）。必须在上面的 install_name_tool 之后、任何签名之前；
+# 只删局部符号，导出符号不动。详见 dist/build/strip_local.sh 的文件头。
+sh "$DIST/build/strip_local.sh" "$OUT"
 
 echo "== 结果 =="
 lipo -archs "$OUT" | sed 's/^/   架构: /'

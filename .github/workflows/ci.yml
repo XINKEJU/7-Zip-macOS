@@ -36,11 +36,13 @@ jobs:
 
       # 上游源码目录内的 b/ 是编译中间产物，缓存它可以省掉每次重编引擎的时间。
       # key 里带 makefile 与桥接层源码的哈希，改到这些文件时缓存自动失效。
+      # 路径用 7z*-src 通配：上游升级后目录名会变（7z2603-src → 7zXXXX-src），
+      # 写死版本号会让缓存静默失效、也可能让哈希漏掉真正的上游 makefile。
       - name: 缓存引擎编译中间产物
         uses: actions/cache@v4
         with:
-          path: 7z2603-src/b
-          key: engine-${{ runner.os }}-${{ hashFiles('Makefile', '7z2603-src/CPP/7zip/7zip_gcc.mak', 'dist/engine/*.sh', 'dist/engine/*.cpp', 'dist/engine/*.mm') }}
+          path: 7z*-src/b
+          key: engine-${{ runner.os }}-${{ hashFiles('Makefile', '7z*-src/CPP/7zip/7zip_gcc.mak', 'dist/engine/*.sh', 'dist/engine/*.cpp', 'dist/engine/*.mm') }}
 
       # pkg/tarball are not optional here. `make verify` intentionally does not
       # rebuild them (rebuilding re-stamps the archives and would change every
