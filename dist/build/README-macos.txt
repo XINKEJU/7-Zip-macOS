@@ -180,12 +180,12 @@ note below):
   ISO 9660  creation, with Joliet (UCS-2) long file names
   DMG       creation (UDZO), delegated to the system hdiutil
 
-Three notes on these:
+Four notes on these:
 
   * zstd / lz4 / brotli are provided by statically linked third-party
     libraries (libzstd, liblz4, libbrotli). If a library was not present
     when this package was built, the corresponding format was simply left
-    out of the binary — the build still succeeds. Attribution is in
+    out of the binary - the build still succeeds. Attribution is in
     THIRD_PARTY.md.
 
   * gz, bz2, xz, zstd, lz4 and br are single-stream formats: they can hold
@@ -193,8 +193,8 @@ Three notes on these:
     rejected with a clear message instead of silently keeping only the
     first.
 
-  * The bundled `7zz` command-line tool is a stock upstream build and does
-    NOT have these formats. `7zz a -tzstd` / `-tiso` fails by design; the
+  * The bundled 7zz command-line tool is a stock upstream build and does
+    NOT have these formats. "7zz a -tzstd" / "-tiso" fails by design; the
     new formats are reachable from the application (and from the engine API
     in lib7zbridge.a). Keeping the CLI pristine is what makes upstream
     upgrades a no-op.
