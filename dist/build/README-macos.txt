@@ -174,24 +174,30 @@ Codecs compiled into this build:
 Additional formats added by this port (the GUI application only — see the
 note below):
 
-  zstd      creation (upstream 26.03 ships a decoder only)
-  lz4       extraction
-  brotli    extraction
+  zstd      creation + extraction (upstream 26.03 ships a decoder only)
+  lz4       creation + extraction (LZ4 frame format)
+  brotli    creation + extraction (no magic number: recognised by extension)
+  lzip      creation + extraction (LZMA1 stream in a lzip container)
+  snappy    creation + extraction (raw and framed ".sz"; self-implemented)
   ISO 9660  creation, with Joliet (UCS-2) long file names
   DMG       creation (UDZO), delegated to the system hdiutil
 
 Four notes on these:
 
-  * zstd / lz4 / brotli are provided by statically linked third-party
-    libraries (libzstd, liblz4, libbrotli). If a library was not present
-    when this package was built, the corresponding format was simply left
-    out of the binary - the build still succeeds. Attribution is in
-    THIRD_PARTY.md.
+  * zstd / lz4 / brotli / lzip are provided by statically linked third-party
+    libraries (libzstd, liblz4, libbrotli, liblzma). If a library was not
+    present when this package was built, the corresponding format was simply
+    left out of the binary - the build still succeeds. snappy has no external
+    dependency and is always available. Attribution is in THIRD_PARTY.md.
 
-  * gz, bz2, xz, zstd, lz4 and br are single-stream formats: they can hold
-    one file at a time. Compressing several files into one of them is
+  * gz, bz2, xz, zstd, lz4, br, lz and sz are single-stream formats: they can
+    hold one file at a time. Compressing several files into one of them is
     rejected with a clear message instead of silently keeping only the
     first.
+
+  * The format menu shows the format name, but the suggested file name uses
+    the conventional extension: zstd -> .zst, lzip -> .lz, snappy -> .sz.
+    Both spellings open fine, because the engine normalises the format name.
 
   * The bundled 7zz command-line tool is a stock upstream build and does
     NOT have these formats. "7zz a -tzstd" / "-tiso" fails by design; the

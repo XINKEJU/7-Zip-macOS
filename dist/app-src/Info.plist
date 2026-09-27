@@ -84,6 +84,14 @@
                      UTImportedTypeDeclarations 里重复声明类型，后者仍然不碰）。 -->
                 <string>com.facebook.zstandard-archive</string>
                 <string>com.microsoft.wim-archive</string>
+                <!-- 本移植补的四个格式，系统本身已有公共标识（`mdls` 实测）：
+                     .lz → public.lzip-archive、.lz4 → public.lz4-archive、
+                     .br → com.google.brotli-archive、.sz → com.google.snappy-archive。
+                     直接加入既有类型，不新造标识，避免把同一个类型拆成两份。 -->
+                <string>public.lzip-archive</string>
+                <string>public.lz4-archive</string>
+                <string>com.google.brotli-archive</string>
+                <string>com.google.snappy-archive</string>
             </array>
             <key>CFBundleTypeExtensions</key>
             <array>
@@ -104,6 +112,19 @@
                 <string>dmg</string>
                 <string>zst</string>
                 <string>lzma</string>
+                <!-- 本移植补的格式：lzip / lz4 / brotli / snappy。
+                     系统没有给它们分配公共 UTI，所以只走 CFBundleTypeExtensions
+                     这条传统绑定路径（不新增 UTImportedTypeDeclarations，
+                     免得跟将来系统自带的类型定义撞车）。
+                     两种写法都收：下拉框显示格式名，默认文件名用惯用扩展名。 -->
+                <string>lz</string>
+                <string>lzip</string>
+                <string>lz4</string>
+                <string>br</string>
+                <string>brotli</string>
+                <string>sz</string>
+                <string>snappy</string>
+                <string>zstd</string>
                 <string>lzh</string>
                 <string>arj</string>
                 <string>cpio</string>

@@ -1447,10 +1447,17 @@ for f in zstd lzip lz4 brotli; do
         brotli) vext=br ;;
     esac
     A="$EXT/val_$f.$vext"
-    if "$T" create "$f" "$A" "$SN/a.txt" >/dev/null 2>&1 && "$T" test "$A" >/dev/null 2>&1; then
-        ok "$f 在测试模式（无输出流）下正常通过完整性校验"
-    else
+    # 先清掉上一轮可能残留的产物：留着的话 create 是「覆盖」语义，
+    # 一旦某次 create 静默失败，后面 test 校验的还是旧文件，失败会指向错误的一步。
+    rm -f "$A"
+    # 两步分开判，失败信息能直接指出是创建坏了还是校验坏了（合并成一条的话
+    # 只会打印一句笼统的「失败」，排查时得手工复现）。
+    if ! "$T" create "$f" "$A" "$SN/a.txt" >/dev/null 2>&1; then
+        bad "$f 在测试模式前创建归档失败"
+    elif ! "$T" test "$A" >/dev/null 2>&1; then
         bad "$f 在测试模式（无输出流）下失败"
+    else
+        ok "$f 在测试模式（无输出流）下正常通过完整性校验"
     fi
 done
 

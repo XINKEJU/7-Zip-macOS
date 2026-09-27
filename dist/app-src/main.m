@@ -3721,6 +3721,19 @@ static const NSUInteger kZ7LogCharLimit = 200000;
     [self compressURLs:p.URLs];
 }
 
+/// 下拉框里显示的是**格式名**，写进文件名时改用该格式**惯用**的扩展名：
+/// zstd → .zst、lzip → .lz、snappy → .sz（Keka 与各命令行工具都这么叫）。
+/// 引擎按 CanonicalFormatName 把两种写法归一化，所以事后打开不受影响；
+/// 用惯用扩展名的好处是别的工具（tar / browsers / 编辑器）一眼能认出。
+/// 其余格式的格式名与扩展名本就相同（lz4 / br / gz / xz …），原样返回。
+static NSString *DefaultExtForFormat(NSString *fmt)
+{
+    if ([fmt isEqualToString:@"zstd"])   return @"zst";
+    if ([fmt isEqualToString:@"lzip"])   return @"lz";
+    if ([fmt isEqualToString:@"snappy"]) return @"sz";
+    return fmt;
+}
+
 /// 在目录下取一个不冲突的归档路径：name.7z / name 2.7z / name 3.7z …
 static NSString *UniqueArchivePath(NSString *dir, NSString *base, NSString *ext)
 {
@@ -3769,7 +3782,8 @@ static NSString *UniqueArchivePath(NSString *dir, NSString *base, NSString *ext)
         if ([dp runModal] != NSModalResponseOK) return;
         NSString *outDir = dp.URL.path;
         for (NSURL *u in urls) {
-            [batch addObject:@[UniqueArchivePath(outDir, u.lastPathComponent, fmt), @[u.path]]];
+            [batch addObject:@[UniqueArchivePath(outDir, u.lastPathComponent,
+                                                 DefaultExtForFormat(fmt)), @[u.path]]];
         }
     } else {
         NSString *base = urls.count == 1 ? urls[0].lastPathComponent : @"归档";
@@ -3777,7 +3791,8 @@ static NSString *UniqueArchivePath(NSString *dir, NSString *base, NSString *ext)
 
         NSSavePanel *sp = [NSSavePanel savePanel];
         sp.message = @"保存归档";
-        sp.nameFieldStringValue = [NSString stringWithFormat:@"%@.%@", base, fmt];
+        sp.nameFieldStringValue = [NSString stringWithFormat:@"%@.%@", base,
+                                   DefaultExtForFormat(fmt)];
         sp.directoryURL = [NSURL fileURLWithPath:dir];
         if ([sp runModal] != NSModalResponseOK) return;
 

@@ -48,22 +48,30 @@ Full text: ./LICENSE (GNU LGPL v2.1).
 Third-party compression libraries linked into the port — NOT part of
 --------------------------------------------------------------------------------
 
-To fill format gaps in upstream 26.03 (no zstd encoder, no lz4, no brotli),
-the port links three third-party libraries statically into the application
-binary. They are not vendored in this repository; the build obtains them
-from Homebrew (or any equivalent build) and degrades gracefully when they
-are absent.
+To fill format gaps in upstream 26.03 (no zstd encoder, no lz4, no brotli, no
+lzip, no snappy), the port links four third-party libraries statically into the
+application binary. They are not vendored in this repository; the build
+obtains them from Homebrew (or any equivalent build) and degrades gracefully
+when they are absent.
 
-    Zstandard (libzstd.a)   Meta Platforms, Inc. and contributors
-                            BSD 3-clause   https://github.com/facebook/zstd
-    LZ4 (liblz4.a)          Yann Collet     BSD 2-clause
-                            https://github.com/lz4/lz4
-    Brotli (libbrotli*.a)   Google LLC      MIT
-                            https://github.com/google/brotli
+    Zstandard (libzstd.a)     Meta Platforms, Inc. and contributors
+                              BSD 3-clause  https://github.com/facebook/zstd
+    LZ4 (liblz4.a)            Yann Collet    BSD 2-clause
+                              https://github.com/lz4/lz4
+    Brotli (libbrotli*.a)     Google LLC     MIT
+                              https://github.com/google/brotli
+    liblzma / XZ Utils        Lasse Collin and contributors
+    (liblzma.a)               0BSD (liblzma) https://github.com/tukaani-project/xz
 
-All three are permissive licenses that allow binary redistribution provided
-the copyright notice and license text are retained. Per-component detail and
-the exact versions used are in THIRD_PARTY.md, section 1.2.
+All four are permissive licenses that allow binary redistribution provided the
+copyright notice and license text are retained. Per-component detail and the
+exact versions used are in THIRD_PARTY.md, section 1.2.
+
+Note: Snappy support is a first-party implementation in dist/engine/Z7ExtCodec.cpp
+(CSnappyDecoder / CSnappyEncoder), released under this port's own license
+(LGPL-2.1-or-later). No third-party snappy code is compiled in; only the public
+format specification from https://github.com/google/snappy (BSD 3-clause) was
+followed.
 
 
 unRAR license restriction — applies to the compiled binary

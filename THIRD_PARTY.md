@@ -48,9 +48,10 @@ BSD 组件的完整文本位于 `7z2603-src/DOC/`。
 
 ### 1.2 本移植新增的外部压缩库
 
-上游 7-Zip 26.03 只带 Zstandard **解码器**，且完全没有 LZ4 / Brotli。本移植在不改动
-上游源码的前提下补上了这些格式（zstd 创建、lz4 与 brotli 解压），实现放在
-`dist/engine/Z7ExtCodec.cpp`，算法本身调用下列第三方库。
+上游 7-Zip 26.03 只带 Zstandard **解码器**，且完全没有 LZ4 / Brotli / lzip / Snappy。
+本移植在不改动上游源码的前提下补上了这些格式（五种格式全部**可创建 + 可解压**），
+实现放在 `dist/engine/Z7ExtCodec.cpp`，算法本身调用下列第三方库；Snappy 没有合适
+的库，算法为自实现，因此不占外部依赖。
 
 这些库以**静态库**形式链入应用主程序（`7-Zip.app/Contents/MacOS/7-Zip`），
 因此发行包不会多出任何动态库依赖，`.app` 与 Quick Look 扩展仍自包含。
@@ -62,17 +63,26 @@ BSD 组件的完整文本位于 `7z2603-src/DOC/`。
 | Zstandard（`libzstd.a`） | 1.5.7 | Meta Platforms, Inc. 及贡献者 | BSD 3-clause |
 | LZ4（`liblz4.a`） | 1.10.0 | Yann Collet | BSD 2-clause |
 | Brotli（`libbrotli{dec,enc,common}.a`） | 视构建环境 | Google LLC | MIT |
+| liblzma / XZ Utils（`liblzma.a`） | 5.8.3 | Lasse Collin 及贡献者 | 0BSD（`liblzma` 部分） |
 
-三者的许可均为宽松许可，允许以二进制形式再分发，条件是保留版权声明与许可文本。
+四者的许可均为宽松许可，允许以二进制形式再分发，条件是保留版权声明与许可文本。
 上游许可文本见各自项目主页：
 
 - Zstandard — <https://github.com/facebook/zstd/blob/dev/LICENSE>
 - LZ4 — <https://github.com/lz4/lz4/blob/dev/LICENSE>
 - Brotli — <https://github.com/google/brotli/blob/master/LICENSE>
+- XZ Utils / liblzma — <https://github.com/tukaani-project/xz/blob/master/COPYING>
+
+> **Snappy 不在此表内。** 上游与 Homebrew 都没有可直接静态链入的 snappy 编解码封装，
+> 因此裸格式与分帧格式（`.sz`）的编解码由本移植**自行实现**（`Z7ExtCodec.cpp` 内的
+> `CSnappyDecoder` / `CSnappyEncoder`），属于本移植自身代码，按第 3 节的
+> **LGPL-2.1-or-later** 分发，不引入任何第三方代码。所依据的格式规范
+> （`format_description.txt`、`framing_format.txt`）来自 Google 的
+> <https://github.com/google/snappy>（BSD 3-clause），实现中未复制其源码。
 
 > 这些库**不属于** 7-Zip 上游源码，也不在 `7z2603-src/` 内；它们由构建者从
 > Homebrew（或自行编译）取得。若需要完全自由许可的构建，可不安装这些库，
-> 构建会自动降级为「不含上述三种格式」。
+> 构建会自动降级为「不含上述四种格式」（Snappy 仍可用）。
 
 ---
 

@@ -393,8 +393,8 @@ osascript -e 'tell application "System Events" to tell process "7-Zip" \
 
 ### 坑点 18：外部编解码器的两个「静默失败」陷阱
 
-上游 26.03 没有 lz4 / brotli，zstd 也只有解码器。补法是在 `Z7ExtCodec.cpp` 里
-做独立于上游注册表的处理器（约定：不改上游源码）。踩到两个表面症状相似、根因
+上游 26.03 没有 lz4 / brotli / lzip / snappy，zstd 也只有解码器。补法是在 `Z7ExtCodec.cpp`
+里做独立于上游注册表的处理器（约定：不改上游源码）。踩到两个表面症状相似、根因
 完全不同的坑：
 
 1. **悬垂指针。** 注入处理器列表时若用**局部** `std::vector<ExternalCodec>` 再
@@ -412,6 +412,49 @@ osascript -e 'tell application "System Events" to tell process "7-Zip" \
 
 判定技巧：**看症状分不开「没进候选」与「进了又被丢」，就在候选列表与最终选中
 处各打一条日志**。本次两次误判都是靠这个区分开的。
+
+### 坑点 19：补格式时三个「构建成功但格式不见了 / 一测就崩」的坑
+
+后来把外部编解码器从 3 个扩到 5 个（zstd / lz4 / brotli / lzip / snappy，全部读写），
+又踩到三个：
+
+1. **测试模式没有输出流 —— 漏判直接段错误。** 7-Zip 在 `-t`（只校验不落盘）时给
+   解码器的 `ISequentialOutStream *` 是 **NULL**。任何「先写再判空」的写法都会
+   解引用空指针（症状：`engine_test test <损坏的归档>` 直接 `Segmentation fault: 11`，
+   而正常解压完全正常）。修法是把 `WriteAll()` 改成 `out == NULL` 时直接返回成功，
+   并**保持字节计数**——这样 CRC / 长度校验照常生效，而不是被短路掉。所有格式共用
+   这一个出口，所以只需要改一处。新增格式时务必给 `-t` 补一条断言。
+2. **`_ext_codec_accept` 的第二个参数是宏名，传错会静默少一种格式。** 探到 liblzma
+   时若写成 `_ext_codec_accept lzip lzma`，产出的是 `-DZ7_HAVE_LZMA=1`，而代码里
+   守卫是 `#ifdef Z7_HAVE_LZIP` —— 格式被整体编译出去，**构建照常成功**，
+   只有跑门禁才发现「`create lzip` 不可用」。宏名一律跟**格式名**走，不跟实现它的
+   库走；改完顺手 `nm` 或跑一次 `engine_test formats` 核对。
+3. **别名必须在 `CanonicalFormatName` 里归一，不能只靠扩展名表。** `br` / `lz` / `sz`
+   这些短写在命令行与下拉框里都会出现，若不归一就直接进 `FindExternalCodec`，
+   落空后的报错是「不支持的压缩格式」——听起来像格式没编译进来，实际只是名字没对上。
+   当前映射：`br→brotli`、`lz→lzip`、`sz→snappy`（`zst/zstd`、`lz4` 本身即规范名）。
+
+### 坑点 20：lzip 与 snappy 的格式细节（自研容器的验收点）
+
+这两种上游完全没有，也不适合直接套库，实现要点与**必须钉住的断言**：
+
+- **lzip**：6 字节头 `"LZIP" | version(=1) | DS`，`DS` 低 5 位是 log2(基准字典)，
+  高 3 位是「减掉 1/16 的份数」；体是 LZMA-302eos 原始流（lc/lp/pb = 3/0/2，**必须
+  带 EOS marker**）；尾 20 字节 `CRC32 | 原始长度 | 成员总长`，全小端。
+  用 liblzma 的公有 `LZMA_FILTER_LZMA1` 自建容器即可（liblzma 内部虽有
+  `lzma_lzip_decoder`，**没有公有头**，别用）。**尾部三因子要逐个校验**：只查 CRC
+  会漏掉「长度字段被改」这一类损坏。多成员按顺序串接要能解。
+  独立交叉验证只能靠 `xz --format=lzip`（它**只解不压**），输入侧样本用 Python 的
+  `lzma` 模块按规范拼——否则「自产自解」是循环论证。
+- **snappy**：两种容器。裸格式 = `varint 原始长度` + 元素流（literal / COPY_1 / COPY_2 /
+  COPY_4）；分帧格式（`.sz`）= 10 字节 `FF 06 00 00 "sNaPpY"` + 块
+  `[type(1)][len(3, 小端)][掩码CRC(4)][data]`，单块原始数据 ≤ 65536。
+  解码器**按头部自动识别**两种（裸格式没有魔数）。
+  掩码 CRC 用的是 **CRC-32C（Castagnoli, 0x82F63B78）**，不是 zlib 的 CRC-32，
+  而且要先掩码 `((x>>15)|(x<<17)) + 0xA282EAD8` —— 手写时这两步最容易只做一半。
+  写测试样本时注意：**未压缩块（type 0x01）的数据是裸字节，不是一条 snappy 流**，
+  想从分帧产物里抠出「裸流」必须让输入可压缩，保证编码器选的是压缩块（0x00）。
+  另外 `COPY` 允许重叠引用，复制要**逐字节**做，不能用一次性 `memcpy`。
 
 ## 二·补：内嵌引擎库的构建顺序
 
@@ -672,7 +715,7 @@ sh dist/build/package.sh && shasum -a 256 dist/7zip-macos-26.03-macos-arm64.tar.
 自动化入口：
 
 ```bash
-make test        # 桥接层验收，对照官方 7zz 逐项比对（126 个用例，共 17 节）
+make test        # 桥接层验收，对照官方 7zz 逐项比对（158 个用例，共 19 节）
 make objc-test   # ObjC 适配层验收（App 实际调用的那一层，44 个用例）
 make appcheck    # 应用包验收（含真实启动与进程模型检查，20 个用例）
 make verify      # 离线校验：安装/卸载脚本逻辑 + Homebrew 公式一致性

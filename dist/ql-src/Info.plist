@@ -56,6 +56,9 @@
 				<string>public.cpio-archive</string>
 				<string>public.z-archive</string>
 				<string>public.lzip-archive</string>
+				<string>public.lz4-archive</string>
+				<string>com.google.brotli-archive</string>
+				<string>com.google.snappy-archive</string>
 				<string>public.iso-image</string>
 				<string>public.disk-image</string>
 				<string>com.apple.disk-image</string>

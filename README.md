@@ -29,10 +29,10 @@
 | **手册页** | `man 7zz`（完整命令与开关说明）、`man 7z`（别名页） | `/usr/local/share/man/man1/` |
 | **命令补全** | zsh / bash / fish 三套，按子命令区分可用开关 | `/usr/local/share/{zsh,bash-completion,fish}/` |
 | **图形界面** | 原生 AppKit 应用，**引擎内嵌于进程**（`Contents/Frameworks/lib7z.dylib`，不派生 `7zz` 子进程）：拖放、归档树浏览（八列、排序、搜索、右键菜单、拖出、空格或双击预览）、压缩、追加与**删除条目**、解压（同名文件可选覆盖 / 跳过 / 自动改名）、完整性校验、加密归档可**记住密码**（存入登录钥匙串），以及完整的压缩参数面板（格式/等级/方法/字典/字长/快速字节/匹配查找器/固实与分块/线程/分卷/加密算法/文件名加密/压缩头/完整路径） | `/Applications/7-Zip.app` |
-| **格式补齐** | 在**不改动上游源码**的前提下补上游缺失的能力：**zstd 创建**（上游只有解码器）、**lz4 与 brotli 解压**（上游完全没有）、**ISO 与 DMG 创建**（上游两者都只能读）。详见下文「扩展格式」与第七节验证 | 随应用（**不在 `7zz` 命令行**内，见下） |
+| **格式补齐** | 在**不改动上游源码**的前提下补上游缺失的能力：**zstd / lz4 / brotli / lzip / snappy 五种格式全部可创建 + 解压**（上游只有 zstd 解码器，lz4 / brotli / lzip / snappy 完全没有）、**ISO 与 DMG 创建**（上游两者都只能读）。详见下文「扩展格式」与第七节验证 | 随应用（**不在 `7zz` 命令行**内，见下） |
 | **Quick Look** | 按空格即预览归档内容，不再显示十六进制乱码 | `7-Zip.app/Contents/PlugIns/7ZipQuickLook.appex` |
 | **Finder 服务** | 右键「服务」中的**用 7-Zip 压缩** / **用 7-Zip 解压** | 随应用注册 |
-| **文档类型** | 向 LaunchServices 声明 `.7z`、`.zip`、`.tar`、`.gz`、`.bz2`、`.xz`、`.zst`、`.rar`、`.cab`、`.iso` 等 | 随应用注册 |
+| **文档类型** | 向 LaunchServices 声明 `.7z`、`.zip`、`.tar`、`.gz`、`.bz2`、`.xz`、`.zst`、`.lz`、`.lz4`、`.br`、`.sz`、`.rar`、`.cab`、`.iso` 等 | 随应用注册 |
 
 > **`7zz` 命令行刻意保持上游原样**：它是上游 makefile 的直接产物，不含本移植补的
 > 新格式（`7zz a -tzstd` / `-tiso` 会报错退出）。这样上游升级时无需改一行 makefile。
@@ -47,8 +47,10 @@
 | 格式 | 上游 26.03 | 本移植 | 做法 |
 |---|---|---|---|
 | zstd | 只能解压 | **可创建 + 解压** | 静态链入 `libzstd` 补上编码器 |
-| lz4 | 完全不支持 | **可解压**（创建明确拒绝） | 静态链入 `liblz4` |
-| brotli | 完全不支持 | **可解压**（创建明确拒绝） | 静态链入 `libbrotli`；无魔数，仅按扩展名认领 |
+| lz4 | 完全不支持 | **可创建 + 解压** | 静态链入 `liblz4`（frame 格式） |
+| brotli | 完全不支持 | **可创建 + 解压** | 静态链入 `libbrotli`；无魔数，仅按扩展名认领 |
+| lzip | 完全不支持 | **可创建 + 解压** | 静态链入 `liblzma`，自建 lzip 容器（LZMA1 原始流 + 三因子尾） |
+| snappy | 完全不支持 | **可创建 + 解压** | 自实现，无外部依赖；同时支持裸格式与分帧格式（`.sz`） |
 | ISO 9660 | 只能读 | **可创建**（ISO9660 + Joliet） | 自研写入器，进程内、零依赖 |
 | DMG | 只能读 | **可创建**（UDZO） | 调系统 `hdiutil`（唯一子进程例外） |
 
@@ -56,10 +58,13 @@
 
 - **库缺失即降级**：`dist/engine/ext_codecs.sh` 探测 Homebrew 静态库，缺哪个就把
   对应格式编译出去，构建照常成功。没有装 Homebrew 的机器与 CI 都能过门禁。
-- **单流格式一次只能压一个文件**：gz / bz2 / xz / zstd / lz4 / br 都是单流格式，
-  多文件压缩会被明确拒绝（与官方 `7zz` 行为一致），不会静默只压第一个。
-- **静态链接**：三个库都以 `.a` 链入应用主程序，产物**不新增任何动态库依赖**，
+  snappy 是自实现，任何构建都有。
+- **单流格式一次只能压一个文件**：gz / bz2 / xz / zstd / lz4 / br / lzip / snappy
+  都是单流格式，多文件压缩会被明确拒绝（与官方 `7zz` 行为一致），不会静默只压第一个。
+- **静态链接**：四个库都以 `.a` 链入应用主程序，产物**不新增任何动态库依赖**，
   `.app` 与 Quick Look 扩展保持自包含。许可归属见 `THIRD_PARTY.md` 1.2 节。
+- **下拉里显示格式名，文件名用惯用扩展名**：zstd → `.zst`、lzip → `.lz`、
+  snappy → `.sz`。引擎按格式名归一化，两种写法都能打开。
 - **仅限应用**：如上文所述，`7zz` 命令行保持上游原样，不含这些新格式。
 
 ### 命令行补全示例
@@ -111,7 +116,7 @@
 │   │   ├── build_dylib.sh     由上游 Format7zF Bundle 构建 lib7z.dylib
 │   │   ├── SevenZipEngine.{h,cpp}      C++ 桥接层（归档读写、安全策略、任务取消）
 │   │   ├── SevenZipEngineObjC.{h,mm}   Objective-C 适配层（App 实际调用的一层）
-│   │   ├── Z7ExtCodec.{h,cpp}  外部编解码器处理器（zstd 创建 / lz4、brotli 解压）
+│   │   ├── Z7ExtCodec.{h,cpp}  外部编解码器处理器（zstd / lz4 / brotli / lzip / snappy 读写）
 │   │   ├── Z7IsoWriter.{h,cpp} 自研 ISO9660 + Joliet 写入器（进程内，零子进程）
 │   │   ├── Z7DmgWriter.{h,cpp} DMG 写入器（调系统 hdiutil，唯一子进程例外）
 │   │   ├── ext_codecs.sh       探测 Homebrew 静态库（缺失则降级，构建照常成功）
@@ -300,7 +305,7 @@ macOS 26 起，旧式 `.qlgenerator` 插件已不再被 `quicklookd` 加载，�
 
 | 类型 | 行为 |
 |---|---|
-| 引擎支持的全部格式（7z、ZIP/ZIP64、TAR 各变体、GZIP、BZip2、XZ、Zstd、RAR、CAB、ISO 9660、DMG、WIM …） | 完整文件列表：名称、原始大小、压缩后大小、修改时间、属性；含总文件数/文件夹数 |
+| 引擎支持的全部格式（7z、ZIP/ZIP64、TAR 各变体、GZIP、BZip2、XZ、Zstd、LZ4、Brotli、lzip、Snappy、RAR、CAB、ISO 9660、DMG、WIM …） | 完整文件列表：名称、原始大小、压缩后大小、修改时间、属性；含总文件数/文件夹数 |
 | 引擎拒绝、但内置解析器认得（ZIP / TAR / GZIP 系列） | 由 `ArchiveReader.c` 兜底给出条目表 |
 | 只能识别容器（如分卷不完整） | 给出容器元信息与明确说明 |
 | 截断或损坏 | 明确报错（例如「ZIP 结束记录（EOCD）缺失」），不静默失败 |
@@ -357,17 +362,18 @@ pkgutil --expand-full dist/7-Zip-26.03-macOS.pkg /tmp/exp    # 检查载荷与�
 
 1. **未签名、未公证。** 产物为 ad-hoc 签名，其他用户首次安装需右键打开。
    正式分发须自备 Apple Developer ID，步骤见 `BUILD.md`。
-2. **新增格式只在应用里，`7zz` 命令行没有。** zstd 创建、lz4 / brotli 解压、
-   ISO 与 DMG 创建都由应用（`lib7zbridge.a` 引擎接口）提供；`7zz` 保持上游
-   原样，`7zz a -tzstd` / `-tiso` 会报错退出。取舍理由见第一节。
-3. **brotli 需要构建时链入 `libbrotli`。** 本机未安装该库时，对应格式会整体
-   编译出去（构建仍成功），此时 `.br` 文件无法打开。zstd 与 lz4 同理。
+2. **新增格式只在应用里，`7zz` 命令行没有。** zstd / lz4 / brotli / lzip / snappy
+   创建与解压、ISO 与 DMG 创建都由应用（`lib7zbridge.a` 引擎接口）提供；`7zz`
+   保持上游原样，`7zz a -tzstd` / `-tiso` 会报错退出。取舍理由见第一节。
+3. **四个外部库需在构建时链入。** brotli 需要 `libbrotli`、lzip 需要 `liblzma`、
+   zstd / lz4 同理；本机未安装某库时，对应格式会整体编译出去（构建仍成功），
+   此时该格式的文件无法打开。snappy 是自实现，不受影响。
 4. **链入的第三方静态库可能抬高实际系统要求。** 官方发行的二进制是链着
-   Homebrew 的 `libzstd` / `liblz4` / `libbrotli` 构建的，而这些库本身是按较新
-   macOS 编译的，链接时会出现 `was built for newer 'macOS' version (14.0) than
-   being linked (11.0)` 警告。三个库只依赖 libc 中最早期的接口，因此实测在 11.0
-   上可用；但若将来某个库版本真的用到新系统 API，就需要自行以正确 deployment
-   target 重新编译。详见 `BUILD.md`。
+   Homebrew 的 `libzstd` / `liblz4` / `libbrotli` / `liblzma` 构建的，而这些库本身
+   是按较新 macOS 编译的，链接时会出现 `was built for newer 'macOS' version (14.0)
+   than being linked (11.0)` 警告。四个库只依赖 libc 中最早期的接口，因此实测在
+   11.0 上可用；但若将来某个库版本真的用到新系统 API，就需要自行以正确
+   deployment target 重新编译。详见 `BUILD.md`。
 5. **DMG 创建是全项目唯一的子进程调用。** 它通过 `posix_spawn` 调系统
    `/usr/bin/hdiutil`——DMG 是 Apple 专有格式，没有进程内等价实现。其余所有
    归档操作（含 ISO 创建）都在进程内完成，`make appcheck` 对此有断言。
@@ -391,8 +397,9 @@ pkgutil --expand-full dist/7-Zip-26.03-macOS.pkg /tmp/exp    # 检查载荷与�
 - **unRAR 许可证限制** —— 二进制编入了 RAR 解压引擎，因此随附该限制文本；
   可解压 RAR，但**不得**用于开发 RAR 兼容压缩器
 - 源码中个别文件适用 BSD 2/3-clause（LZFSE、Zstandard、XXH64 解码）
-- 本移植新链入的 zstd / lz4 / brotli 静态库适用 BSD 3-clause / BSD 2-clause /
-  MIT（仅当构建机装有对应库时才被链入；见 `THIRD_PARTY.md` 1.2 节）
+- 本移植新链入的 zstd / lz4 / brotli / liblzma 静态库适用 BSD 3-clause /
+  BSD 2-clause / MIT / 0BSD（仅当构建机装有对应库时才被链入；见
+  `THIRD_PARTY.md` 1.2 节）
 
 完整声明见 [`NOTICE`](NOTICE)、[`THIRD_PARTY.md`](THIRD_PARTY.md)（逐组件归属与
 许可对照表，随安装包、应用包与 Homebrew 分发包一同分发）与上游原文件
