@@ -18,6 +18,9 @@
 
 #import "SevenZipEngineObjC.h"
 #import "Z7StatusItem.h"
+#import "Z7ListContextMenu.h"
+#import "Z7CompressionPrefs.h"
+#import "Z7OutlineView.h"
 
 static int g_pass = 0;
 static int g_fail = 0;
@@ -77,6 +80,40 @@ static void skip(NSString *what) {
     _lastURLs = urls;
 }
 @end
+
+#pragma mark - 列表事件的替身接收方
+
+// 只记调用次数。keyDown: 的分发不依赖窗口（只读 charactersIgnoringModifiers），
+// 所以合成键盘事件可以真实驱动它，不像鼠标事件那样在本机被静默丢弃。
+@interface TestOutlineDelegate : NSObject <Z7OutlineKeyDelegate>
+@property (nonatomic, assign) NSInteger spaceCount;
+@property (nonatomic, assign) NSInteger deleteCount;
+@end
+
+@implementation TestOutlineDelegate
+- (void)outlineDidPressSpace  { _spaceCount++; }
+- (void)outlineDidPressDelete { _deleteCount++; }
+@end
+
+/// 菜单项标题的指纹（分隔线记作 ---），用来一眼看出结构变化。
+static NSString *MenuTitleSignature(NSMenu *m) {
+    NSMutableArray<NSString *> *parts = [NSMutableArray array];
+    for (NSMenuItem *it in m.itemArray) {
+        [parts addObject:it.isSeparatorItem ? @"---" : it.title];
+    }
+    return [parts componentsJoinedByString:@" | "];
+}
+
+/// 菜单项动作名的指纹（分隔线记作 -）。菜单动作是字符串写的，拼错不会报错、
+/// 只表现为「点了没反应」，所以要把名字本身也钉住。
+static NSString *MenuActionSignature(NSMenu *m) {
+    NSMutableArray<NSString *> *parts = [NSMutableArray array];
+    for (NSMenuItem *it in m.itemArray) {
+        if (it.isSeparatorItem) { [parts addObject:@"-"]; continue; }
+        [parts addObject:it.action ? NSStringFromSelector(it.action) : @"(nil)"];
+    }
+    return [parts componentsJoinedByString:@" | "];
+}
 
 // 装配用的是运行期 class_addMethod，类型编码是**手写的字符串字面量**，写错不会
 // 有编译错误，只会在 AppKit 回调时取到垃圾值。这里让编译器为同一组签名生成一份
@@ -475,6 +512,192 @@ int main(int argc, const char *argv[]) {
                 [[NSStatusBar systemStatusBar] removeStatusItem:si];
             }
             Z7ResetStatusItemPreference();   // 不留痕迹：测试进程用的是真实的偏好域
+        }
+
+        printf("\n== L. 压缩选项持久化 ==\n");
+        {
+            // 键与出厂值必须一一对应。少登记一个键 → 对应控件永远回默认值，
+            // 而界面上看不出任何异常，是最难被发现的一类故障。
+            NSArray<NSString *> *keys = @[
+                kZ7OptFormatKey, kZ7OptLevelKey, kZ7OptMethodKey, kZ7OptDictKey,
+                kZ7OptWordKey, kZ7OptFastBytesKey, kZ7OptMatchKey, kZ7OptSolidKey,
+                kZ7OptSolidBlockKey, kZ7OptAutoThreadsKey, kZ7OptThreadsKey,
+                kZ7OptVolumeKey, kZ7OptEncMethKey, kZ7OptEncHeaderKey,
+                kZ7OptCompHeaderKey, kZ7OptFullPathsKey, kZ7OptExcludeJunkKey,
+                kZ7OptVerifyKey, kZ7OptSeparateKey, kZ7OptUpdateModeKey,
+                kZ7OptAdvancedKey,
+            ];
+            NSDictionary *defs = Z7CompressionPrefsDefaults();
+            ok(defs.count == keys.count,
+               [NSString stringWithFormat:@"出厂值条数与键数一致（%lu / %lu）",
+                (unsigned long)defs.count, (unsigned long)keys.count]);
+
+            NSMutableArray<NSString *> *missing = [NSMutableArray array];
+            for (NSString *k in keys) if (!defs[k]) [missing addObject:k];
+            ok(missing.count == 0,
+               [NSString stringWithFormat:@"每个键都有出厂值%@",
+                missing.count ? [@"，缺：" stringByAppendingString:
+                                 [missing componentsJoinedByString:@", "]] : @""]);
+
+            // 键名统一前缀，免得与别的持久化项（Z7RecentArchives / Z7ShowStatusItem / AppleLanguages）撞名。
+            NSMutableArray<NSString *> *badPrefix = [NSMutableArray array];
+            for (NSString *k in keys) if (![k hasPrefix:@"Z7Opt"]) [badPrefix addObject:k];
+            ok(badPrefix.count == 0, @"持久化键统一以 Z7Opt 开头");
+
+            // 密码绝不能落盘。这是安全断言，不是风格问题：明文口令写进 plist 后
+            // 任何能读到用户 Library 的进程都能拿到它。
+            NSMutableArray<NSString *> *secretish = [NSMutableArray array];
+            for (NSString *k in defs) {
+                NSString *low = k.lowercaseString;
+                if ([low containsString:@"password"] || [low containsString:@"passwd"] ||
+                    [k containsString:@"密码"]) {
+                    [secretish addObject:k];
+                }
+            }
+            ok(secretish.count == 0,
+               [NSString stringWithFormat:@"出厂值中不含任何密码相关键%@",
+                secretish.count ? [@"，发现：" stringByAppendingString:
+                                   [secretish componentsJoinedByString:@", "]] : @""]);
+
+            // 出厂值必须与面板控件的硬编码初值一致，否则「首次启动」与「恢复后」表现不同。
+            ok([defs[kZ7OptFormatKey] isEqualToString:@"7z"], @"出厂格式为 7z");
+            ok([defs[kZ7OptLevelKey] integerValue] == TickForLevel(5),
+               @"出厂档位 = TickForLevel(5)（与滑杆初值同源）");
+            ok([defs[kZ7OptMethodKey] isEqualToString:@"自动"], @"出厂压缩方法为「自动」");
+            ok([defs[kZ7OptSolidKey] boolValue] == YES, @"出厂为固实归档");
+            ok([defs[kZ7OptAutoThreadsKey] boolValue] == YES, @"出厂为自动线程");
+            ok([defs[kZ7OptAdvancedKey] boolValue] == NO, @"出厂为高级参数收起");
+
+            // 档位映射：越界必须夹取，否则会越界读 kZ7LevelTickValues[]。
+            ok(LevelForTick(-1) == 0 && LevelForTick(99) == 9, @"档位越界被夹到两端");
+            BOOL roundTrip = YES;
+            for (NSInteger t = 0; t < 6; t++) {
+                if (TickForLevel(LevelForTick(t)) != t) roundTrip = NO;
+            }
+            ok(roundTrip, @"6 个档位往返一致（Tick→Level→Tick）");
+
+            // 注册域：registerDefaults 之后应能直接读到出厂值。
+            [[NSUserDefaults standardUserDefaults] registerDefaults:defs];
+            ok([[NSUserDefaults standardUserDefaults] stringForKey:kZ7OptFormatKey] != nil,
+               @"registerDefaults 后可直接读到出厂格式");
+
+            // 写读往返。用独立 suite 域，**绝不碰**用户真实的 org.7-zip.macos.app。
+            // 盯的是 saveCompressionOptions 真正依赖的那个机制：写入后
+            // persistentDomainForName: 能不能立刻看到——它决定「重启后记不记得住」。
+            NSString *dom = @"org.7-zip.macos.prefs-selftest";
+            NSUserDefaults *scoped = [[NSUserDefaults alloc] initWithSuiteName:dom];
+            [scoped setObject:@"tar.xz" forKey:kZ7OptFormatKey];
+            [scoped setInteger:4 forKey:kZ7OptLevelKey];
+            [scoped synchronize];
+            NSDictionary *back = [scoped persistentDomainForName:dom];
+            ok([back[kZ7OptFormatKey] isEqualToString:@"tar.xz"],
+               [NSString stringWithFormat:@"写入后 persistentDomain 立即读回格式（读到 %@）",
+                back[kZ7OptFormatKey] ?: @"(nil)"]);
+            ok([back[kZ7OptLevelKey] integerValue] == 4, @"写入后读回档位 4");
+            [scoped removePersistentDomainForName:dom];
+            NSDictionary *gone = [scoped persistentDomainForName:dom];
+            ok(gone[kZ7OptFormatKey] == nil, @"清理后自检域无残留");
+        }
+
+        printf("\n== M. 列表右键菜单 ==\n");
+        {
+            // 标题在测试进程里就是**中文原文**：应用用「中文原文当键」的本地化方案
+            // （开发区域 zh-Hans），而本进程没有 Localizable.strings 表，查表落空
+            // 正好回退成键本身。若哪天测试环境带上了翻译表，这两条会失败——那是
+            // 提示，不是误报。
+            NSObject *target = [[NSObject alloc] init];
+            NSMenu *rowMenu   = Z7BuildListContextMenu(YES, target);
+            NSMenu *blankMenu = Z7BuildListContextMenu(NO,  target);
+
+            ok([MenuTitleSignature(rowMenu) isEqualToString:
+                @"预览 | 解压所选… | 拷贝路径 | --- | 删除所选 | --- | 全选"],
+               [NSString stringWithFormat:@"行上右键：条目级动作，破坏性项单独一段放最后（实际：%@）",
+                MenuTitleSignature(rowMenu)]);
+
+            ok([MenuTitleSignature(blankMenu) isEqualToString:
+                @"添加文件… | 测试归档 | 在访达中显示 | 重新载入 | --- | 全选"],
+               [NSString stringWithFormat:@"空白处右键：整档动作，不出现条目级项（实际：%@）",
+                MenuTitleSignature(blankMenu)]);
+
+            // 动作名钉死。菜单动作是字符串写的（本文件不 #import main.m），
+            // 拼错既不会编译失败也不会运行期报错，只表现为「点那一项没反应」。
+            ok([MenuActionSignature(rowMenu) isEqualToString:
+                [@[Z7ListSelPreview, Z7ListSelExtractSelected, Z7ListSelCopyPath, @"-",
+                   Z7ListSelDelete, @"-", Z7ListSelSelectAll] componentsJoinedByString:@" | "]],
+               [NSString stringWithFormat:@"行上右键的动作名与常量一致（实际：%@）",
+                MenuActionSignature(rowMenu)]);
+
+            ok([MenuActionSignature(blankMenu) isEqualToString:
+                [@[Z7ListSelAddFiles, Z7ListSelTestArchive, Z7ListSelRevealInFinder,
+                   Z7ListSelReload, @"-", Z7ListSelSelectAll] componentsJoinedByString:@" | "]],
+               [NSString stringWithFormat:@"空白处右键的动作名与常量一致（实际：%@）",
+                MenuActionSignature(blankMenu)]);
+
+            // target 归属：非「全选」项指向调用方（由其 validateMenuItem: 决定可用性），
+            // 「全选」必须留空走响应链——控制器上没有 selectAll:，指向自己会
+            // unrecognized selector 崩掉。
+            BOOL targetsOK = YES, selectAllNil = YES;
+            for (NSMenuItem *it in rowMenu.itemArray) {
+                if (it.isSeparatorItem) continue;
+                if (it.action == NSSelectorFromString(Z7ListSelSelectAll)) {
+                    if (it.target != nil) selectAllNil = NO;
+                } else if (it.target != target) {
+                    targetsOK = NO;
+                }
+            }
+            ok(targetsOK, @"非「全选」项的 target 均指向传入对象");
+            ok(selectAllNil, @"「全选」的 target 留空（交响应链给 NSOutlineView）");
+        }
+
+        printf("\n== N. 列表视图的事件重写 ==\n");
+        {
+            // 哨兵：这两处重写一旦被删掉，右键会**静默**退回 AppKit 的默认菜单、
+            // 空格/Delete 也不再有效——不报错，只是功能没了。本机无法用鼠标复现，
+            // 只能靠断言守住。
+            Method mine = class_getInstanceMethod(Z7OutlineView.class, @selector(menuForEvent:));
+            Method base = class_getInstanceMethod(NSOutlineView.class, @selector(menuForEvent:));
+            ok(mine && base && method_getImplementation(mine) != method_getImplementation(base),
+               @"Z7OutlineView 重写了 menuForEvent:");
+
+            Method kMine = class_getInstanceMethod(Z7OutlineView.class, @selector(keyDown:));
+            Method kBase = class_getInstanceMethod(NSOutlineView.class, @selector(keyDown:));
+            ok(kMine && kBase && method_getImplementation(kMine) != method_getImplementation(kBase),
+               @"Z7OutlineView 重写了 keyDown:");
+
+            // 键盘分发可以真实驱动：keyDown: 只读 charactersIgnoringModifiers，
+            // 不需要窗口，因此合成事件在本机是有效的（鼠标事件才无效）。
+            TestOutlineDelegate *del = [[TestOutlineDelegate alloc] init];
+            Z7OutlineView *v = [[Z7OutlineView alloc] initWithFrame:NSMakeRect(0, 0, 200, 200)];
+            v.keyDelegate = del;
+
+            NSEvent *space = [NSEvent keyEventWithType:NSEventTypeKeyDown
+                                              location:NSZeroPoint modifierFlags:0
+                                             timestamp:0 windowNumber:0 context:nil
+                                            characters:@" " charactersIgnoringModifiers:@" "
+                                              isARepeat:NO keyCode:49];
+            [v keyDown:space];
+            ok(del.spaceCount == 1 && del.deleteCount == 0, @"空格键分发给 outlineDidPressSpace");
+
+            NSString *delChar = [NSString stringWithFormat:@"%C", (unichar)NSDeleteCharacter];
+            NSEvent *delEv = [NSEvent keyEventWithType:NSEventTypeKeyDown
+                                              location:NSZeroPoint modifierFlags:0
+                                             timestamp:0 windowNumber:0 context:nil
+                                            characters:delChar charactersIgnoringModifiers:delChar
+                                              isARepeat:NO keyCode:51];
+            [v keyDown:delEv];
+            ok(del.deleteCount == 1 && del.spaceCount == 1,
+               @"Delete 键分发给 outlineDidPressDelete（且不重复派发空格）");
+
+            // 其它按键必须交给 super，不能吞掉：否则列表就再也收不到方向键、
+            // 打字搜索这些正常输入。
+            NSEvent *arrow = [NSEvent keyEventWithType:NSEventTypeKeyDown
+                                              location:NSZeroPoint modifierFlags:0
+                                             timestamp:0 windowNumber:0 context:nil
+                                            characters:@"a" charactersIgnoringModifiers:@"a"
+                                              isARepeat:NO keyCode:0];
+            [v keyDown:arrow];
+            ok(del.spaceCount == 1 && del.deleteCount == 1,
+               @"普通字符不触发任何 delegate 回调（继续走 super）");
         }
 
         printf("\n== I. 错误路径 ==\n");

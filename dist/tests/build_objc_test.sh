@@ -35,6 +35,9 @@ build_arch() {
           -arch "$arch" -mmacosx-version-min=11.0 \
           -I"$ENGINE" -I"$LIB" -I"$DIST/app-src" \
           -o "$out" "$HERE/objc_test.m" "$DIST/app-src/Z7StatusItem.m" \
+                    "$DIST/app-src/Z7ListContextMenu.m" \
+                    "$DIST/app-src/Z7CompressionPrefs.m" \
+                    "$DIST/app-src/Z7OutlineView.m" \
           "$LIB/lib7zbridgeobjc.a" "$LIB/lib7zbridge.a" \
           $EXT_CODEC_LIBS \
           -L"$LIB" -l7z -lc++ \

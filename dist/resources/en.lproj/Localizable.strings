@@ -11,7 +11,6 @@
 "列" = "Columns";
 "解压所选…" = "Extract Selected…";
 "预览" = "Preview";
-"删除" = "Delete";
 "退出全屏幕" = "Exit Full Screen";
 "进入全屏幕" = "Enter Full Screen";
 "关于 7-Zip" = "About 7-Zip";
@@ -40,6 +39,9 @@
 "查找" = "Find";
 "操作" = "Actions";
 "删除所选" = "Delete Selected";
+"拷贝路径" = "Copy Path";
+"在访达中显示" = "Show in Finder";
+"重新载入" = "Reload";
 "在列表中选中条目后按空格键预览" = "Select an item in the list, then press Space to preview";
 "停止当前任务" = "Stop Current Task";
 "显示" = "View";
@@ -62,3 +64,11 @@
 "隐藏菜单栏图标" = "Hide Menu Bar Icon";
 "显示主窗口" = "Show Main Window";
 "点击打开菜单；把文件或归档拖到这里即可压缩或解压" = "Click to open the menu; drop files or archives here to compress or extract";
+
+/* 界面语言 */
+"语言" = "Language";
+"跟随系统" = "System Default";
+"界面语言已更改" = "Interface Language Changed";
+"需要重新启动 7-Zip 后才会生效。" = "7-Zip must be restarted for this change to take effect.";
+"立即重新启动" = "Restart Now";
+"稍后" = "Later";

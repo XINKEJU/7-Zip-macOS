@@ -611,6 +611,101 @@ hiutil -I corespotlight -C -a -f out.cshelpindex <帮助书 Contents/Resources>
   问一次能不能找到，找不到就 FAIL。目录摆错位置时界面上没有任何症状，
   只有这条断言拦得住。
 
+### 坑点 28：列表右键菜单只能走 `menuForEvent:`，`outline.menu` 会变成死代码
+
+`NSView` 有两条路径能给出右键菜单，**只能选一条**：
+
+1. `self.outline.menu = someMenu` —— 静态菜单，AppKit 的 `menuForEvent:` 默认实现会返回它；
+2. 重写 `menuForEvent:` 自己构建 —— 这时 `self.menu` 再也没人读。
+
+原实现是第 1 条（一个 4 项的固定菜单）。要按「点在有行的地方还是空白处」给不同内容，
+就必须换成第 2 条。**换的时候要把原来那行 `self.outline.menu = …` 删掉**：留着不会报错，
+也不会被使用，但会让后来者以为菜单是静态的，改了半天不见效果。
+
+配套的两点：
+
+- 右键落在**未选中**的行上，必须先把选中换过去再过菜单。列表控件里「右键 + 删除」
+  如果删的是上一次的选中集，就是纯粹的误操作。
+- 各项的可用性交给 `validateMenuItem:`（菜单项 target 指向控制器，AppKit 弹出前会逐项
+  调用），与菜单栏共用同一套判据；不要在构建菜单时另写一份。
+
+### 坑点 29：判断「用户选过界面语言没有」必须用 `persistentDomainForName:`
+
+界面语言的覆盖值是 `AppleLanguages`。读它有一个陷阱：
+
+```objc
+// ✗ 永远返回非 nil —— 系统会把全局语言偏好注入读取路径
+id v = [[NSUserDefaults standardUserDefaults] objectForKey:@"AppleLanguages"];
+
+// ✓ 只看到「我们自己写下的那一份」
+NSDictionary *mine = [[NSUserDefaults standardUserDefaults]
+                         persistentDomainForName:[[NSBundle mainBundle] bundleIdentifier]];
+id v = mine[@"AppleLanguages"];
+```
+
+分不清的后果是菜单勾选态永远标不对：「跟随系统」与「显式选了中文」在读出来之后完全同形。
+
+⚠️ 还有一个次序问题：`setObject:forKey:` 之后 `persistentDomainForName:` 可能仍返回
+**写盘前**的快照。所以读取前先 `synchronize` 一次——虽然这个 API 平时被劝退，这里恰好
+是它真正需要的场景。`make objc-test` 有一条断言专门盯这个组合（写 → synchronize →
+`persistentDomainForName:` 立即读回），它红了就说明「重启后记不住」会复发。
+
+### 坑点 30：启动期会把用户存的设置**覆盖**成默认值——比「没存」更隐蔽
+
+压缩选项面板的持久化本身很简单，真正的坑在**时序**：
+
+`loadView` 里控件建好之后会调一次 `formatChanged:` 刷新禁用态，那条路径一路走到
+`updateOptionsSummary`——而保存就挂在它末尾。此时控件里还是**硬编码初值**，如果放任
+它写盘，用户存了一年的设置会在每次启动时被就地抹掉。
+
+现象和「根本没做持久化」一模一样，但成因相反：不是没存，是启动时被自己覆盖了。
+
+对策是一个放行标志：`restoreCompressionOptions` 完成前置位，`saveCompressionOptions`
+开头不满足就返回。**恢复必须在 `formatChanged:` 之前**——否则首帧的联动禁用态是按
+默认格式算出来的（例如上次选 zip，字典/字长该灰却是亮的）。
+
+### 坑点 31：重启应用走 `NSWorkspace`，不要用 `NSTask`
+
+语言切换需要重启才生效（语言表在进程启动时挑定）。重启自己不能用 `NSTask`/`fork`：
+本仓有一条硬约束「归档操作零子进程」，`verify_app.sh` 会**真实统计运行期子进程数**，
+除系统 `hdiutil` 白名单外一个都不许有。
+
+`NSWorkspace` 是 LaunchServices/XPC 调用，不产生子进程，因此合规：
+
+```objc
+NSWorkspaceOpenConfiguration *cfg = [NSWorkspaceOpenConfiguration configuration];
+cfg.createsNewApplicationInstance = YES;   // 不加这条只是把运行中的自己激活一下，等于没重启
+[[NSWorkspace sharedWorkspace] openApplicationAtURL:[[NSBundle mainBundle] bundleURL]
+                                      configuration:cfg
+                                  completionHandler:^(NSRunningApplication *app, NSError *err) {
+    dispatch_async(dispatch_get_main_queue(), ^{ [NSApp terminate:nil]; });
+}];
+```
+
+⚠️ 用 `System Events` 的 `click button "…” of window 1` 点这个弹窗的按钮时会报
+**-1728（不能获得该按钮）**，但点击其实**已经生效**：按钮在 `runModal` 返回后就被销毁，
+System Events 只是在回读元素引用时报错。别据此判断「重启没成功」——用
+`ps -o etime=` 看进程存活时长才是可靠证据（实测重启后 etime 归零）。
+
+### 坑点 32：菜单动作名写成字符串就失去了编译期检查
+
+列表右键菜单单独成文件（`Z7ListContextMenu.m`）以便被 `objc-test` 链接，代价是它不能
+`#import main.m`，动作名只能写成字符串：
+
+```objc
+NSString * const Z7ListSelPreview = @"doPreview:";   // 拼错？编译器不会说话
+```
+
+拼错的后果是「右键点那一项没反应」——而本机合成鼠标事件无效（坑点 8 一带），界面上
+连复现都做不到。因此加了两道：
+
+- `objc-test` 断言菜单的**标题序列与动作名序列**，两者一起钉住；
+- `build_app.sh` 做一次跨文件核对：从 `Z7ListContextMenu.m` 抽出所有 `Z7ListSel*` 常量值，
+  与 `main.m` 里 `- (…)name:` 的方法名集合比对，**有引用没有实现就构建失败**。
+  「全选」是有意的例外（target 留空，交响应链给 `NSOutlineView`），在白名单里。
+
+负向测试是本项目对门禁的一贯要求：把 `doPreview:` 改成 `doPreveiw:`，构建必须红。
+
 ## 二·补：内嵌引擎库的构建顺序
 
 应用依赖三个产物，顺序固定：
@@ -873,7 +968,7 @@ sh dist/build/package.sh && shasum -a 256 dist/7zip-macos-26.03-macos-arm64.tar.
 
 ```bash
 make test        # 桥接层验收，对照官方 7zz 逐项比对（158 个用例，共 20 节）
-make objc-test   # ObjC 适配层验收（App 实际调用的那一层，68 个用例）
+make objc-test   # ObjC 适配层验收（App 实际调用的那一层，95 个用例）
 make appcheck    # 应用包验收（含真实启动与进程模型检查，42 个用例）
 make verify      # 离线校验：安装/卸载脚本逻辑 + Homebrew 公式一致性
 make check       # verify + 产物校验和 + DMG 完整性 + 应用签名

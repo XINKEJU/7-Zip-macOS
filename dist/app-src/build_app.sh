@@ -60,7 +60,8 @@ clang -fobjc-arc -fmodules -Wall -O2 \
       -I"$ENG_DIR" -I"$LIB" \
       -framework AppKit -framework Foundation -framework QuickLookUI -framework CoreFoundation \
       -framework UserNotifications \
-      -o "$BUILD/app-arm64" "$HERE/main.m" "$HERE/Z7StatusItem.m" \
+      -o "$BUILD/app-arm64" "$HERE/main.m" "$HERE/Z7StatusItem.m" "$HERE/Z7ListContextMenu.m" \
+                            "$HERE/Z7CompressionPrefs.m" "$HERE/Z7OutlineView.m" \
       "$LIB/lib7zbridgeobjc.a" "$LIB/lib7zbridge.a" \
       $EXT_CODEC_LIBS \
       -L"$LIB" -l7z -lc++ \
@@ -192,6 +193,31 @@ if ! diff -u "$KEYCHK/keys.src" "$KEYCHK/keys.en" > "$KEYCHK/keys.diff"; then
     exit 1
 fi
 echo "   本地化：en / zh-Hans 已就位，键完整（$(wc -l < "$KEYCHK/keys.src" | tr -d ' ') 条）"
+
+# --- 右键菜单的动作名必须在 main.m 里确有实现 -------------------------------
+# 列表右键菜单单独成文件（Z7ListContextMenu.m），它不能 #import main.m，动作名
+# 只能写成字符串，因此拿不到 @selector 的编译期拼写检查。拼错不会有任何报错，
+# 表现只是「右键点了那一项没反应」——而本机合成鼠标事件无效（见 BUILD.md），
+# 界面上连复现都做不到。所以在构建期做一次跨文件核对。
+SELCHK="$BUILD/sel-check"
+mkdir -p "$SELCHK"
+LC_ALL=C sed -n 's/^NSString \* const Z7ListSel[A-Za-z]* *= *@"\(.*\)";$/\1/p' \
+    "$HERE/Z7ListContextMenu.m" | LC_ALL=C sort -u > "$SELCHK/menu.sel"
+# 抓每行行首的方法定义，取第一个参数名（含尾部冒号）。
+LC_ALL=C sed -n 's/^[-+][[:space:]]*(\([^)]*\))[[:space:]]*\([A-Za-z_][A-Za-z0-9_]*:\).*$/\2/p' \
+    "$HERE/main.m" | LC_ALL=C sort -u > "$SELCHK/main.meth"
+# 白名单：这些动作有意不在 main.m 里实现。
+#   selectAll: —— 菜单项 target 留空，走响应链交给 NSOutlineView 自己的实现。
+printf 'selectAll:\n' > "$SELCHK/allow.sel"
+LC_ALL=C cat "$SELCHK/main.meth" "$SELCHK/allow.sel" \
+    | LC_ALL=C sort -u > "$SELCHK/known.meth"
+MISSING="$(LC_ALL=C comm -23 "$SELCHK/menu.sel" "$SELCHK/known.meth")"
+if [ -n "$MISSING" ]; then
+    echo "右键菜单引用了 main.m 里不存在的动作（拼错？已改名未同步？）：" >&2
+    echo "$MISSING" | sed 's/^/   /' >&2
+    exit 1
+fi
+echo "   右键菜单动作名全部有实现（$(wc -l < "$SELCHK/menu.sel" | tr -d ' ') 个）"
 
 chmod 755 "$APP/Contents/MacOS/7-Zip" \
           "$APP/Contents/Frameworks/lib7z.dylib"

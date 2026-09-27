@@ -35,6 +35,9 @@
 
 #import "SevenZipEngineObjC.h"
 #import "Z7StatusItem.h"
+#import "Z7ListContextMenu.h"
+#import "Z7CompressionPrefs.h"
+#import "Z7OutlineView.h"
 
 // 界面文案的本地化入口。
 //
@@ -113,6 +116,62 @@ static NSString *DateText(NSDate *d)
 ///     应用只能投递、不能读改）。
 static NSString * const kZ7RecentKey = @"Z7RecentArchives";
 static const NSUInteger kZ7RecentLimit = 10;
+
+// 「压缩选项」面板的持久化键、出厂值与级别映射都在 Z7CompressionPrefs.{h,m} 里。
+//
+// 为什么需要持久化：控件初值是硬编码的（formatPop 选第一项、滑杆拨到「正常」…），
+// currentOptions 每次都新建一个对象只从控件现读，于是**关掉再开就全部回到默认**，
+// 用户每次都要重设一遍。现在把面板状态存进应用自己的域，重启后照原样恢复。
+//
+// 为什么单独成文件：那边是纯数据、不依赖 AppKit，objc-test 能直接链接并断言
+// 「键与默认值一一对应」这类前提——它们的失败模式全是静默的。
+
+#pragma mark 界面语言
+
+// 界面语言覆盖。语言表是在**进程启动时**挑定的（NSLocalizedString 之后查的就是
+// 那一张），运行期改不了，所以这里做的只是「写下选择 + 提示重启」。
+//
+// macOS 的正规做法是让用户在「系统设置 › 通用 › 语言与地区 › 应用程序」里为单个
+// 应用指定语言，但那条路对国内用户几乎没有可发现性——此前只能靠
+// `defaults write org.7-zip.macos.app AppleLanguages -array en` 这种命令行操作。
+static NSString * const kZ7LanguageKey = @"AppleLanguages";
+
+/// 用户在本应用里**显式选定**的语言；nil 表示未选过、跟随系统。
+///
+/// ⚠️ 必须用 persistentDomainForName: 去读本应用自己的域。直接
+/// `[d objectForKey:@"AppleLanguages"]` 永远拿得到一个非 nil 数组——系统会把全局
+/// 语言偏好注入读取路径。于是「没设过（跟随系统）」和「显式选了中文」在读取侧
+/// 完全同形，菜单勾选态永远标不对。
+static NSString *Z7LanguageOverride(void)
+{
+    NSString *bid = [[NSBundle mainBundle] bundleIdentifier];
+    if (!bid.length) return nil;
+    // setObject:forKey: 之后 persistentDomainForName: 可能仍返回写盘前的快照，
+    // 先冲一次，保证刚点完菜单读回来就是新值。
+    [[NSUserDefaults standardUserDefaults] synchronize];
+    NSDictionary *mine = [[NSUserDefaults standardUserDefaults] persistentDomainForName:bid];
+    id v = mine[kZ7LanguageKey];
+    if (![v isKindOfClass:NSArray.class] || ![(NSArray *)v count]) return nil;
+    NSString *first = [(NSArray *)v firstObject];
+    return [first isKindOfClass:NSString.class] ? first : nil;
+}
+
+/// 写入语言选择；lang 为 nil / 空 表示清除覆盖、回到跟随系统。
+static void Z7SetLanguageOverride(NSString *lang)
+{
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    if (!lang.length) [d removeObjectForKey:kZ7LanguageKey];
+    else [d setObject:@[lang] forKey:kZ7LanguageKey];
+    [d synchronize];
+}
+
+/// 覆盖值 → 菜单 tag（0 跟随系统 / 1 简体中文 / 2 English）。
+static NSInteger Z7LanguageMenuTag(void)
+{
+    NSString *cur = Z7LanguageOverride();
+    if (!cur.length) return 0;
+    return [cur hasPrefix:@"zh"] ? 1 : 2;
+}
 
 static NSArray<NSString *> *Z7RecentPaths(void)
 {
@@ -910,33 +969,9 @@ typedef NS_ENUM(NSInteger, Z7TaskKind) {
 
 #pragma mark - 可响应空格/删除键的 outline view（§6.4 / §6.5）
 
-@protocol Z7OutlineKeyDelegate <NSObject>
-- (void)outlineDidPressSpace;
-- (void)outlineDidPressDelete;
-@end
-
-@interface Z7OutlineView : NSOutlineView
-@property (nonatomic, weak) id<Z7OutlineKeyDelegate> keyDelegate;
-@end
-
-@implementation Z7OutlineView
-
-- (void)keyDown:(NSEvent *)e
-{
-    NSString *chars = e.charactersIgnoringModifiers;
-    if ([chars isEqualToString:@" "]) {
-        [self.keyDelegate outlineDidPressSpace];
-        return;
-    }
-    unichar c = chars.length ? [chars characterAtIndex:0] : 0;
-    if (c == NSDeleteCharacter || c == NSBackspaceCharacter || c == NSDeleteFunctionKey) {
-        [self.keyDelegate outlineDidPressDelete];
-        return;
-    }
-    [super keyDown:e];
-}
-
-@end
+// Z7OutlineKeyDelegate 协议与 Z7OutlineView 类都在 Z7OutlineView.{h,m} 里。
+// 抽出去是为了让 objc-test 能断言它确实重写了 keyDown: / menuForEvent:——本机
+// 合成鼠标事件无效，右键菜单在界面上没法自动复现，留在本文件里就是测试盲区。
 
 #pragma mark - 拖放视图
 
@@ -1254,6 +1289,9 @@ static NSImage *FileIcon(NSString *name, BOOL isDir, BOOL isLink)
 @property (nonatomic, strong) NSButton *advancedToggle;          // 「高级参数」折叠开关
 @property (nonatomic, strong) NSView *advancedBox;               // 折叠区内容
 @property (nonatomic, assign) BOOL advancedExpanded;
+/// 面板状态是否已从应用域恢复过。saveCompressionOptions 的放行开关，
+/// 见其实现里「启动期不得覆盖已存值」那段说明。
+@property (nonatomic, assign) BOOL optionsRestored;
 @property (nonatomic, strong) NSLayoutConstraint *advancedZeroHeight; // 收起时把折叠区压成 0 高
 @property (nonatomic, strong) NSArray<NSLayoutConstraint *> *advancedContentConstraints;
 
@@ -1321,6 +1359,8 @@ static NSImage *FileIcon(NSString *name, BOOL isDir, BOOL isLink)
 - (void)setLogVisible:(BOOL)visible;
 - (void)updateEmptyState;
 - (void)updateOptionsSummary;
+- (void)restoreCompressionOptions;
+- (void)saveCompressionOptions;
 - (void)updateArchiveChrome;
 - (NSString *)archivePassword;
 - (Z7CompressionOptions *)currentOptions;
@@ -1466,38 +1506,12 @@ static NSImage *FileIcon(NSString *name, BOOL isDir, BOOL isLink)
 
 #pragma mark 压缩方式档位（Keka 面板的 6 档滑杆）
 
-/// 滑杆有 6 个刻度位，对应 7-Zip 的 -mx = 0/1/3/5/7/9。
-/// 面板上只给 0/1/5/9 四档加文字（存储 快速 正常 慢速），与参考面板一致。
-static const NSInteger kLevelTickValues[6] = {0, 1, 3, 5, 7, 9};
-
-static NSInteger LevelForTick(NSInteger tick)
-{
-    if (tick < 0) tick = 0;
-    if (tick > 5) tick = 5;
-    return kLevelTickValues[tick];
-}
-
-static NSInteger TickForLevel(NSInteger level)
-{
-    NSInteger best = 3, bestDelta = 99;
-    for (NSInteger i = 0; i < 6; i++) {
-        NSInteger d = labs(kLevelTickValues[i] - level);
-        if (d < bestDelta) { bestDelta = d; best = i; }
-    }
-    return best;
-}
-
-static NSString *LevelNameForTick(NSInteger tick)
-{
-    switch (tick) {
-        case 0: return @"存储";
-        case 1: return @"快速";
-        case 2: return @"较快";
-        case 3: return @"正常";
-        case 4: return @"较好";
-        default: return @"慢速";
-    }
-}
+// 档位映射（kZ7LevelTickValues / LevelForTick / TickForLevel / LevelNameForTick）
+// 与「出厂值」一起放在 Z7CompressionPrefs.{h,m}：它们是纯数据，那边能被 objc-test
+// 直接链接断言，这里做不到。
+//
+// 滑杆有 6 个刻度位，对应 7-Zip 的 -mx = 0/1/3/5/7/9。
+// 面板上只给 0/1/5/9 四档加文字（存储 快速 正常 慢速），与参考面板一致。
 
 #pragma mark 压缩选项控件（§5.1）
 
@@ -1721,6 +1735,11 @@ static NSString *LevelNameForTick(NSInteger tick)
     // 更新模式（§5.1「更新模式」，作用于添加操作）
     self.updateModePop = [self popup:@[@"跳过同名", @"替换同名"]
                               action:@selector(updateOptionsSummary:)];
+
+    // 控件齐了就把用户上次的状态铺回去。放在这里而不是 loadView 末尾，是因为
+    // 紧接着 loadView 会调 formatChanged: 刷一次禁用态——它读的是控件现值，
+    // 先恢复再刷才能得到正确的联动结果（例如上次选的是 zip，字典/字长就该是灰的）。
+    [self restoreCompressionOptions];
 }
 
 #pragma mark 「压缩选项」弹出面板
@@ -2291,6 +2310,107 @@ static NSString *LevelNameForTick(NSInteger tick)
     self.summaryLabel.stringValue = optionsSummary;
 }
 
+#pragma mark 压缩选项的持久化
+
+/// 按标题选中下拉项；标题为空或不在列表里就保持原选中。
+/// 不做额外存在性校验是有意的：`selectItemWithTitle:` 对未知标题本就是 no-op，
+/// 这样「旧版本存下的格式在新版本被移除」会自然回退到默认项，而不是选中空项。
+static void Z7SelectPopupTitle(NSPopUpButton *p, NSString *title)
+{
+    if (!p || !title.length) return;
+    [p selectItemWithTitle:title];
+}
+
+/// 从应用域恢复面板状态。
+- (void)restoreCompressionOptions
+{
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+
+    Z7SelectPopupTitle(self.formatPop,  [d stringForKey:kZ7OptFormatKey]);
+
+    NSInteger tick = [d integerForKey:kZ7OptLevelKey];
+    if (tick < 0) tick = 0;
+    if (tick > 5) tick = 5;   // 手工改过 plist 的越界值不能进 kLevelTickValues[]
+    self.levelSlider.integerValue = tick;
+    self.levelLabel.stringValue = LevelNameForTick(tick);
+
+    Z7SelectPopupTitle(self.methodPop, [d stringForKey:kZ7OptMethodKey]);
+    Z7SelectPopupTitle(self.dictPop,   [d stringForKey:kZ7OptDictKey]);
+    Z7SelectPopupTitle(self.wordPop,   [d stringForKey:kZ7OptWordKey]);
+    self.fastBytesField.stringValue = [d stringForKey:kZ7OptFastBytesKey] ?: @"";
+    Z7SelectPopupTitle(self.matchPop,  [d stringForKey:kZ7OptMatchKey]);
+
+    self.solidCheck.state = [d boolForKey:kZ7OptSolidKey]
+        ? NSControlStateValueOn : NSControlStateValueOff;
+    Z7SelectPopupTitle(self.solidBlockPop, [d stringForKey:kZ7OptSolidBlockKey]);
+    self.autoThreadsCheck.state = [d boolForKey:kZ7OptAutoThreadsKey]
+        ? NSControlStateValueOn : NSControlStateValueOff;
+    self.threadsField.stringValue = [d stringForKey:kZ7OptThreadsKey] ?: @"";
+    self.volumeCombo.stringValue  = [d stringForKey:kZ7OptVolumeKey] ?: @"";
+
+    Z7SelectPopupTitle(self.encryptMethPop, [d stringForKey:kZ7OptEncMethKey]);
+    self.encryptHeaderCheck.state = [d boolForKey:kZ7OptEncHeaderKey]
+        ? NSControlStateValueOn : NSControlStateValueOff;
+    self.compressHeaderCheck.state = [d boolForKey:kZ7OptCompHeaderKey]
+        ? NSControlStateValueOn : NSControlStateValueOff;
+    self.fullPathsCheck.state = [d boolForKey:kZ7OptFullPathsKey]
+        ? NSControlStateValueOn : NSControlStateValueOff;
+    self.excludeJunkCheck.state = [d boolForKey:kZ7OptExcludeJunkKey]
+        ? NSControlStateValueOn : NSControlStateValueOff;
+    self.verifyAfterCheck.state = [d boolForKey:kZ7OptVerifyKey]
+        ? NSControlStateValueOn : NSControlStateValueOff;
+    self.separateCheck.state = [d boolForKey:kZ7OptSeparateKey]
+        ? NSControlStateValueOn : NSControlStateValueOff;
+    Z7SelectPopupTitle(self.updateModePop, [d stringForKey:kZ7OptUpdateModeKey]);
+
+    // 折叠区不能只设 hidden：改完 state 必须走一次 toggleAdvanced:，由它去摆
+    // 「展开用内部约束 / 收起用 0 高度约束」这两套互斥约束。只设 hidden 会留下
+    // 两套约束同时激活的冲突，Auto Layout 会打断其中一条。
+    self.advancedToggle.state = [d boolForKey:kZ7OptAdvancedKey]
+        ? NSControlStateValueOn : NSControlStateValueOff;
+    if (self.advancedToggle.state == NSControlStateValueOn) [self toggleAdvanced:nil];
+
+    // 放行保存。此前任何一次 updateOptionsSummary 都不写盘——那会儿控件还是
+    // 硬编码初值，写下去等于把用户存下的设置就地抹掉。
+    self.optionsRestored = YES;
+}
+
+/// 把面板现值写回应用域。
+- (void)saveCompressionOptions
+{
+    if (!self.optionsRestored) return;
+
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    [d setObject:self.selectedFormat forKey:kZ7OptFormatKey];
+    [d setInteger:self.levelSlider.integerValue forKey:kZ7OptLevelKey];
+    [d setObject:(self.methodPop.titleOfSelectedItem ?: @"自动")  forKey:kZ7OptMethodKey];
+    [d setObject:(self.dictPop.titleOfSelectedItem ?: @"自动")    forKey:kZ7OptDictKey];
+    [d setObject:(self.wordPop.titleOfSelectedItem ?: @"自动")    forKey:kZ7OptWordKey];
+    [d setObject:(self.fastBytesField.stringValue ?: @"")         forKey:kZ7OptFastBytesKey];
+    [d setObject:(self.matchPop.titleOfSelectedItem ?: @"自动")   forKey:kZ7OptMatchKey];
+    [d setBool:(self.solidCheck.state == NSControlStateValueOn)        forKey:kZ7OptSolidKey];
+    [d setObject:(self.solidBlockPop.titleOfSelectedItem ?: @"分块不限") forKey:kZ7OptSolidBlockKey];
+    [d setBool:(self.autoThreadsCheck.state == NSControlStateValueOn)  forKey:kZ7OptAutoThreadsKey];
+    [d setObject:(self.threadsField.stringValue ?: @"")           forKey:kZ7OptThreadsKey];
+    [d setObject:(self.volumeCombo.stringValue ?: @"")            forKey:kZ7OptVolumeKey];
+    [d setObject:(self.encryptMethPop.titleOfSelectedItem ?: @"AES256") forKey:kZ7OptEncMethKey];
+    [d setBool:(self.encryptHeaderCheck.state == NSControlStateValueOn) forKey:kZ7OptEncHeaderKey];
+    [d setBool:(self.compressHeaderCheck.state == NSControlStateValueOn) forKey:kZ7OptCompHeaderKey];
+    [d setBool:(self.fullPathsCheck.state == NSControlStateValueOn)     forKey:kZ7OptFullPathsKey];
+    [d setBool:(self.excludeJunkCheck.state == NSControlStateValueOn)   forKey:kZ7OptExcludeJunkKey];
+    [d setBool:(self.verifyAfterCheck.state == NSControlStateValueOn)   forKey:kZ7OptVerifyKey];
+    [d setBool:(self.separateCheck.state == NSControlStateValueOn)      forKey:kZ7OptSeparateKey];
+    [d setObject:(self.updateModePop.titleOfSelectedItem ?: @"跳过同名") forKey:kZ7OptUpdateModeKey];
+    [d setBool:self.advancedExpanded forKey:kZ7OptAdvancedKey];
+
+    // 刻意不持久化的两项：
+    //   * 密码 —— 把明文口令写进 plist 是实打实的安全缺陷。需要「记住密码」的场景
+    //     （反复打开同一个加密归档）走的是钥匙串，与本面板这道「新建时的口令」无关。
+    //   * 「压缩完成后删除源文件」 —— 不可逆的破坏性开关。每次重新勾选是更安全的
+    //     默认：用户忘了上次勾着它，就会在没留意的情况下少掉一批源文件。
+    //   两者都不是遗漏，改之前请先想清楚。
+}
+
 #pragma mark 归档树与空状态
 
 - (void)buildTreeAndEmptyState
@@ -2648,14 +2768,15 @@ static NSString *LevelNameForTick(NSInteger tick)
     [[self.drop.widthAnchor constraintGreaterThanOrEqualToConstant:460] setActive:YES];
 
 
-    // 右键菜单（§6.4）
-    NSMenu *ctx = [[NSMenu alloc] init];
-    [ctx addItemWithTitle:L(@"解压所选…") action:@selector(doExtractSelection:) keyEquivalent:@""];
-    [ctx addItemWithTitle:L(@"预览") action:@selector(doPreview:) keyEquivalent:@""];
-    [ctx addItem:[NSMenuItem separatorItem]];
-    [ctx addItemWithTitle:L(@"删除") action:@selector(doDelete:) keyEquivalent:@""];
-    for (NSMenuItem *mi in ctx.itemArray) mi.target = self;
-    self.outline.menu = ctx;
+    // 右键菜单（§6.4）不在这里挂。
+    //
+    // 原实现是一个 4 项的静态 NSMenu（解压所选… / 预览 / 删除）赋给 self.outline.menu，
+    // 它表达不了「点在有行的地方 vs 空白处」「归档是否已打开」这些区分，也没有
+    // 拷贝路径、在访达中显示这类顺手动作。改由 Z7OutlineView 重写 menuForEvent:
+    // 现场构建——内容与可用性见 MainViewController 的 outline:menuForRow:。
+    //
+    // ⚠️ 别再给 self.outline.menu 赋值：重写后的 menuForEvent: 直接返回自建菜单、
+    // 从不读 self.menu，那个赋值会变成没人用的死代码，误导后来者以为菜单是静态的。
 }
 
 #pragma mark 工具栏
@@ -3142,7 +3263,9 @@ static const NSUInteger kZ7LogCharLimit = 200000;
     if (a == @selector(doCancel:)) return self.current != nil;
     if (a == @selector(doExtract:) || a == @selector(doExtractSelection:) ||
         a == @selector(doTest:) || a == @selector(doAdd:) || a == @selector(doDelete:) ||
-        a == @selector(doPreview:)) {
+        a == @selector(doPreview:) ||
+        // 右键菜单里的整档命令共用同一条判据：归档已打开且当前没有任务在跑。
+        a == @selector(revealArchiveInFinder:) || a == @selector(reloadArchive:)) {
         return self.archivePath != nil && self.current == nil;
     }
     // 编辑菜单里的剪切 / 粘贴在本应用没有落点：归档条目不能就地改名，归档也不
@@ -3232,6 +3355,39 @@ static const NSUInteger kZ7LogCharLimit = 200000;
     [pb setString:[lines componentsJoinedByString:@"\n"] forType:NSPasteboardTypeString];
     [self showStatus:[NSString stringWithFormat:@"已拷贝 %lu 条路径",
                       (unsigned long)lines.count]];
+}
+
+#pragma mark 列表右键菜单
+
+/// 右键菜单内容随「点在哪」变化：行上给条目级动作，空白处给整档动作。
+///
+/// 内容本身由 Z7ListContextMenu 构建——抽出去是为了让 objc-test 能逐项断言：
+/// 本机合成鼠标事件无效（见 BUILD.md），右键菜单在界面上根本没法自动复现，
+/// 留在本文件里就是一个测试够不着的黑盒。
+///
+/// 各动作的可用性不在这里判断：菜单项的 target 是本控制器，AppKit 弹出前会调
+/// validateMenuItem:，与菜单栏共用同一套规则。
+- (NSMenu *)outline:(NSOutlineView *)outline menuForRow:(NSInteger)row
+{
+    BOOL hasRow = (row >= 0 && row < outline.numberOfRows);
+    return Z7BuildListContextMenu(hasRow, self);
+}
+
+/// 在访达里定位已打开的归档。
+/// 只对**归档文件本身**有意义：归档内条目并不在文件系统上，真要在访达里看到它，
+/// 得先解压到某个临时目录——那会让用户对着一个来历不明的文件夹发懵。宁可不提供。
+- (void)revealArchiveInFinder:(id)s
+{
+    if (!self.archivePath.length) return;
+    [[NSWorkspace sharedWorkspace] activateFileViewerSelectingURLs:
+        @[[NSURL fileURLWithPath:self.archivePath]]];
+}
+
+/// 重新读一遍当前归档（外部工具改动过它时用得上）。
+- (void)reloadArchive:(id)s
+{
+    if (!self.archivePath.length) return;
+    [self openArchive:self.archivePath password:[self archivePassword]];
 }
 
 #pragma mark 打开 / 列表
@@ -4642,6 +4798,25 @@ static NSString *UniqueArchivePath(NSString *dir, NSString *base, NSString *ext)
     // 图标一旦收起，用户想找回它就没有别的落点可点了。
     [viewMenu addItemWithTitle:L(@"显示菜单栏图标") action:@selector(toggleStatusItem:) keyEquivalent:@""];
     [viewMenu addItem:[NSMenuItem separatorItem]];
+    // 界面语言。放这里与「显示菜单栏图标」并列——两者同属「应用级行为偏好」，
+    // 而本应用没有独立的偏好设置窗口，视图菜单就是它们现成的落点。
+    NSMenuItem *langItem = [[NSMenuItem alloc] init];
+    langItem.title = L(@"语言");
+    [viewMenu addItem:langItem];
+    NSMenu *langMenu = [[NSMenu alloc] initWithTitle:L(@"语言")];
+    // 只有第一项跟随界面语言翻译。后两项是语言**自称**（endonym），刻意不套 L()：
+    // 语言菜单里的选项名必须恒定——否则用户切到自己看不懂的语言后，
+    // 「切回中文」那一项也跟着变成了不认识的词，就再也回不来了。
+    NSArray<NSString *> *langTitles = @[L(@"跟随系统"), @"简体中文", @"English"];
+    for (NSUInteger i = 0; i < langTitles.count; i++) {
+        // tag 即选项身份（0/1/2），勾选态由 validateMenuItem: 按它计算
+        NSMenuItem *it = [langMenu addItemWithTitle:langTitles[i]
+                                             action:@selector(setLanguageFromMenu:)
+                                      keyEquivalent:@""];
+        it.tag = (NSInteger)i;
+    }
+    langItem.submenu = langMenu;
+    [viewMenu addItem:[NSMenuItem separatorItem]];
     // 进入/退出全屏幕：窗口本来就可缩放，是全屏幕的合格对象，但 AppKit 只在
     // 窗口菜单里放「平铺」之类的排布命令，不会替你生成这一条。快捷键 ⌃⌘F 是
     // macOS 的固定约定，不写这条用户就只能靠绿色按钮，键盘用户没有入口。
@@ -4733,6 +4908,11 @@ static NSString *UniqueArchivePath(NSString *dir, NSString *base, NSString *ext)
 
 - (void)applicationDidFinishLaunching:(NSNotification *)n
 {
+    // 「压缩选项」各键的出厂值必须在**任何控制器被创建之前**注册好：
+    // 第一个窗口的 loadView 就会读它们并铺进控件，注册晚了那一刻读到的全是 nil。
+    // 放在本方法开头即满足——建窗口在下面 newWindowAndShow: 处才发生。
+    [[NSUserDefaults standardUserDefaults] registerDefaults:Z7CompressionPrefsDefaults()];
+
     [self buildMenu];
     [self buildStatusItem];
 
@@ -5031,10 +5211,62 @@ static NSString *UniqueArchivePath(NSString *dir, NSString *base, NSString *ext)
 
 /// 只接管状态栏那一项的状态显示，其余交给默认行为。AppDelegate 会成为菜单项的
 /// target（响应链末端），因此这里返回 YES 的范围要克制。
+/// 重启自己。
+///
+/// ⚠️ 走 NSWorkspace（LaunchServices/XPC）而**不是** NSTask 或 fork：本应用有一条
+/// 硬约束「归档操作零子进程」，verify_app.sh 会真实统计运行期子进程数，除系统
+/// hdiutil 那一个白名单外一个都不许有。NSWorkspace 不产生子进程，因此合规。
+- (void)relaunchApp
+{
+    NSWorkspaceOpenConfiguration *cfg = [NSWorkspaceOpenConfiguration configuration];
+    // 不加这一条的话，openApplication 只是把已经在运行的自己激活一下，等于没重启。
+    cfg.createsNewApplicationInstance = YES;
+    __weak AppDelegate *weakSelf = self;
+    [[NSWorkspace sharedWorkspace]
+        openApplicationAtURL:[[NSBundle mainBundle] bundleURL]
+               configuration:cfg
+           completionHandler:^(NSRunningApplication *app, NSError *err) {
+        (void)app; (void)err;
+        // 回调在任意线程上，退出应用必须回主线程。
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (weakSelf) [NSApp terminate:nil];
+        });
+    }];
+}
+
+- (void)setLanguageFromMenu:(NSMenuItem *)item
+{
+    static NSArray<NSString *> *langs = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ langs = @[@"", @"zh-Hans", @"en"]; });   // 与菜单 tag 一一对应
+
+    NSInteger idx = item.tag;
+    if (idx < 0 || idx >= (NSInteger)langs.count) return;
+    NSString *want = langs[(NSUInteger)idx];
+    if ([(Z7LanguageOverride() ?: @"") isEqualToString:want]) return;   // 点的就是当前项
+
+    Z7SetLanguageOverride(want);
+
+    // 不能默默什么都不做：语言表在启动时就定好了，本进程内无论怎么改都不会生效。
+    NSAlert *a = [[NSAlert alloc] init];
+    a.messageText = L(@"界面语言已更改");
+    a.informativeText = L(@"需要重新启动 7-Zip 后才会生效。");
+    [a addButtonWithTitle:L(@"立即重新启动")];
+    [a addButtonWithTitle:L(@"稍后")];
+    if ([a runModal] != NSAlertFirstButtonReturn) return;
+    [self relaunchApp];
+}
+
 - (BOOL)validateMenuItem:(NSMenuItem *)item
 {
     if (item.action == @selector(toggleStatusItem:)) {
         item.state = self.statusItem ? NSControlStateValueOn : NSControlStateValueOff;
+    }
+    // 语言项靠 tag 认身份，勾选态现算（切换后到重启前，这里读的就是新值，
+    // 用户看到的勾会先跳过去，与「已存待生效」的实际状态一致）。
+    if (item.action == @selector(setLanguageFromMenu:)) {
+        item.state = (item.tag == Z7LanguageMenuTag()) ? NSControlStateValueOn
+                                                       : NSControlStateValueOff;
     }
     return YES;
 }
