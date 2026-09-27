@@ -64,6 +64,8 @@
 #include "7zip/PropID.h"
 
 #include "Z7ExtCodec.h"
+#include "Z7IsoWriter.h"
+#include "Z7DmgWriter.h"
 #include "7zVersion.h"
 
 using namespace NWindows;
@@ -2704,6 +2706,21 @@ static bool MakeComposedTempTar(const std::string &innerName, std::string &dirOu
 bool create(const std::vector<std::string> &utf8InputPaths,
             const std::string &utf8DestArchive, const CompressionOptions &options,
             Callback *cb, std::string &error) {
+  // 镜像类格式先分流：它们不是上游 handler（7-Zip 只能读 ISO/DMG），也不是单流
+  // 编解码器，必须在 CreateSingleArchive 的 CLSID 查找之前处理。
+  //   iso —— 进程内自研 ISO9660+Joliet 写入器（Z7IsoWriter）；
+  //   dmg —— 调系统 hdiutil（Z7DmgWriter，唯一的子进程例外）。
+  {
+    std::string lf;
+    for (size_t i = 0; i < options.format.size(); i++)
+      lf += (char)tolower((unsigned char)options.format[i]);
+    if (lf == "iso")
+      return iso::CreateIso(utf8InputPaths, utf8DestArchive, options.volumeName,
+                            options.excludeMacJunk, cb, error);
+    if (lf == "dmg")
+      return dmg::CreateDmg(utf8InputPaths, utf8DestArchive, options.volumeName, cb, error);
+  }
+
   std::string outer;
   if (!IsComposedTarFormat(options.format, outer))
     return CreateSingleArchive(utf8InputPaths, utf8DestArchive, options, cb, error);
@@ -3128,6 +3145,27 @@ bool listFormats(std::vector<FormatInfo> &out) {
     fi.canUpdate = handlers[i].canUpdate;
     if (zstdCanEncode && handlers[i].name == "zstd") fi.canUpdate = true;
     out.push_back(fi);
+  }
+
+  // 镜像类格式：上游的 Iso / Dmg handler 只能读（没有 IOutArchive），本移植补了
+  // 「创建」（ISO 自研写入器 / DMG 调 hdiutil），因此把 canUpdate 置 true；
+  // 用大小写不敏感的匹配覆盖上游注册表里的 Iso / Dmg 条目，缺失时才补一条。
+  const char *extraName[2] = {"iso", "dmg"};
+  for (int e = 0; e < 2; e++) {
+    bool found = false;
+    for (size_t i = 0; i < out.size(); i++) {
+      std::string ln;
+      for (size_t k = 0; k < out[i].name.size(); k++)
+        ln += (char)tolower((unsigned char)out[i].name[k]);
+      if (ln == extraName[e]) { out[i].canUpdate = true; found = true; break; }
+    }
+    if (!found) {
+      FormatInfo fi;
+      fi.name = extraName[e];
+      fi.extensions = extraName[e];
+      fi.canUpdate = true;
+      out.push_back(fi);
+    }
   }
   return !out.empty();
 }

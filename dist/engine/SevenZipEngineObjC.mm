@@ -387,6 +387,7 @@ z7::CompressionOptions OptionsToCxx(Z7CompressionOptions *o) {
     c.hasCompressHeader = o.hasCompressHeader;
     c.compressHeader = o.compressHeader;
     c.excludeMacJunk = o.excludeMacJunk;
+    c.volumeName = StdStringFromUtf8(o.volumeName);
     return c;
 }
 
@@ -652,6 +653,7 @@ z7::CompressionOptions OptionsToCxx(Z7CompressionOptions *o) {
         _encryptHeader = YES;
         _compressHeader = YES;
         _excludeMacJunk = YES;
+        _volumeName = @"";
     }
     return self;
 }
@@ -684,6 +686,7 @@ z7::CompressionOptions OptionsToCxx(Z7CompressionOptions *o) {
     c.hasCompressHeader = self.hasCompressHeader;
     c.compressHeader = self.compressHeader;
     c.excludeMacJunk = self.excludeMacJunk;
+    c.volumeName = self.volumeName;
     return c;
 }
 

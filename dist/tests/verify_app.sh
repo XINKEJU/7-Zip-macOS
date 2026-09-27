@@ -155,12 +155,18 @@ fi
 # ---------------------------------------------------------------------------
 head1 "5. 进程模型：引擎必须在进程内运行"
 
-# App 不应再派生 7zz；NSTask 类若仍被引用说明还有子进程调用路径
+# App 不应再派生 7zz；NSTask 类若仍被引用说明还有子进程调用路径。
+# 唯一被许可的子进程例外是「DMG 创建」时派生系统 hdiutil（DMG 是 Apple 专有
+# 格式，无进程内等价物）。它由引擎 C++ 侧用 posix_spawn 发起、不经过 NSTask，
+# 因此本断言依旧成立；白名单见下方子进程统计。详见 BUILD.md「DMG 与零子进程原则」。
 if nm -u "$BIN" 2>/dev/null | grep -q '_OBJC_CLASS_$_NSTask'; then
     bad "主程序仍引用 NSTask（存在子进程调用路径）"
 else
     ok "主程序未引用 NSTask（归档操作全在进程内）"
 fi
+
+# 允许的子进程基线：除系统 hdiutil 外，不应派生任何其它子进程。
+HDIUTIL_WHITELIST=1
 
 if [ ! -x "$BIN" ]; then
     printf '\n通过: %s   失败: %s\n' "$PASS" "$FAIL"
@@ -185,9 +191,19 @@ if kill -0 "$PID" 2>/dev/null; then
     if [ -z "$CHILDREN" ]; then
         ok "启动归档后无任何子进程"
     else
-        N7=$(for c in $CHILDREN; do ps -p "$c" -o comm= 2>/dev/null; done | grep -c '7zz' || true)
-        [ "${N7:-0}" -eq 0 ] && ok "无 7zz 子进程（共 ${#CHILDREN} 个子进程，均非 7zz）" \
-                             || bad "派生出了 $N7 个 7zz 子进程"
+        # 统计子进程：7zz 一律禁止；hdiutil 属白名单（仅 DMG 创建用，打开
+        # 归档不会触发）；其它子进程视为异常路径。
+        N7=0; NH=0; NOTHER=0
+        for c in $CHILDREN; do
+            CM="$(ps -p "$c" -o comm= 2>/dev/null)"
+            case "$CM" in
+                *hdiutil*) NH=$((NH+1)) ;;
+                *7zz*)     N7=$((N7+1)) ;;
+                *)         NOTHER=$((NOTHER+1)) ;;
+            esac
+        done
+        [ "$N7" -eq 0 ] && ok "无 7zz 子进程（共 ${#CHILDREN} 个子进程；hdiutil 白名单 $NH、其它 $NOTHER）" \
+                        || bad "派生出了 $N7 个 7zz 子进程"
     fi
 
     if vmmap "$PID" 2>/dev/null | grep -q 'Frameworks/lib7z\.dylib'; then

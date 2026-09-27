@@ -138,6 +138,9 @@ struct CompressionOptions {
   // 注意：归档「列表」侧的同类过滤始终生效，不受本开关影响。
   bool excludeMacJunk = true;
 
+  // 镜像类格式（iso / dmg）的卷标；为空时由引擎从目标文件名推导。
+  std::string volumeName;
+
   bool storeAltStreams = false;
 };
 

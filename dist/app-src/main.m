@@ -1554,7 +1554,7 @@ static NSString *LevelNameForTick(NSInteger tick)
     // 列表里必须与引擎 CanonicalFormatName / IsComposedTarFormat 认得的写法一致。
     self.formatPop = [self popup:@[@"7z", @"zip", @"tar", @"wim",
                                    @"tar.gz", @"tar.bz2", @"tar.xz",
-                                   @"xz", @"gz", @"bz2"]
+                                   @"xz", @"gz", @"bz2", @"iso", @"dmg"]
                           action:@selector(formatChanged:)];
 
     self.levelSlider = [[NSSlider alloc] initWithFrame:NSZeroRect];
@@ -2783,18 +2783,25 @@ static NSString *LevelNameForTick(NSInteger tick)
                    [f isEqualToString:@"xz"] || [f isEqualToString:@"zstd"] ||
                    [f isEqualToString:@"lz4"] || [f isEqualToString:@"br"] || composed);
     BOOL zipLike = [f isEqualToString:@"zip"];
-    self.methodPop.enabled = !single;
-    self.dictPop.enabled = !single && !zipLike;
-    self.wordPop.enabled = !single && !zipLike;
-    self.fastBytesField.enabled = !single && !zipLike;
-    self.matchPop.enabled = !single && !zipLike;
-    self.solidCheck.enabled = !single;
-    self.solidBlockPop.enabled = !single;
-    self.volumeCombo.enabled = !single;
+    // 镜像格式（iso / dmg）：不是「压缩归档」而是文件系统映像。ISO 不做压缩；
+    // DMG 的压缩由 hdiutil 固定（UDZO），也不支持原地「添加/更新」。因此方法/
+    // 字典/固实/分卷/更新模式与压缩等级一律禁用，只保留卷标等无关项。
+    BOOL isImage = ([f isEqualToString:@"iso"] || [f isEqualToString:@"dmg"]);
+    BOOL noTune = single || isImage;
+    self.methodPop.enabled = !noTune;
+    self.dictPop.enabled = !noTune && !zipLike;
+    self.wordPop.enabled = !noTune && !zipLike;
+    self.fastBytesField.enabled = !noTune && !zipLike;
+    self.matchPop.enabled = !noTune && !zipLike;
+    self.solidCheck.enabled = !noTune;
+    self.solidBlockPop.enabled = !noTune;
+    self.volumeCombo.enabled = !noTune;
     self.encryptMethPop.enabled = zipLike || [f isEqualToString:@"7z"];
     self.compressHeaderCheck.enabled = [f isEqualToString:@"7z"];
     self.fullPathsCheck.enabled = YES;
-    self.updateModePop.enabled = !single;
+    self.updateModePop.enabled = !noTune;
+    // 压缩等级只对压缩格式有意义，镜像格式下灰掉
+    self.levelSlider.enabled = !isImage;
     // 「加密文件名」还要看是否设了密码，统一由密码行状态决定
     [self syncPasswordFieldState];
     [self updateOptionsSummary];

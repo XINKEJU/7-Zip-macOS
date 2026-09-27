@@ -927,6 +927,229 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+head1 "16. ISO 创建：自研 ISO9660 + Joliet 写入"
+
+ISO="$WORK/iso"
+rm -rf "$ISO"; mkdir -p "$ISO/src/sub"
+printf 'hello iso\n' > "$ISO/src/hello.txt"
+printf '中文内容\n'  > "$ISO/src/中文名称.txt"
+printf 'nested\n'    > "$ISO/src/sub/nested.txt"
+# 额外的三层目录树：用来验证路径表的排序与父号（同层两个目录、且名字非字典序输入）
+mkdir -p "$ISO/src/tree/dirZ" "$ISO/src/tree/dirA/deep"
+printf 'A\n' > "$ISO/src/tree/dirA/a.txt"
+printf 'D\n' > "$ISO/src/tree/dirA/deep/d.txt"
+printf 'Z\n' > "$ISO/src/tree/dirZ/z.txt"
+
+# 从各个子项创建（ISO 根下直接是 hello.txt / 中文名称.txt / sub/ / tree/）
+if "$T" create iso "$ISO/out.iso" "$ISO/src/hello.txt" "$ISO/src/中文名称.txt" \
+        "$ISO/src/sub" "$ISO/src/tree" >/dev/null 2>&1 && [ -s "$ISO/out.iso" ]; then
+    ok "ISO 镜像创建成功（上游 7-Zip 只能读、不能创建 ISO）"
+else
+    bad "ISO 镜像创建失败"
+fi
+
+# 16.1 独立 Python 解析器按 Joliet 还原目录树并逐字节比对源文件
+if python3 - "$ISO/out.iso" "$ISO/src" <<'PY'
+import sys, os, struct
+iso, src = sys.argv[1], sys.argv[2]
+SEC = 2048
+data = open(iso, 'rb').read()
+def u32(b, o): return struct.unpack_from('<I', b, o)[0]
+o16 = 16 * SEC
+if not (data[o16] == 1 and data[o16+1:o16+6] == b'CD001'):
+    print('PVD magic 缺失'); sys.exit(1)
+o17 = 17 * SEC
+if not (data[o17] == 2 and data[o17+1:o17+6] == b'CD001'):
+    print('SVD magic 缺失'); sys.exit(1)
+if data[o17+88:o17+91] != b'\x25\x2f\x45':
+    print('Joliet escape 缺失'); sys.exit(1)
+rext = u32(data, o17 + 156 + 2); rsize = u32(data, o17 + 156 + 10)
+# 卷描述符里的根目录记录：标识符长度必须为 1、值为 0x00（ECMA-119）
+if data[o17 + 156 + 32] != 1 or data[o17 + 156 + 33] != 0:
+    print('VD 根目录标识符不是 ECMA-119 形式'); sys.exit(1)
+files = {}
+sysseen = 0
+ndirs = 0
+def walk(ext, size, prefix):
+    global sysseen, ndirs
+    ndirs += 1
+    buf = data[ext*SEC:ext*SEC+size]
+    i = 0
+    while i < len(buf):
+        ln = buf[i]
+        if ln == 0:
+            i = (i // SEC + 1) * SEC
+            continue
+        namelen = buf[i+32]; flags = buf[i+25]
+        fext = u32(buf, i+2); fsize = u32(buf, i+10)
+        raw = buf[i+33:i+33+namelen]
+        # ECMA-119：. 与 .. 是**单字节** 0x00 / 0x01，不是 UTF-16 文本。
+        # 7-Zip 的 IsSystemItem() 依赖这一点；写成 UTF-16 会被当成真目录递归进去。
+        if namelen == 1 and raw[0] in (0, 1):
+            sysseen += 1
+            i += ln
+            continue
+        nm = raw.decode('utf-16-be')
+        if flags & 2: walk(fext, fsize, prefix + nm + '/')
+        else: files[prefix + nm] = data[fext*SEC:fext*SEC+fsize]
+        i += ln
+walk(rext, rsize, '')
+# 每个被走到的目录都必须恰好有 . 与 .. 两条系统项
+if sysseen != 2 * ndirs:
+    print('系统项 . / .. 数量异常: %d（%d 个目录，应为 %d）' % (sysseen, ndirs, 2*ndirs))
+    sys.exit(1)
+exp = {}
+for root, dirs, fs in os.walk(src):
+    for f in fs:
+        p = os.path.join(root, f)
+        exp[os.path.relpath(p, src)] = open(p, 'rb').read()
+ok = True
+for k, v in exp.items():
+    if k not in files or files[k] != v:
+        print('MISMATCH 缺失或内容不符:', k); ok = False
+for k in files:
+    if k not in exp:
+        print('EXTRA 多出条目:', k); ok = False
+sys.exit(0 if ok else 1)
+PY
+then
+    ok "ISO 目录树按 Joliet 还原，内容逐字节一致（含中文名）"
+else
+    bad "ISO 内容 / Joliet 名还原不一致"
+fi
+
+# 16.2 用上游 7zz 的 ISO 读取器交叉验证（独立于本写入器）
+if "$Z" l "$ISO/out.iso" 2>/dev/null | grep -q 'hello.txt'; then
+    ok "上游 7zz 能读取自产 ISO 并列出条目"
+else
+    bad "上游 7zz 读不了自产 ISO"
+fi
+rm -rf "$ISO/zout"; mkdir -p "$ISO/zout"
+if "$Z" x -y -o"$ISO/zout" "$ISO/out.iso" >/dev/null 2>&1 &&
+   [ "$(cat "$ISO/zout/hello.txt" 2>/dev/null)" = "hello iso" ]; then
+    ok "上游 7zz 解出自产 ISO 且内容正确"
+else
+    bad "上游 7zz 解自产 ISO 内容不符"
+fi
+
+# 16.3 系统挂载校验（最强端到端；沙箱下 attach 可能不可用则跳过）
+# 注意：attach 会同时打出多条设备行（含偶然挂载的 APFS 卷），按行取首个设备并不可靠；
+# 改为「是否出现预期文件」判定，卸载一律按挂载点（对 /private 符号链接不敏感）。
+if command -v hdiutil >/dev/null 2>&1; then
+    MP="$ISO/mnt"; rm -rf "$MP"; mkdir -p "$MP"
+    hdiutil attach -nobrowse -noautoopen -noverify -mountpoint "$MP" "$ISO/out.iso" \
+        >/dev/null 2>&1 || true
+    if [ -f "$MP/hello.txt" ]; then
+        if [ "$(cat "$MP/hello.txt")" = "hello iso" ] && [ -f "$MP/sub/nested.txt" ]; then
+            ok "ISO 可被系统挂载且内容正确（hdiutil 实测）"
+        else
+            bad "ISO 挂载后内容不符"
+        fi
+        hdiutil detach "$MP" -force >/dev/null 2>&1 || true
+    else
+        hdiutil detach "$MP" -force >/dev/null 2>&1 || true
+        skip "hdiutil attach 不可用（沙箱），跳过挂载校验"
+    fi
+else
+    skip "无 hdiutil，跳过挂载校验"
+fi
+
+# 16.4 路径表结构合规（ECMA-119 6.9.1）：父号必须自洽且小于自身编号（根自指 1），
+#      条目须按「层级 -> 父目录号 -> 标识符」升序。Windows CDFS 等严格读取器会按
+#      此顺序做二分查找，顺序不对会查不到目录。
+if python3 - "$ISO/out.iso" <<'PY'
+import struct, sys
+data = open(sys.argv[1], 'rb').read()
+SEC = 2048
+def u32(o): return struct.unpack_from('<I', data, o)[0]
+def u16(o): return struct.unpack_from('<H', data, o)[0]
+o16 = 16 * SEC
+pts = u32(o16 + 132)
+Lpt = u32(o16 + 140)
+# 类型 M 路径表的位置是**大端**存储，漏掉这点会算出越界扇区
+mpt = struct.unpack('>I', data[o16 + 148:o16 + 152])[0]
+if pts == 0 or Lpt == 0 or mpt == 0:
+    print('路径表位置/大小字段为空'); sys.exit(1)
+# 条目布局：len, extAttrLen, extent(LE u32), parent(LE u16), 名字。
+# 注意**没有**「目录编号」字段 —— 编号就是条目在表中的 1-based 位置。
+ents = []
+o = Lpt * SEC
+end = o + pts
+while o < end:
+    nl = data[o]; o += 2; o += 4
+    par = u16(o); o += 2
+    raw = data[o:o + nl]; o += nl
+    if nl & 1: o += 1
+    ents.append((par, raw))
+if not ents:
+    print('路径表为空'); sys.exit(1)
+for i, (par, raw) in enumerate(ents, 1):
+    if i == 1:
+        if par != 1: print('根条目 parent 应为 1，实为 %d' % par); sys.exit(1)
+    elif not (1 <= par < i):
+        print('条目 #%d 的 parent=%d 不合法' % (i, par)); sys.exit(1)
+lvl = {1: 1}
+for i in range(2, len(ents) + 1):
+    lvl[i] = lvl.get(ents[i - 1][0], 1) + 1
+keys = [(lvl[i], ents[i - 1][0], ents[i - 1][1]) for i in range(1, len(ents) + 1)]
+if keys != sorted(keys):
+    print('路径表未按 (层级, 父号, 名字) 升序'); sys.exit(1)
+# 本次夹具的目录树：root, sub, tree, tree/dirA, tree/dirZ, tree/dirA/deep = 6 个
+if len(ents) != 6:
+    print('目录条目数 %d（期望 6）' % len(ents)); sys.exit(1)
+sys.exit(0)
+PY
+then
+    ok "路径表合规：父号自洽且按（层级,父号,名字）升序（ECMA-119 6.9.1）"
+else
+    bad "ISO 路径表不符合 ECMA-119 的父号/排序要求"
+fi
+
+# ---------------------------------------------------------------------------
+head1 "17. DMG 创建：调系统 hdiutil（零子进程原则的唯一边界）"
+
+DMG="$WORK/dmg"
+rm -rf "$DMG"; mkdir -p "$DMG/src/sub"
+printf 'hello dmg\n' > "$DMG/src/hello.txt"
+printf 'nested dmg\n' > "$DMG/src/sub/nested.txt"
+
+if command -v hdiutil >/dev/null 2>&1; then
+    if "$T" create dmg "$DMG/out.dmg" "$DMG/src" >/dev/null 2>&1 && [ -s "$DMG/out.dmg" ]; then
+        ok "DMG 磁盘映像创建成功（上游 7-Zip 只能读、不能创建 DMG）"
+    else
+        bad "DMG 磁盘映像创建失败"
+    fi
+    # 结构合法性：hdiutil imageinfo 能识别
+    if hdiutil imageinfo "$DMG/out.dmg" >/dev/null 2>&1; then
+        ok "产物是合法 DMG（hdiutil imageinfo 通过）"
+    else
+        bad "产物不是合法 DMG"
+    fi
+    # 内容校验：上游 7zz 能打开 DMG 并看到内层文件系统
+    if "$Z" l "$DMG/out.dmg" 2>/dev/null | grep -qi 'hello.txt'; then
+        ok "上游 7zz 能列出 DMG 内容（识别为磁盘映像）"
+    else
+        # 7zz 对 DMG 的支持取决于编译进来的 handler；缺失时不算失败
+        skip "7zz 未报出 DMG 内条目（handler 差异），跳过"
+    fi
+    # 挂载读回（best-effort；同 16.3，按挂载点判存、按挂载点卸载）
+    MP="$DMG/mnt"; rm -rf "$MP"; mkdir -p "$MP"
+    hdiutil attach -nobrowse -noautoopen -noverify -mountpoint "$MP" "$DMG/out.dmg" \
+        >/dev/null 2>&1 || true
+    if [ -f "$MP/src/hello.txt" ]; then
+        [ "$(cat "$MP/src/hello.txt")" = "hello dmg" ] \
+            && ok "DMG 可被系统挂载且内容正确（hdiutil 实测）" \
+            || bad "DMG 挂载后内容不符"
+        hdiutil detach "$MP" -force >/dev/null 2>&1 || true
+    else
+        hdiutil detach "$MP" -force >/dev/null 2>&1 || true
+        skip "hdiutil attach 不可用（沙箱），跳过挂载校验"
+    fi
+else
+    skip "无 hdiutil，跳过 DMG 创建（本项目 DMG 依赖系统 hdiutil）"
+fi
+
+# ---------------------------------------------------------------------------
 printf '\n\033[1m================ 汇总 ================\033[0m\n'
 printf '通过: \033[32m%s\033[0m   失败: \033[31m%s\033[0m\n' "$PASS" "$FAIL"
 if [ "$FAIL" -gt 0 ]; then

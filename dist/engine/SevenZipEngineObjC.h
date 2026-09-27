@@ -252,6 +252,9 @@ typedef NS_ENUM(NSInteger, Z7ClashPolicy) {
 /// 归档「列表」侧的同类过滤始终生效，不受本属性影响。
 @property (nonatomic) BOOL excludeMacJunk;
 
+/// 镜像类格式（iso / dmg）的卷标；@"" 时由引擎从目标文件名推导。
+@property (nonatomic, copy) NSString *volumeName;
+
 @end
 
 #pragma mark - 引擎能力

@@ -132,6 +132,18 @@ for ARCH in $ARCHS; do
             -I"$HERE" -c "$HERE/Z7ExtCodec.cpp" -o "$OBJ"
     OBJS="$OBJS $OBJ"
 
+    # ISO 创建：自研 ISO9660 + Joliet 写入器（进程内，零子进程）
+    OBJ="$ADIR/Z7IsoWriter.o"
+    clang++ $CFLAGS -arch "$ARCH" -std=c++11 -I"$HERE" \
+            -c "$HERE/Z7IsoWriter.cpp" -o "$OBJ"
+    OBJS="$OBJS $OBJ"
+
+    # DMG 创建：调系统 hdiutil（唯一的子进程例外，见 Z7DmgWriter.h 与 BUILD.md）
+    OBJ="$ADIR/Z7DmgWriter.o"
+    clang++ $CFLAGS -arch "$ARCH" -std=c++11 -I"$HERE" \
+            -c "$HERE/Z7DmgWriter.cpp" -o "$OBJ"
+    OBJS="$OBJS $OBJ"
+
     ARCH_LIB="$ADIR/lib7zbridge.a"
     ar rcs "$ARCH_LIB.tmp" $OBJS
     mv -f "$ARCH_LIB.tmp" "$ARCH_LIB"
