@@ -60,7 +60,7 @@ clang -fobjc-arc -fmodules -Wall -O2 \
       -I"$ENG_DIR" -I"$LIB" \
       -framework AppKit -framework Foundation -framework QuickLookUI -framework CoreFoundation \
       -framework UserNotifications \
-      -o "$BUILD/app-arm64" "$HERE/main.m" \
+      -o "$BUILD/app-arm64" "$HERE/main.m" "$HERE/Z7StatusItem.m" \
       "$LIB/lib7zbridgeobjc.a" "$LIB/lib7zbridge.a" \
       $EXT_CODEC_LIBS \
       -L"$LIB" -l7z -lc++ \
@@ -138,6 +138,61 @@ for f in "$DIST"/resources/third-party/*.txt; do
     [ -f "$f" ] || { echo "缺少第三方许可正文目录：$DIST/resources/third-party" >&2; exit 1; }
 done
 cp -f "$DIST"/resources/third-party/*.txt "$LICDIR/third-party/"
+
+# 界面本地化。lproj 必须落在 Contents/Resources/ 下，NSLocalizedString 才会按
+# 系统语言去查表。两个语言目录都要在：只放 en 的话，中文用户虽然仍能靠开发区域
+# 回退到键本身（键就是中文原文），但 CFBundleLocalizations 声明了 zh-Hans 却没有
+# 对应资源目录，系统在选择本地化时会两头落空。
+for lang in en zh-Hans; do
+    dir="$DIST/resources/$lang.lproj"
+    if [ -f "$dir/Localizable.strings" ]; then
+        mkdir -p "$APP/Contents/Resources/$lang.lproj"
+        cp -f "$dir/Localizable.strings" \
+              "$APP/Contents/Resources/$lang.lproj/Localizable.strings"
+    else
+        echo "缺少 $dir/Localizable.strings，应用包将只能显示开发区域语言" >&2
+        exit 1
+    fi
+    # Apple Help Book —— 帮助菜单里那个系统搜索框存在的前提。这里用 ditto 而不是
+    # cp -R：目标已存在时 cp -R 会把源复制到目标**内部**（凭空套一层同名目录），
+    # 而重复构建时目标一定已存在。ditto 是合并语义。
+    if [ -d "$dir/7-Zip.help" ]; then
+        ditto "$dir/7-Zip.help" "$APP/Contents/Resources/$lang.lproj/7-Zip.help"
+    else
+        echo "缺少 $dir/7-Zip.help，帮助菜单将没有可检索的帮助书" >&2
+        exit 1
+    fi
+done
+
+# 搜索索引要在帮助书上一步落位之后才生成。
+sh "$DIST/build/build_help.sh" "$APP"
+
+# 键完整性。源码里每个 L(@"…") 都必须在英文表里有对应条目，少一条**不会有任何
+# 运行时症状**——它只是悄悄回退成中文，在英文系统上露出一句中文。正因为它安静，
+# 才必须在这里拦下，不能等用户发现。反过来多余的条目也报出来（多半是菜单项删了
+# 而翻译表忘了跟着删）。这里是纯文本比对，不引入任何解释器依赖。
+#
+# 整条管道都强制 LC_ALL=C，**不是只给 grep 加**：在 en_US.UTF-8 之类的 locale 下
+# sort -u 会走 locale collation，而中文在这种表里权重未定义，大量互不相同的键会
+# 被判成重复而被静默合并——实测同一份输入因此从 47 条缩成 12 条。按字节比较才是
+# 这里真正想要的语义。
+KEYCHK="$BUILD/lproj-check"
+mkdir -p "$KEYCHK"
+# 扫全部 .m 而不是只扫 main.m：本地化串将来可能出现在别的源文件里（Z7StatusItem.m
+# 目前刻意不参与本地化，但不该指望「新文件一定不会用 L()」这条约定来保证门禁有效）。
+LC_ALL=C grep -ho 'L(@"\([^"]*\)")' "$HERE"/*.m \
+    | LC_ALL=C sed 's/^L(@"//; s/")$//' \
+    | LC_ALL=C sort -u > "$KEYCHK/keys.src"
+LC_ALL=C sed -n 's/^"\(.*\)" = ".*";$/\1/p' \
+    "$DIST/resources/en.lproj/Localizable.strings" \
+    | LC_ALL=C sort -u > "$KEYCHK/keys.en"
+if ! diff -u "$KEYCHK/keys.src" "$KEYCHK/keys.en" > "$KEYCHK/keys.diff"; then
+    echo "英文表与源码的本地化键不一致（- 源码有而表里没有 / + 表里有而源码没有）：" >&2
+    sed -n '3,$p' "$KEYCHK/keys.diff" >&2
+    exit 1
+fi
+echo "   本地化：en / zh-Hans 已就位，键完整（$(wc -l < "$KEYCHK/keys.src" | tr -d ' ') 条）"
+
 chmod 755 "$APP/Contents/MacOS/7-Zip" \
           "$APP/Contents/Frameworks/lib7z.dylib"
 printf 'APPL????' > "$APP/Contents/PkgInfo"

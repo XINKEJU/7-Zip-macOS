@@ -479,6 +479,138 @@ LF：Python 的 `Path.read_text()/write_text()` 默认走 universal newlines，�
 另一个相关约束：给被改文件补 LGPL 要求的「已修改 + 日期」声明时**只能增行、
 不能改行**。验证手法是和「旧补丁施加出来的树」做 diff，要求**删除行数为 0**。
 
+---
+
+### 坑点 22：`NSMenuItem` 的 `keyEquivalentModifierMask` 默认是 ⌘，不是「无修饰」
+
+想表达「按空格预览」时写
+
+```objc
+[[NSMenuItem alloc] initWithTitle:@"预览" action:@selector(togglePreview:) keyEquivalent:@" "]
+```
+
+得到的其实是 **⌘空格**（实测 `keyEquivalentModifierMask == NSEventModifierFlagCommand`，
+即 `0x100000`）——而 ⌘空格 被系统输入法占着，按下去只会切输入法。要么显式
+`item.keyEquivalentModifierMask = 0`，要么干脆留空 `keyEquivalent` 并只作鼠标入口
+（当前实现选后者：「预览」在菜单里不带快捷键，靠列表空格键生效）。
+
+顺带记一条实测结论：**无修饰的空格不会被 `NSMenu performKeyEquivalent:` 接受**，
+所以列表的空格预览与菜单项不会互相抢键，不必为它们做取舍。
+
+### 坑点 23：菜单项缺失会让标准快捷键「完全失效」，而不只是「没有菜单入口」
+
+实测：**菜单里没有 `undo:` 项时，⌘Z 彻底不好使**——`performKeyEquivalent:` 直接返回
+`NO`，响应链里根本没有入口。这一点反直觉：一般以为快捷键只是菜单的捷径。
+
+按 HIG 补齐后还有一个细节值得记：`undo:` / `redo:` 只需挂在菜单上，**不需要设 target**。
+`undo:` 仅由 `NSWindow` 实现（`NSResponder` / `NSView` / `NSApplication` 都没有），
+`NSWindow` 会把它转发给当前 first responder 的 `undoManager`，因此同一个菜单项对搜索框、
+密码框都自然生效。
+
+同理两条「选择器被别的东西抢走 / 名字不对」的坑：
+
+- **`performFindPanelAction:` 会被 `NSTextView` 抢走。** 日志抽屉是 `NSTextView`，
+  焦点在它上面时 ⌘F 会拐去开文本查找面板，而不是聚焦归档搜索框。改用自定义
+  selector（`focusArchiveSearch:`）即可免疫。另外 **同一个等价键只有第一条菜单项
+  会被认**，所以 ⌘F 只保留在编辑菜单，帮助菜单那条只作鼠标入口。
+- **全屏菜单项的标题无法自动切换。** `NSWindow` 实现了 `toggleFullScreen:`，它会
+  先于窗口控制器成为菜单项的 target，标题就不归调用方管了。改用自定义 selector，
+  再在 `validateMenuItem:` 里按 `styleMask & NSWindowStyleMaskFullScreen` 改标题。
+
+### 坑点 24：`class_getInstanceMethod` 不能当「我装过没有」的守卫
+
+给「系统创建、无法子类化」的对象（这里是 `NSStatusBarButton`）补拖放方法时，本能会写：
+
+```objc
+if (!class_getInstanceMethod(cls, @selector(performDragOperation:))) {
+    class_addMethod(cls, @selector(performDragOperation:), (IMP)..., "B@:@");
+    ...
+}
+```
+
+**这段判断恒为假**：`class_getInstanceMethod` 会沿继承链往上查，而 **`NSView` 自己就
+声明了 `NSDraggingDestination` 的那几个方法**（实测 `performDragOperation:` 的 IMP
+落在 AppKit 里）。于是 `class_addMethod` 一次都没执行，整段拖放装配成了死代码——
+界面上只表现为「拖上去没反应」，不报错、不留日志。这个缺陷在仓库里真实存在过一段时间。
+
+正确的守卫是「**装的是我们的实现吗**」，且只看本类自己的方法列表（`class_copyMethodList`
+不含父类）：
+
+```objc
+static Method Z7OwnMethod(Class cls, SEL sel);   // 只扫本类
+// 守卫：Z7OwnMethod(cls, @selector(performDragOperation:)) 的 IMP == (IMP)Z7SB_perform
+```
+
+诊断手法：`NSStatusBarButton` 与 `NSView` 的 `class_getMethodImplementation` 若相同，
+说明我们的方法根本没装上去。
+
+### 坑点 25：`@encode(BOOL)` 是 `B`，不是 `c`
+
+`class_addMethod` 的类型编码是**手写字符串**，写错不会有编译错误，只会在回调时取到
+垃圾值。写这个项目的实现时很容易按「BOOL 就是 signed char，所以是 `c`」下笔——本工具链
+上实测：
+
+```
+@encode(BOOL)            == "B"
+@encode(NSDragOperation) == "Q"      // NSUInteger
+clang 为 - (BOOL)performDragOperation:(id<NSDraggingInfo>) 生成的编码 == "B24@0:8@16"
+```
+
+即 `performDragOperation:` / `prepareForDragOperation:` 应当是 `"B@:@"`，而
+`draggingEntered:` / `draggingUpdated:` 是 `"Q@:@"`，其余是 `"v@:@"`。
+
+**别凭印象改这几个字面量**：`objc_test` 里放了一个实现同样协议签名的探针类，拿
+**编译器**为它生成的编码当基准，去掉数字（ABI 偏移）后与装上去的逐条比对。这是编码
+正确性的唯一事实来源。
+
+同一条线上还有两个 `sort` 类工具陷阱，一并记在这里：
+
+- **`sort -u` 在 UTF-8 locale 下会静默吞行。** 生成 / 核对本地化键集合时，
+  `en_US.UTF-8` 下中文串的权重未定义，实测 47 条互不相同的键被并成 12 条。必须给
+  **整条管道**的每一段都加 `LC_ALL=C`，不是只给 `grep` 加。
+- **`ditto` 才是合并语义。** 目标目录已存在时 `cp -R` 会把源复制到目标**内部**
+  （凭空套一层同名目录），而重复构建时帮助书目录一定已经存在。用 `ditto`。
+
+### 坑点 26：`CFBundleDevelopmentRegion` 写 `zh_CN` 是非法标识
+
+`zh_CN` 不是合法的 BCP-47 标识（语言 + 地区要用 `zh-Hans-CN` 或 `zh_CN` 之外的合法
+组合），当前实现用的是 **`zh-Hans`**。写错不报错，只会让「找不到翻译时的回退目标」
+落到英文上。`verify_app.sh` 对此有断言。
+
+配套的设计取舍：**本地化键取中文原文**（`#define L(s) NSLocalizedString(s, nil)`），
+于是漏配翻译时回退成中文（失败模式安全），只需要维护 `en.lproj` 一份表。代价是必须
+在构建期核对键集合——源码里每个 `L(@"…")` 都要在英文表里有条目，少一条**不会有任何
+运行时症状**，只是英文系统上静默露出一句中文。`build_app.sh` 用 `diff` 拦住它，
+缺少 `en.lproj` 时构建直接失败。
+
+### 坑点 27：`CFBundleHelpBookFolder` 一设，帮助菜单第一项就被系统换掉
+
+只要 Info.plist 里有 `CFBundleHelpBookFolder`，AppKit 会把帮助菜单的第一项**替换成
+系统的搜索框**——这是行为，不是可以关掉的选项。搜索框要有结果，帮助书必须带一份
+`hiutil` 生成的索引：
+
+```bash
+hiutil -I corespotlight -C -a -f out.cshelpindex <帮助书 Contents/Resources>
+```
+
+索引是构建产物（页面一改就过期），**不入仓库**，由 `dist/build/build_help.sh` 在打包
+应用时生成，失败即构建失败。
+
+布局与查找（实测）：
+
+- 帮助书按本地化规则放在 **`<语言>.lproj/<名称>.help`** 下，**不是** `Resources/`
+  根目录。`CFBundleHelpBookFolder` 写 `7-Zip.help`，而查找要用「名字 + 扩展名」两个
+  字段：`[bundle URLForResource:@"7-Zip" withExtension:@"help"]` —— 实测在中文系统上
+  返回 `.../Contents/Resources/zh-Hans.lproj/7-Zip.help`，说明本地化查找是通的。
+- ⚠️ **别拿这个 API 去应用包根目录找 `cshelpindex`**，它会返回「未找到」，但那是
+  **正常的**：索引在帮助书内部（`<名称>.help/Contents/Resources/`），由帮助书自己的
+  `HPDBookIndexPath` 解析。这曾经被误判成一个「定位不到索引」的缺陷，追了一轮才确认
+  是查找基准搞错了。
+- 验证这一层不能只看目录存在：`verify_app.sh` 用 `osascript -l JavaScript` 走
+  `NSBundle`——也就是 AppKit 内部（`registerBooksInBundle:`）用的同一套本地化查找——
+  问一次能不能找到，找不到就 FAIL。目录摆错位置时界面上没有任何症状，
+  只有这条断言拦得住。
+
 ## 二·补：内嵌引擎库的构建顺序
 
 应用依赖三个产物，顺序固定：
@@ -722,6 +854,8 @@ sh dist/build/package.sh && shasum -a 256 dist/7zip-macos-26.03-macos-arm64.tar.
 | 负载路径 | `lsbom -s .../7-Zip-cli.pkg/Bom` | 含 `bin/7z` 符号链接与全部补全脚本 |
 | 引擎库部署目标 | `otool -l Contents/Frameworks/lib7z.dylib \| grep -A4 LC_BUILD_VERSION` | `minos 11.0`（不是 SDK 版本） |
 | 依赖可解析 | `sh dist/tests/verify_app.sh` | 每个 `@rpath` 项都解析到实际存在的文件 |
+| 本地化随包 | 同上 | 两种语言的 `Localizable.strings` 均存在，英文表与源文件逐字节一致，`CFBundleDevelopmentRegion = zh-Hans` |
+| 帮助书可查找 | 同上（内部走 `osascript -l JavaScript` + `NSBundle`） | 帮助书能按本地化规则被找到；每语言均有 `index.html` 与 `hiutil` 生成的索引，且与 `HPDBookIndexPath` 声明一致 |
 | 引擎在进程内 | `vmmap <pid> \| grep lib7z` 且 `pgrep -P <pid>` | 已映射；**无 7zz 子进程** |
 | 应用签名 | `codesign --verify --deep --strict 7-Zip.app` | 通过 |
 | 扩展沙箱 | `codesign -d --entitlements - .../7ZipQuickLook.appex` | 含 `com.apple.security.app-sandbox` |
@@ -738,13 +872,16 @@ sh dist/build/package.sh && shasum -a 256 dist/7zip-macos-26.03-macos-arm64.tar.
 自动化入口：
 
 ```bash
-make test        # 桥接层验收，对照官方 7zz 逐项比对（158 个用例，共 19 节）
-make objc-test   # ObjC 适配层验收（App 实际调用的那一层，44 个用例）
-make appcheck    # 应用包验收（含真实启动与进程模型检查，20 个用例）
+make test        # 桥接层验收，对照官方 7zz 逐项比对（158 个用例，共 20 节）
+make objc-test   # ObjC 适配层验收（App 实际调用的那一层，68 个用例）
+make appcheck    # 应用包验收（含真实启动与进程模型检查，42 个用例）
 make verify      # 离线校验：安装/卸载脚本逻辑 + Homebrew 公式一致性
 make check       # verify + 产物校验和 + DMG 完整性 + 应用签名
 make tarball     # Homebrew 分发包（可复现，见上）
 ```
+
+> `make appcheck` 里有一条断言用 `osascript -l JavaScript` 走 `NSBundle` 查帮助书
+> （见坑点 27），因此需要能加载 Foundation 的环境；应用本身也需要图形会话才能启动。
 
 > `installer` 与 `pkgbuild`（无 root 时）无法在本机直接完整演练安装流程：
 > `installer` 强制要求 root。因此 `verify_scripts.sh` 采用「解包真实负载 →

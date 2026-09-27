@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Basic tasks</title>
+<style>
+:root { color-scheme: light dark; }
+body { font: 13px/1.7 -apple-system, "Helvetica Neue", sans-serif;
+       margin: 0; padding: 26px 30px 56px; color: #1d1d1f; background: #ffffff;
+       -webkit-text-size-adjust: 100%; }
+h1 { font-size: 21px; font-weight: 600; margin: 0 0 6px; letter-spacing: -0.2px; }
+h2 { font-size: 14px; font-weight: 600; margin: 28px 0 8px;
+     padding-bottom: 5px; border-bottom: 1px solid rgba(0,0,0,0.09); }
+p  { margin: 8px 0; }
+.lead { color: #55555a; margin-bottom: 18px; }
+ul { padding-left: 20px; margin: 8px 0; }
+li { margin: 5px 0; }
+a { color: #0066cc; text-decoration: none; }
+a:hover { text-decoration: underline; }
+table { border-collapse: collapse; width: 100%; margin: 10px 0; }
+th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid rgba(0,0,0,0.08);
+         vertical-align: top; }
+th { font-weight: 600; color: #55555a; font-size: 12px; }
+kbd, code { font: 11px/1.5 ui-monospace, Menlo, monospace; background: rgba(0,0,0,0.06);
+      border-radius: 4px; padding: 1px 5px; }
+code { padding: 1px 4px; }
+.tip { background: rgba(0,122,255,0.07); border-left: 3px solid #007aff;
+       padding: 10px 14px; border-radius: 0 6px 6px 0; margin: 14px 0; }
+@media (prefers-color-scheme: dark) {
+  body { color: #e6e6ea; background: #1e1e20; }
+  .lead, th { color: #9a9aa0; }
+  h2 { border-bottom-color: rgba(255,255,255,0.12); }
+  th, td { border-bottom-color: rgba(255,255,255,0.10); }
+  a { color: #5aabff; }
+  kbd, code { background: rgba(255,255,255,0.12); }
+  .tip { background: rgba(10,132,255,0.14); border-left-color: #0a84ff; }
+}
+</style>
+</head>
+<body>
+
+<h1>Basic tasks</h1>
+<p class="lead"><a href="index.html">← Back to contents</a></p>
+
+<h2>Opening an archive</h2>
+<p>Three ways, all equivalent:</p>
+<ul>
+  <li>drop the archive onto the window (or onto the menu bar icon);</li>
+  <li>press <kbd>⌘O</kbd>, or click Open Archive in the toolbar;</li>
+  <li>double-click it in Finder — the common archive types are associated with this app.</li>
+</ul>
+<p>Dropping several archives opens one window each. The contents appear as a table;
+the eight columns sort by clicking their headers, and right-clicking a header chooses
+which columns are shown.</p>
+
+<h2>Previewing a file inside</h2>
+<p>Select an item and press <kbd>Space</kbd> for a Quick Look preview, just like in
+Finder; double-clicking works too. Temporary files made for previews are cleaned up
+when the app quits.</p>
+
+<h2>Extracting</h2>
+<p>Press <kbd>⌘E</kbd>, or click Extract To…. To extract only part of an archive,
+select those items first and use Extract Selected… from the context menu.</p>
+<p>When the destination already contains a file of the same name, the compression panel
+decides what happens: <strong>overwrite</strong>, <strong>skip</strong> or
+<strong>rename automatically</strong> — the same three meanings as
+<code>7zz -ao</code>.</p>
+
+<h2>Compressing</h2>
+<p>Press <kbd>⌘N</kbd> (New Archive…), pick the files and a format. To add to an
+existing archive, open it first and press <kbd>⌘D</kbd> (Add Files…).</p>
+<p>Every compression setting lives in the Compression Options panel on the toolbar:
+format, level, method, dictionary size, word size, solid blocks, threads, volume size,
+encryption method, filename encryption and so on. The <strong>verify</strong> switch at
+the bottom left reads the archive back after writing it — worth turning on for data you
+care about.</p>
+
+<div class="tip">
+<strong>Delete source files</strong> always moves files to the Trash rather than deleting
+them, so a mistake is recoverable. <strong>Compress separately</strong> creates one
+archive per input instead of a single one.
+</div>
+
+<h2>Deleting items inside an archive</h2>
+<p>Select them and press <kbd>Delete</kbd>, or use Delete in the context menu. 7-Zip
+deletes by <strong>rewriting the archive</strong>, so large archives take a while —
+progress is shown, and <kbd>⌘.</kbd> stops it.</p>
+
+<h2>Encrypted archives and passwords</h2>
+<p>When you open an encrypted archive you can ask the app to remember the password.
+It is stored in the login keychain under the archive's full path, so you can inspect or
+remove it in Keychain Access. A wrong password is removed from the keychain
+automatically instead of being retried forever.</p>
+<p>When creating an encrypted archive, <strong>encrypt file names</strong> is available
+for 7z only; other formats encrypt the contents but not the names.</p>
+
+<h2>Searching and the log</h2>
+<p><kbd>⌘F</kbd> focuses the search field, which filters the current list by file name.
+Large archives are listed as they are read, so the tree keeps growing for a moment after
+the window opens.</p>
+<p><kbd>⌘L</kbd> shows or hides the log drawer. It holds the engine's raw output, which
+is what you want when reporting a problem. The View menu item for it carries a checkmark
+so its state is visible.</p>
+
+<h2>Keyboard shortcuts</h2>
+<table>
+  <tr><th>Shortcut</th><th>Action</th></tr>
+  <tr><td><kbd>⌘N</kbd> / <kbd>⌘O</kbd></td><td>New archive / Open archive</td></tr>
+  <tr><td><kbd>⌘E</kbd> / <kbd>⌘D</kbd></td><td>Extract to… / Add files…</td></tr>
+  <tr><td><kbd>⌘T</kbd></td><td>Test archive integrity</td></tr>
+  <tr><td><kbd>⌘F</kbd></td><td>Focus the search field</td></tr>
+  <tr><td><kbd>Space</kbd></td><td>Preview the selected item</td></tr>
+  <tr><td><kbd>Delete</kbd></td><td>Delete the selected items</td></tr>
+  <tr><td><kbd>⌘.</kbd></td><td>Stop the current task</td></tr>
+  <tr><td><kbd>⌘Z</kbd> / <kbd>⇧⌘Z</kbd></td><td>Undo / redo (text fields such as the search box)</td></tr>
+  <tr><td><kbd>⌘L</kbd></td><td>Show / hide the log</td></tr>
+  <tr><td><kbd>⌃⌘F</kbd></td><td>Enter / exit full screen</td></tr>
+  <tr><td><kbd>⌘?</kbd></td><td>Open this help</td></tr>
+  <tr><td><kbd>⌘,</kbd></td><td>Compression Options</td></tr>
+</table>
+
+</body>
+</html>

@@ -33,13 +33,13 @@ build_arch() {
     out="$HERE/objc_test"
     clang -fobjc-arc -fmodules -Wall -O2 \
           -arch "$arch" -mmacosx-version-min=11.0 \
-          -I"$ENGINE" -I"$LIB" \
-          -o "$out" "$HERE/objc_test.m" \
+          -I"$ENGINE" -I"$LIB" -I"$DIST/app-src" \
+          -o "$out" "$HERE/objc_test.m" "$DIST/app-src/Z7StatusItem.m" \
           "$LIB/lib7zbridgeobjc.a" "$LIB/lib7zbridge.a" \
           $EXT_CODEC_LIBS \
           -L"$LIB" -l7z -lc++ \
           -Wl,-rpath,"$LIB" \
-          -framework Foundation -framework CoreFoundation
+          -framework Foundation -framework CoreFoundation -framework AppKit
     printf "   %-8s %s bytes\n" "$arch" "$(stat -f%z "$out")"
 }
 

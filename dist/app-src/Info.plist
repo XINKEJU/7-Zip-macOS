@@ -3,8 +3,29 @@
 <plist version="1.0">
 <dict>
 
+    <!-- 必须是合法的语言标识（BCP-47）。原先写的 zh_CN 带下划线，不是合法取值，
+         系统无法据此匹配本地化资源；zh-Hans 才是「简体中文」的正确写法。
+         开发区域取中文是刻意的：漏配翻译时回退目标就是中文，界面对中文用户
+         永远正确（失败模式安全），于是只有 en.lproj 需要维护一张翻译表。 -->
     <key>CFBundleDevelopmentRegion</key>
-    <string>zh_CN</string>
+    <string>zh-Hans</string>
+
+    <!-- 声明实际支持的语言，让系统知道不必再去别处找。缺了它，系统在英文环境下
+         可能仍把开发区域当成唯一选择。 -->
+    <key>CFBundleLocalizations</key>
+    <array>
+        <string>en</string>
+        <string>zh-Hans</string>
+    </array>
+
+    <!-- Apple Help Book：帮助菜单的系统搜索框只有在这一项存在时才会出现。
+         书名要与 Contents/Resources/*.lproj/7-Zip.help/Contents/Info.plist
+         里的 HPDBookTitle 一致。 -->
+    <key>CFBundleHelpBookFolder</key>
+    <string>7-Zip.help</string>
+
+    <key>CFBundleHelpBookName</key>
+    <string>7-Zip Help</string>
 
     <key>CFBundleExecutable</key>
     <string>7-Zip</string>

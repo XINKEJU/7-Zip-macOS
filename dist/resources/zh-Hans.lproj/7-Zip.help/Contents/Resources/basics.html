@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<title>基本操作</title>
+<style>
+:root { color-scheme: light dark; }
+body { font: 13px/1.7 -apple-system, "PingFang SC", "Helvetica Neue", sans-serif;
+       margin: 0; padding: 26px 30px 56px; color: #1d1d1f; background: #ffffff;
+       -webkit-text-size-adjust: 100%; }
+h1 { font-size: 21px; font-weight: 600; margin: 0 0 6px; letter-spacing: -0.2px; }
+h2 { font-size: 14px; font-weight: 600; margin: 28px 0 8px;
+     padding-bottom: 5px; border-bottom: 1px solid rgba(0,0,0,0.09); }
+p  { margin: 8px 0; }
+.lead { color: #55555a; margin-bottom: 18px; }
+ul { padding-left: 20px; margin: 8px 0; }
+li { margin: 5px 0; }
+a { color: #0066cc; text-decoration: none; }
+a:hover { text-decoration: underline; }
+table { border-collapse: collapse; width: 100%; margin: 10px 0; }
+th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid rgba(0,0,0,0.08);
+         vertical-align: top; }
+th { font-weight: 600; color: #55555a; font-size: 12px; }
+kbd { font: 11px/1.5 ui-monospace, Menlo, monospace; background: rgba(0,0,0,0.06);
+      border-radius: 4px; padding: 1px 5px; white-space: nowrap; }
+.tip { background: rgba(0,122,255,0.07); border-left: 3px solid #007aff;
+       padding: 10px 14px; border-radius: 0 6px 6px 0; margin: 14px 0; }
+@media (prefers-color-scheme: dark) {
+  body { color: #e6e6ea; background: #1e1e20; }
+  .lead, th { color: #9a9aa0; }
+  h2 { border-bottom-color: rgba(255,255,255,0.12); }
+  th, td { border-bottom-color: rgba(255,255,255,0.10); }
+  a { color: #5aabff; }
+  kbd { background: rgba(255,255,255,0.12); }
+  .tip { background: rgba(10,132,255,0.14); border-left-color: #0a84ff; }
+}
+</style>
+</head>
+<body>
+
+<h1>基本操作</h1>
+<p class="lead"><a href="index.html">← 回到目录</a></p>
+
+<h2>打开归档</h2>
+<p>三种方式都可以，行为一致：</p>
+<ul>
+  <li>把归档文件拖进窗口（或拖到菜单栏图标上）；</li>
+  <li>按 <kbd>⌘O</kbd>，或点工具栏的「打开归档」；</li>
+  <li>在访达里双击 —— 已把常见归档类型关联到本应用。</li>
+</ul>
+<p>一次拖入多个归档会各开一个窗口。内容以表格呈现，八列可按列头排序，
+列头右键可以切换显示哪些列。</p>
+
+<h2>预览里面的文件</h2>
+<p>在列表里选中条目，按 <kbd>空格</kbd> 即弹出预览（与访达一致）；也可以双击条目。
+预览用的临时文件在退出应用时会被清理。</p>
+
+<h2>解压</h2>
+<p>按 <kbd>⌘E</kbd> 或点「解压到…」。只解压一部分时，先在列表里选中它们，
+再用右键菜单的「解压所选…」。</p>
+<p>目标位置已经有同名文件时，可以在压缩选项面板里选择策略：<strong>覆盖</strong>、
+<strong>跳过</strong>还是<strong>自动改名</strong>，与官方 <code>7zz -ao</code> 的三种取义对应。</p>
+
+<h2>压缩</h2>
+<p>按 <kbd>⌘N</kbd>「新建归档…」选好文件与格式即可。要往已有归档里追加内容，
+打开它之后按 <kbd>⌘D</kbd>「添加文件…」。</p>
+<p>压缩参数都集中在工具栏的「压缩选项」面板里：格式、压缩等级、方法、字典大小、
+字长、固实块、线程数、分卷大小、加密算法、是否加密文件名等。面板左下角的
+<strong>验证完整性</strong>会在写完后回读一遍归档，适合重要数据。</p>
+
+<div class="tip">
+「<strong>删源文件</strong>」选项一律把文件放进废纸篓，不会直接删除 —— 万一压错了还能找回。
+「<strong>分别压缩</strong>」则是给每个输入项各建一个归档，而不是合成一个。
+</div>
+
+<h2>在归档内删除条目</h2>
+<p>选中条目按 <kbd>Delete</kbd> 或右键「删除」。7-Zip 的删除是<strong>重写归档</strong>，
+大归档会花一些时间 —— 界面上会显示进度，中途可以按 <kbd>⌘.</kbd> 停止。</p>
+
+<h2>加密归档与密码</h2>
+<p>打开加密归档时若输入了密码，可以选择记住它。密码存在登录钥匙串里，
+条目名就是归档的完整路径，可在「钥匙串访问」里查看或删除。密码输错时那条记录
+会被自动清除，不会留下一个错的密码反复失败。</p>
+<p>创建加密归档时勾选<strong>加密文件名</strong>：仅 7z 格式支持，其余格式只加密内容。</p>
+
+<h2>搜索与日志</h2>
+<p><kbd>⌘F</kbd> 聚焦搜索框，按文件名过滤当前列表。大归档的树是边读边建的，
+所以刚打开时列表还会继续长出来。</p>
+<p><kbd>⌘L</kbd> 展开或收起日志抽屉 —— 出了问题时那里有引擎的原始输出，
+写问题报告时很有用。它默认也能被「显示」菜单里的同名项开关（会带勾选标记）。</p>
+
+<h2>键盘快捷键</h2>
+<table>
+  <tr><th>快捷键</th><th>动作</th></tr>
+  <tr><td><kbd>⌘N</kbd> / <kbd>⌘O</kbd></td><td>新建归档 / 打开归档</td></tr>
+  <tr><td><kbd>⌘E</kbd> / <kbd>⌘D</kbd></td><td>解压到… / 添加文件…</td></tr>
+  <tr><td><kbd>⌘T</kbd></td><td>测试归档完整性</td></tr>
+  <tr><td><kbd>⌘F</kbd></td><td>聚焦搜索框</td></tr>
+  <tr><td><kbd>空格</kbd></td><td>预览选中条目</td></tr>
+  <tr><td><kbd>Delete</kbd></td><td>删除选中条目</td></tr>
+  <tr><td><kbd>⌘.</kbd></td><td>停止当前任务</td></tr>
+  <tr><td><kbd>⌘Z</kbd> / <kbd>⇧⌘Z</kbd></td><td>撤销 / 重做（搜索框等文本输入）</td></tr>
+  <tr><td><kbd>⌘L</kbd></td><td>显示 / 隐藏日志</td></tr>
+  <tr><td><kbd>⌃⌘F</kbd></td><td>进入 / 退出全屏幕</td></tr>
+  <tr><td><kbd>⌘?</kbd></td><td>打开本帮助</td></tr>
+  <tr><td><kbd>⌘,</kbd></td><td>压缩选项</td></tr>
+</table>
+
+</body>
+</html>

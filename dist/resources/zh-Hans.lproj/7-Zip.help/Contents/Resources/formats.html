@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<title>支持的格式</title>
+<style>
+:root { color-scheme: light dark; }
+body { font: 13px/1.7 -apple-system, "PingFang SC", "Helvetica Neue", sans-serif;
+       margin: 0; padding: 26px 30px 56px; color: #1d1d1f; background: #ffffff;
+       -webkit-text-size-adjust: 100%; }
+h1 { font-size: 21px; font-weight: 600; margin: 0 0 6px; letter-spacing: -0.2px; }
+h2 { font-size: 14px; font-weight: 600; margin: 28px 0 8px;
+     padding-bottom: 5px; border-bottom: 1px solid rgba(0,0,0,0.09); }
+p  { margin: 8px 0; }
+.lead { color: #55555a; margin-bottom: 18px; }
+ul { padding-left: 20px; margin: 8px 0; }
+li { margin: 5px 0; }
+a { color: #0066cc; text-decoration: none; }
+a:hover { text-decoration: underline; }
+table { border-collapse: collapse; width: 100%; margin: 10px 0; }
+th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid rgba(0,0,0,0.08);
+         vertical-align: top; }
+th { font-weight: 600; color: #55555a; font-size: 12px; }
+kbd, code { font: 11px/1.5 ui-monospace, Menlo, monospace; background: rgba(0,0,0,0.06);
+      border-radius: 4px; padding: 1px 5px; }
+code { padding: 1px 4px; }
+.tip { background: rgba(0,122,255,0.07); border-left: 3px solid #007aff;
+       padding: 10px 14px; border-radius: 0 6px 6px 0; margin: 14px 0; }
+.warn { background: rgba(255,149,0,0.10); border-left: 3px solid #ff9500;
+        padding: 10px 14px; border-radius: 0 6px 6px 0; margin: 14px 0; }
+@media (prefers-color-scheme: dark) {
+  body { color: #e6e6ea; background: #1e1e20; }
+  .lead, th { color: #9a9aa0; }
+  h2 { border-bottom-color: rgba(255,255,255,0.12); }
+  th, td { border-bottom-color: rgba(255,255,255,0.10); }
+  a { color: #5aabff; }
+  kbd, code { background: rgba(255,255,255,0.12); }
+  .tip { background: rgba(10,132,255,0.14); border-left-color: #0a84ff; }
+  .warn { background: rgba(255,159,10,0.16); border-left-color: #ff9f0a; }
+}
+</style>
+</head>
+<body>
+
+<h1>支持的格式</h1>
+<p class="lead"><a href="index.html">← 回到目录</a></p>
+
+<h2>可以创建的格式</h2>
+<table>
+  <tr><th>格式</th><th>说明</th></tr>
+  <tr><td><strong>7z</strong></td><td>压缩率最好，支持 AES-256 与加密文件名</td></tr>
+  <tr><td><strong>zip</strong></td><td>兼容性最好，可用传统 ZipCrypto 或 AES 加密</td></tr>
+  <tr><td><strong>tar</strong></td><td>仅打包不压缩，常与下一种配合</td></tr>
+  <tr><td><strong>xz / gzip / bzip2</strong></td><td>通用的单流压缩格式</td></tr>
+  <tr><td><strong>zstd / lz4 / brotli / lzip / snappy</strong></td><td>本移植补齐的格式，见下</td></tr>
+  <tr><td><strong>iso</strong></td><td>光盘映像（ISO 9660 + Joliet，中文名不会变问号）</td></tr>
+  <tr><td><strong>dmg</strong></td><td>macOS 磁盘映像（UDZO，调用系统 <code>hdiutil</code> 完成）</td></tr>
+</table>
+
+<h2>本移植补上的格式</h2>
+<p>上游 7-Zip 26.03 在这几处有缺口，本移植补齐了，且都是<strong>可创建 + 可解压</strong>：</p>
+<table>
+  <tr><th>格式</th><th>上游</th><th>本移植</th></tr>
+  <tr><td>zstd</td><td>只能解压</td><td>可创建 + 解压</td></tr>
+  <tr><td>lz4</td><td>完全不支持</td><td>可创建 + 解压</td></tr>
+  <tr><td>brotli</td><td>完全不支持</td><td>可创建 + 解压</td></tr>
+  <tr><td>lzip</td><td>完全不支持</td><td>可创建 + 解压</td></tr>
+  <tr><td>snappy</td><td>完全不支持</td><td>可创建 + 解压</td></tr>
+  <tr><td>iso</td><td>只能读</td><td>可创建</td></tr>
+  <tr><td>dmg</td><td>只能读</td><td>可创建</td></tr>
+</table>
+
+<div class="tip">
+格式下拉里显示的是格式名，而文件名用的是惯用扩展名：<code>zstd</code> → <code>.zst</code>、
+<code>lzip</code> → <code>.lz</code>、<code>snappy</code> → <code>.sz</code>。
+两种写法在打开时都认。<code>brotli</code> 没有魔数，只能按扩展名（<code>.br</code>）识别。
+</div>
+
+<div class="warn">
+<strong>单流格式一次只能压一个文件。</strong> gzip、bzip2、xz、zstd、lz4、brotli、
+lzip、snappy 都是单流格式，塞多个文件进去会被明确拒绝，而不是静默只压第一个
+（与官方命令行行为一致）。要打包多个文件请用 7z、zip 或 tar。
+</div>
+
+<h2>可以读取的格式</h2>
+<p>除上述之外，还能解开 rar（包括 RAR5）、cab、wim、cpio、ar、lzh、msi、nsis、
+chm、dmg、iso 等数十种格式，以及几乎所有常见单流压缩格式。要看这台机器上的
+应用实际支持哪些，在日志抽屉里执行一次「测试归档」会列出引擎注册的全部格式。</p>
+
+<h2>命令行里的 7-Zip</h2>
+<p>安装包同时提供了一个 <code>7zz</code> 命令行工具（位于
+<code>/usr/local/bin/7zz</code>），同时还有 zsh / bash / fish 三套补全脚本。</p>
+<p class="warn">命令行工具<strong>刻意保持上游原样</strong>：它不含上面那几种新格式，
+所以 <code>7zz a -tzstd</code> 或 <code>-tiso</code> 会报「不支持的压缩格式」并退出。
+这样上游升级时无需改动它的一行 makefile。新格式只在图形界面里提供。</p>
+
+<h2>关于 RAR</h2>
+<p>RAR 的解压代码来自 RARLAB 的 unRAR 源码，按其许可条款<strong>只能用于解压</strong>。
+本应用不会创建 RAR 归档，界面上也没有这个选项。完整条款见安装目录下
+<code>/usr/local/share/doc/7zip/unRarLicense.txt</code>。</p>
+
+</body>
+</html>

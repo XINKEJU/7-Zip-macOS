@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>zh-Hans</string>
+
+    <!-- 帮助书自己的标识，与应用（org.7-zip.macos）分开命名，避免与应用的
+         偏好域混淆。 -->
+    <key>CFBundleIdentifier</key>
+    <string>org.7-zip.macos.help</string>
+
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+
+    <!-- 这一项要与应用 Info.plist 里的 CFBundleHelpBookName 逐字一致，
+         帮助查看器靠它把菜单项与帮助书对上。两种语言共用同一个名字是刻意的：
+         名字要随语言变就得再引入一份 InfoPlist.strings，而这里不值得。 -->
+    <key>CFBundleName</key>
+    <string>7-Zip Help</string>
+
+    <key>CFBundlePackageType</key>
+    <string>BNDL</string>
+
+    <key>CFBundleShortVersionString</key>
+    <string>26.03</string>
+
+    <!-- 默认打开的页面 -->
+    <key>HPDBookAccessPath</key>
+    <string>index.html</string>
+
+    <!-- 搜索索引。缺失时帮助仍可翻阅，但帮助菜单的搜索框查不到本帮助书。
+         索引由 dist/build/build_help.sh 用系统自带的 hiutil 在打包时生成，
+         不进仓库——HTML 一改它就过期了。 -->
+    <key>HPDBookIndexPath</key>
+    <string>7-Zip.cshelpindex</string>
+
+    <key>HPDBookTitle</key>
+    <string>7-Zip Help</string>
+
+    <!-- 3 = 现代帮助书格式（Page Format 3），macOS 10.6 起使用 -->
+    <key>HPDBookType</key>
+    <string>3</string>
+</dict>
+</plist>

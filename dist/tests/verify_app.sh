@@ -57,6 +57,83 @@ done
 [ -s "$APP/Contents/Resources/licenses/COPYING" ] \
     && ok "LGPL 正文非空" || bad "licenses/COPYING 为空"
 
+# --- 界面本地化 ---
+# 只放 en.lproj 也能跑（键就是中文原文，找不到条目会回退到键），但 CFBundleLocalizations
+# 声明了 zh-Hans 却没有对应资源目录时，系统选择本地化会两头落空。两个目录都要在。
+for lang in en zh-Hans; do
+    L="$APP/Contents/Resources/$lang.lproj/Localizable.strings"
+    [ -f "$L" ] && ok "本地化表已随包分发：$lang.lproj" \
+                || bad "缺少 $L（该语言会整片回退到开发区域）"
+done
+# 复制环节必须真的把源码那份搬进去：内容不一致说明打包走的是别的路径。
+if [ -f "$APP/Contents/Resources/en.lproj/Localizable.strings" ]; then
+    SRC_EN="$(shasum -a 256 "$DIST/resources/en.lproj/Localizable.strings" | awk '{print $1}')"
+    APP_EN="$(shasum -a 256 "$APP/Contents/Resources/en.lproj/Localizable.strings" | awk '{print $1}')"
+    [ "$SRC_EN" = "$APP_EN" ] && ok "英文表与源文件逐字节一致" \
+                              || bad "英文表与源文件不一致（打包复制环节有问题）"
+fi
+# 开发区域决定了「找不到翻译时回退成什么」。zh_CN 不是合法的 BCP-47 标识，
+# 写错不会报错，只会让回退落到英文上，故在此钉死。
+DEVEL="$(plutil -extract CFBundleDevelopmentRegion raw "$APP/Contents/Info.plist" 2>/dev/null)"
+[ "$DEVEL" = "zh-Hans" ] && ok "CFBundleDevelopmentRegion = zh-Hans" \
+    || bad "CFBundleDevelopmentRegion = '$DEVEL'（应为 zh-Hans；zh_CN 是非法 BCP-47）"
+LOCS="$(plutil -extract CFBundleLocalizations json -o - "$APP/Contents/Info.plist" 2>/dev/null)"
+case "$LOCS" in
+    *'"en"'*)     ok "CFBundleLocalizations 含 en" ;;
+    *)            bad "CFBundleLocalizations 缺 en：$LOCS" ;;
+esac
+case "$LOCS" in
+    *'"zh-Hans"'*) ok "CFBundleLocalizations 含 zh-Hans" ;;
+    *)             bad "CFBundleLocalizations 缺 zh-Hans：$LOCS" ;;
+esac
+
+# --- Help Book ---
+# 帮助菜单里那个系统搜索框，前提是 CFBundleHelpBookFolder 指向一份**能被找到**的
+# 帮助书。帮助书按本地化规则放在 <语言>.lproj/ 下——不是 Resources 根目录，所以
+# 逐语言核对，而不是在根目录找。
+#
+# 「能不能被找到」直接问 NSBundle：这正是 AppKit（registerBooksInBundle:）内部用的
+# 那套本地化查找。目录摆错位置时它返回空，而界面上没有任何症状——搜索框照样出现，
+# 只是永远搜不出结果。
+HBF="$(plutil -extract CFBundleHelpBookFolder raw "$APP/Contents/Info.plist" 2>/dev/null)"
+if [ -z "$HBF" ]; then
+    bad "Info.plist 未声明 CFBundleHelpBookFolder（帮助菜单不会有系统搜索框）"
+else
+    ok "CFBundleHelpBookFolder = $HBF"
+    # 查找用的是「名字 + 扩展名」两个字段，不是文件夹全名。
+    BOOKNAME="${HBF%.help}"
+    FOUND="$(/usr/bin/osascript -l JavaScript -e '
+        function run(argv) {
+          ObjC.import("Foundation");
+          try {
+            var b = $.NSBundle.bundleWithPath($(argv[0]));
+            var u = b.URLForResourceWithExtension(argv[1], "help");
+            return (u && u.path) ? u.path.js : "";
+          } catch (e) { return ""; }
+        }' "$APP" "$BOOKNAME" 2>/dev/null)"
+    case "$FOUND" in
+        */"$HBF") ok "帮助书可被 NSBundle 本地化查找到（${FOUND#$APP/}）" ;;
+        *) bad "NSBundle 找不到帮助书（返回 '$FOUND'）：帮助菜单的搜索框会永远搜不出结果" ;;
+    esac
+
+    for lang in en zh-Hans; do
+        HB="$APP/Contents/Resources/$lang.lproj/$HBF"
+        [ -f "$HB/Contents/Info.plist" ] \
+            && ok "$lang 帮助书 Info.plist 存在" || bad "缺少 $HB/Contents/Info.plist"
+        [ -s "$HB/Contents/Resources/index.html" ] \
+            && ok "$lang 帮助书首页非空" || bad "缺少或为空的 $HB/Contents/Resources/index.html"
+        # 注意索引的位置：它在**帮助书自己的** Contents/Resources/ 下，由帮助书的
+        # HPDBookIndexPath 解析，不在应用包根目录——用 bundle URLForResource: 去应用包
+        # 根目录找它必然落空，那是正常的，不是缺陷。这里核对「声明的路径确实存在」。
+        IDX="$(plutil -extract HPDBookIndexPath raw "$HB/Contents/Info.plist" 2>/dev/null)"
+        if [ -n "$IDX" ] && [ -s "$HB/Contents/Resources/$IDX" ]; then
+            ok "$lang 搜索索引已生成（$IDX，$(wc -c < "$HB/Contents/Resources/$IDX" | tr -d ' ') 字节）"
+        else
+            bad "$lang 帮助书声明的索引 '$IDX' 不存在或为空（搜索会静默无结果）"
+        fi
+    done
+fi
+
 # 7zz 已全面移除（2026-09-24）。此前 appex 内嵌了一份 7zz 并签以
 # com.apple.security.inherit，但该权限属**受限权限**，ad-hoc 签名（本项目的
 # 分发方式，TeamIdentifier=not set）无法使其生效。实测扩展自身日志：

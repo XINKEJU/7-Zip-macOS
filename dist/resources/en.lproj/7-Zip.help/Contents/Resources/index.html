@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>7-Zip Help</title>
+<style>
+:root { color-scheme: light dark; }
+body { font: 13px/1.7 -apple-system, "Helvetica Neue", sans-serif;
+       margin: 0; padding: 26px 30px 56px; color: #1d1d1f; background: #ffffff;
+       -webkit-text-size-adjust: 100%; }
+h1 { font-size: 21px; font-weight: 600; margin: 0 0 6px; letter-spacing: -0.2px; }
+h2 { font-size: 14px; font-weight: 600; margin: 28px 0 8px;
+     padding-bottom: 5px; border-bottom: 1px solid rgba(0,0,0,0.09); }
+p  { margin: 8px 0; }
+.lead { color: #55555a; margin-bottom: 18px; }
+ul { padding-left: 20px; margin: 8px 0; }
+li { margin: 5px 0; }
+a { color: #0066cc; text-decoration: none; }
+a:hover { text-decoration: underline; }
+table { border-collapse: collapse; width: 100%; margin: 10px 0; }
+th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid rgba(0,0,0,0.08);
+         vertical-align: top; }
+th { font-weight: 600; color: #55555a; font-size: 12px; }
+kbd { font: 11px/1.5 ui-monospace, Menlo, monospace; background: rgba(0,0,0,0.06);
+      border-radius: 4px; padding: 1px 5px; white-space: nowrap; }
+.tip { background: rgba(0,122,255,0.07); border-left: 3px solid #007aff;
+       padding: 10px 14px; border-radius: 0 6px 6px 0; margin: 14px 0; }
+@media (prefers-color-scheme: dark) {
+  body { color: #e6e6ea; background: #1e1e20; }
+  .lead, th { color: #9a9aa0; }
+  h2 { border-bottom-color: rgba(255,255,255,0.12); }
+  th, td { border-bottom-color: rgba(255,255,255,0.10); }
+  a { color: #5aabff; }
+  kbd { background: rgba(255,255,255,0.12); }
+  .tip { background: rgba(10,132,255,0.14); border-left-color: #0a84ff; }
+}
+</style>
+</head>
+<body>
+
+<h1>7-Zip Help</h1>
+<p class="lead">This is the manual for 7-Zip for macOS. All compression and extraction
+runs inside the application process — no external command-line tool is involved.</p>
+
+<h2>Where to start</h2>
+<ul>
+  <li><a href="basics.html">Basic tasks</a> — open an archive, preview, extract, compress, test, search</li>
+  <li><a href="formats.html">Supported formats</a> — what it reads, what it writes, where the differences are</li>
+</ul>
+
+<h2>The commands you will reach for most</h2>
+<table>
+  <tr><th>To do this</th><th>Fastest way</th></tr>
+  <tr><td>See what is inside an archive</td><td>Drop it on the window, or press <kbd>⌘O</kbd></td></tr>
+  <tr><td>Look at one file inside</td><td>Select it and press <kbd>Space</kbd> (or double-click)</td></tr>
+  <tr><td>Unpack an archive</td><td><kbd>⌘E</kbd> — Extract To…</td></tr>
+  <tr><td>Pack files up</td><td><kbd>⌘N</kbd> — New Archive…</td></tr>
+  <tr><td>Add to an existing archive</td><td><kbd>⌘D</kbd> — Add Files…</td></tr>
+  <tr><td>Check an archive is intact</td><td><kbd>⌘T</kbd> — Test Archive</td></tr>
+  <tr><td>Find a file in a long list</td><td><kbd>⌘F</kbd> — focuses the toolbar search field</td></tr>
+</table>
+
+<div class="tip">
+With no window open, the menu bar icon does the same work: click it for a menu, or drop
+files straight onto it. A single file is treated as an archive to open; folders or
+several files go into the compression flow — exactly the same rule as dropping onto
+the window.
+</div>
+
+<h2>Other entry points</h2>
+<ul>
+  <li><strong>Quick Look</strong> — select an archive in Finder and press <kbd>Space</kbd> to see its contents instead of a wall of hex.</li>
+  <li><strong>Finder services</strong> — right-click → Services offers the compress and extract entries this app provides.</li>
+  <li><strong>Dock icon</strong> — right-click it for New Archive…, Open Archive… and the archives you opened recently.</li>
+</ul>
+
+</body>
+</html>

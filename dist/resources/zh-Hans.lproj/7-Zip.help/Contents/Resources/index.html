@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<title>7-Zip 帮助</title>
+<style>
+:root { color-scheme: light dark; }
+body { font: 13px/1.7 -apple-system, "PingFang SC", "Helvetica Neue", sans-serif;
+       margin: 0; padding: 26px 30px 56px; color: #1d1d1f; background: #ffffff;
+       -webkit-text-size-adjust: 100%; }
+h1 { font-size: 21px; font-weight: 600; margin: 0 0 6px; letter-spacing: -0.2px; }
+h2 { font-size: 14px; font-weight: 600; margin: 28px 0 8px;
+     padding-bottom: 5px; border-bottom: 1px solid rgba(0,0,0,0.09); }
+p  { margin: 8px 0; }
+.lead { color: #55555a; margin-bottom: 18px; }
+ul { padding-left: 20px; margin: 8px 0; }
+li { margin: 5px 0; }
+a { color: #0066cc; text-decoration: none; }
+a:hover { text-decoration: underline; }
+table { border-collapse: collapse; width: 100%; margin: 10px 0; }
+th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid rgba(0,0,0,0.08);
+         vertical-align: top; }
+th { font-weight: 600; color: #55555a; font-size: 12px; }
+kbd { font: 11px/1.5 ui-monospace, Menlo, monospace; background: rgba(0,0,0,0.06);
+      border-radius: 4px; padding: 1px 5px; white-space: nowrap; }
+.tip { background: rgba(0,122,255,0.07); border-left: 3px solid #007aff;
+       padding: 10px 14px; border-radius: 0 6px 6px 0; margin: 14px 0; }
+@media (prefers-color-scheme: dark) {
+  body { color: #e6e6ea; background: #1e1e20; }
+  .lead, th { color: #9a9aa0; }
+  h2 { border-bottom-color: rgba(255,255,255,0.12); }
+  th, td { border-bottom-color: rgba(255,255,255,0.10); }
+  a { color: #5aabff; }
+  kbd { background: rgba(255,255,255,0.12); }
+  .tip { background: rgba(10,132,255,0.14); border-left-color: #0a84ff; }
+}
+</style>
+</head>
+<body>
+
+<h1>7-Zip 帮助</h1>
+<p class="lead">这是 7-Zip for macOS 的使用说明。压缩与解压全部在应用进程内完成，
+不需要任何外部命令行工具。</p>
+
+<h2>从哪里开始</h2>
+<ul>
+  <li><a href="basics.html">基本操作</a> —— 打开归档、预览、解压、压缩、测试、搜索</li>
+  <li><a href="formats.html">支持的格式</a> —— 能读哪些、能写哪些、哪些地方有区别</li>
+</ul>
+
+<h2>最常用的几条</h2>
+<table>
+  <tr><th>想做什么</th><th>最快的做法</th></tr>
+  <tr><td>看一个归档里有什么</td><td>把文件拖进窗口，或按 <kbd>⌘O</kbd></td></tr>
+  <tr><td>看里面某个文件</td><td>选中它按 <kbd>空格</kbd>（或双击）</td></tr>
+  <tr><td>把归档解开</td><td><kbd>⌘E</kbd>：「解压到…」</td></tr>
+  <tr><td>把文件打包</td><td><kbd>⌘N</kbd>：「新建归档…」</td></tr>
+  <tr><td>往已有归档里加东西</td><td><kbd>⌘D</kbd>：「添加文件…」</td></tr>
+  <tr><td>确认归档没坏</td><td><kbd>⌘T</kbd>：「测试归档」</td></tr>
+  <tr><td>在长列表里找文件</td><td><kbd>⌘F</kbd>：聚焦工具栏的搜索框</td></tr>
+</table>
+
+<div class="tip">
+窗口没开着的时候，菜单栏上的图标同样可以工作：点它弹出菜单，或者直接把文件拖到
+图标上 —— 单个文件会当作归档打开，文件夹或多个文件则进入压缩流程，与拖进窗口的
+判断完全一致。
+</div>
+
+<h2>其他入口</h2>
+<ul>
+  <li><strong>Quick Look</strong>：在访达里选中归档按 <kbd>空格</kbd>，直接看到内容列表，而不是一串十六进制。</li>
+  <li><strong>访达服务</strong>：右键 →「服务」里有<strong>用 7-Zip 压缩</strong>与<strong>用 7-Zip 解压</strong>。</li>
+  <li><strong>程序坞图标</strong>：右键它有「新建归档…」「打开归档…」与最近打开过的归档。</li>
+</ul>
+
+</body>
+</html>

@@ -70,6 +70,9 @@ dist/tests/objc_test
 # Release binaries are published as GitHub Release assets, not committed.
 dist/build/.installer/
 dist/build/.selfcheck/
+# build_help.sh 在这里生成帮助索引（hiutil 的产物）；索引是构建产物，
+# HTML 页面一改就过期，所以只版本化页面本身。
+dist/build/.build/
 dist/*.pkg
 dist/*.dmg
 dist/*.tar.gz

@@ -1,0 +1,64 @@
+/*
+ * 7-Zip for macOS — English strings
+ *
+ * 键是中文原文：开发区域（CFBundleDevelopmentRegion）是 zh-Hans，漏配一条的
+ * 后果是那一条回退成中文，而不是显示不出来——这正是拿中文当键的原因。
+ *
+ * 覆盖范围：菜单栏（主菜单、列表右键菜单、列头菜单、程序坞菜单）。
+ * 键完整性由 make appcheck 断言：源码里新增 L(@"…") 却忘了在此登记会被拦下。
+ */
+
+"列" = "Columns";
+"解压所选…" = "Extract Selected…";
+"预览" = "Preview";
+"删除" = "Delete";
+"退出全屏幕" = "Exit Full Screen";
+"进入全屏幕" = "Enter Full Screen";
+"关于 7-Zip" = "About 7-Zip";
+"压缩选项…" = "Compression Options…";
+"致谢与许可…" = "Credits & Licenses…";
+"服务" = "Services";
+"隐藏 7-Zip" = "Hide 7-Zip";
+"隐藏其他" = "Hide Others";
+"显示全部" = "Show All";
+"退出 7-Zip" = "Quit 7-Zip";
+"文件" = "File";
+"新建归档…" = "New Archive…";
+"打开归档…" = "Open Archive…";
+"打开最近使用" = "Open Recent";
+"解压到…" = "Extract To…";
+"添加文件…" = "Add Files…";
+"测试归档" = "Test Archive";
+"关闭窗口" = "Close Window";
+"编辑" = "Edit";
+"撤销" = "Undo";
+"重做" = "Redo";
+"剪切" = "Cut";
+"拷贝" = "Copy";
+"粘贴" = "Paste";
+"全选" = "Select All";
+"查找" = "Find";
+"操作" = "Actions";
+"删除所选" = "Delete Selected";
+"在列表中选中条目后按空格键预览" = "Select an item in the list, then press Space to preview";
+"停止当前任务" = "Stop Current Task";
+"显示" = "View";
+"显示/隐藏日志" = "Show/Hide Log";
+"清空日志" = "Clear Log";
+"窗口" = "Window";
+"最小化" = "Minimize";
+"缩放" = "Zoom";
+"前置全部窗口" = "Bring All to Front";
+"帮助" = "Help";
+"搜索归档内的条目" = "Search Items in Archive";
+"7-Zip 帮助" = "7-Zip Help";
+"在线文档" = "Online Documentation";
+"7-Zip 官方网站" = "7-Zip Website";
+"没有最近使用的归档" = "No Recent Archives";
+"清除菜单" = "Clear Menu";
+
+/* 菜单栏状态图标 */
+"显示菜单栏图标" = "Show Menu Bar Icon";
+"隐藏菜单栏图标" = "Hide Menu Bar Icon";
+"显示主窗口" = "Show Main Window";
+"点击打开菜单；把文件或归档拖到这里即可压缩或解压" = "Click to open the menu; drop files or archives here to compress or extract";

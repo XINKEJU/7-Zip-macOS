@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+
+    <key>CFBundleIdentifier</key>
+    <string>org.7-zip.macos.help</string>
+
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+
+    <!-- Must match the app's CFBundleHelpBookName verbatim; the help viewer uses
+         it to tie the menu item to this book. Both languages share one name on
+         purpose: making it vary would require an extra InfoPlist.strings, and
+         that is not worth it here. -->
+    <key>CFBundleName</key>
+    <string>7-Zip Help</string>
+
+    <key>CFBundlePackageType</key>
+    <string>BNDL</string>
+
+    <key>CFBundleShortVersionString</key>
+    <string>26.03</string>
+
+    <key>HPDBookAccessPath</key>
+    <string>index.html</string>
+
+    <!-- Search index. Without it the help book still reads fine, but the Help menu's
+         search field finds nothing in it. Generated at packaging time by
+         dist/build/build_help.sh using the system's own hiutil; not kept in the
+         repository, since editing any of the HTML ages it instantly. -->
+    <key>HPDBookIndexPath</key>
+    <string>7-Zip.cshelpindex</string>
+
+    <key>HPDBookTitle</key>
+    <string>7-Zip Help</string>
+
+    <!-- 3 = modern help book format (Page Format 3), used since macOS 10.6 -->
+    <key>HPDBookType</key>
+    <string>3</string>
+</dict>
+</plist>

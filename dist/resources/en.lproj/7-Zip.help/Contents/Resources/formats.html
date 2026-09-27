@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Supported formats</title>
+<style>
+:root { color-scheme: light dark; }
+body { font: 13px/1.7 -apple-system, "Helvetica Neue", sans-serif;
+       margin: 0; padding: 26px 30px 56px; color: #1d1d1f; background: #ffffff;
+       -webkit-text-size-adjust: 100%; }
+h1 { font-size: 21px; font-weight: 600; margin: 0 0 6px; letter-spacing: -0.2px; }
+h2 { font-size: 14px; font-weight: 600; margin: 28px 0 8px;
+     padding-bottom: 5px; border-bottom: 1px solid rgba(0,0,0,0.09); }
+p  { margin: 8px 0; }
+.lead { color: #55555a; margin-bottom: 18px; }
+ul { padding-left: 20px; margin: 8px 0; }
+li { margin: 5px 0; }
+a { color: #0066cc; text-decoration: none; }
+a:hover { text-decoration: underline; }
+table { border-collapse: collapse; width: 100%; margin: 10px 0; }
+th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid rgba(0,0,0,0.08);
+         vertical-align: top; }
+th { font-weight: 600; color: #55555a; font-size: 12px; }
+kbd, code { font: 11px/1.5 ui-monospace, Menlo, monospace; background: rgba(0,0,0,0.06);
+      border-radius: 4px; padding: 1px 5px; }
+code { padding: 1px 4px; }
+.tip { background: rgba(0,122,255,0.07); border-left: 3px solid #007aff;
+       padding: 10px 14px; border-radius: 0 6px 6px 0; margin: 14px 0; }
+.warn { background: rgba(255,149,0,0.10); border-left: 3px solid #ff9500;
+        padding: 10px 14px; border-radius: 0 6px 6px 0; margin: 14px 0; }
+@media (prefers-color-scheme: dark) {
+  body { color: #e6e6ea; background: #1e1e20; }
+  .lead, th { color: #9a9aa0; }
+  h2 { border-bottom-color: rgba(255,255,255,0.12); }
+  th, td { border-bottom-color: rgba(255,255,255,0.10); }
+  a { color: #5aabff; }
+  kbd, code { background: rgba(255,255,255,0.12); }
+  .tip { background: rgba(10,132,255,0.14); border-left-color: #0a84ff; }
+  .warn { background: rgba(255,159,10,0.16); border-left-color: #ff9f0a; }
+}
+</style>
+</head>
+<body>
+
+<h1>Supported formats</h1>
+<p class="lead"><a href="index.html">← Back to contents</a></p>
+
+<h2>Formats you can create</h2>
+<table>
+  <tr><th>Format</th><th>Notes</th></tr>
+  <tr><td><strong>7z</strong></td><td>Best ratio; AES-256 and file-name encryption</td></tr>
+  <tr><td><strong>zip</strong></td><td>Most compatible; legacy ZipCrypto or AES encryption</td></tr>
+  <tr><td><strong>tar</strong></td><td>Packs without compressing, usually paired with the next one</td></tr>
+  <tr><td><strong>xz / gzip / bzip2</strong></td><td>General single-stream formats</td></tr>
+  <tr><td><strong>zstd / lz4 / brotli / lzip / snappy</strong></td><td>Added by this port — see below</td></tr>
+  <tr><td><strong>iso</strong></td><td>Optical disc image (ISO 9660 + Joliet, so non-ASCII names survive)</td></tr>
+  <tr><td><strong>dmg</strong></td><td>macOS disk image (UDZO, written through the system's <code>hdiutil</code>)</td></tr>
+</table>
+
+<h2>Formats this port added</h2>
+<p>Upstream 7-Zip 26.03 has gaps in these places. This port fills them, and in every
+case both <strong>creating and extracting</strong> work:</p>
+<table>
+  <tr><th>Format</th><th>Upstream</th><th>Here</th></tr>
+  <tr><td>zstd</td><td>decode only</td><td>create + extract</td></tr>
+  <tr><td>lz4</td><td>not supported</td><td>create + extract</td></tr>
+  <tr><td>brotli</td><td>not supported</td><td>create + extract</td></tr>
+  <tr><td>lzip</td><td>not supported</td><td>create + extract</td></tr>
+  <tr><td>snappy</td><td>not supported</td><td>create + extract</td></tr>
+  <tr><td>iso</td><td>read only</td><td>create</td></tr>
+  <tr><td>dmg</td><td>read only</td><td>create</td></tr>
+</table>
+
+<div class="tip">
+The format popup shows the format name while the file name uses the customary suffix:
+<code>zstd</code> → <code>.zst</code>, <code>lzip</code> → <code>.lz</code>,
+<code>snappy</code> → <code>.sz</code>. Both spellings are accepted when opening.
+<code>brotli</code> has no magic number, so it is recognised by the
+<code>.br</code> suffix alone.
+</div>
+
+<div class="warn">
+<strong>A single-stream format holds one file at a time.</strong> gzip, bzip2, xz, zstd,
+lz4, brotli, lzip and snappy are single-stream formats; offering them several files is
+refused outright rather than silently compressing only the first (matching the official
+command-line tool). Use 7z, zip or tar to pack many files.
+</div>
+
+<h2>Formats you can read</h2>
+<p>Beyond the above, this reads rar (including RAR5), cab, wim, cpio, ar, lzh, msi, nsis,
+chm, dmg, iso and several dozen more, plus nearly every common single-stream format.
+To see exactly what the engine registers on this machine, run Test Archive and read the
+log drawer.</p>
+
+<h2>7-Zip on the command line</h2>
+<p>The installer also provides a <code>7zz</code> command-line tool at
+<code>/usr/local/bin/7zz</code>, with completions for zsh, bash and fish.</p>
+<p class="warn">That tool is <strong>deliberately left exactly as upstream ships it</strong>:
+it does not contain the formats added above, so <code>7zz a -tzstd</code> or
+<code>-tiso</code> reports an unsupported method and exits. Keeping it untouched means an
+upstream upgrade needs no changes to its makefiles. The added formats exist only in the
+graphical app.</p>
+
+<h2>About RAR</h2>
+<p>The RAR decompression code comes from RARLAB's unRAR sources and, under its licence,
+may be used <strong>for extraction only</strong>. This app does not create RAR archives and
+offers no such option. The full terms are in
+<code>/usr/local/share/doc/7zip/unRarLicense.txt</code>.</p>
+
+</body>
+</html>

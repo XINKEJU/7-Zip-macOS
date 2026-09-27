@@ -29,8 +29,19 @@
 #import <unistd.h>
 #import <stdlib.h>
 #import <Security/Security.h>
+// class_addMethod / class_getInstanceMethod：菜单栏图标要在本进程内给
+// NSStatusBarButton 补上拖放方法，理由见「菜单栏状态图标」一节。
+#import <objc/runtime.h>
 
 #import "SevenZipEngineObjC.h"
+#import "Z7StatusItem.h"
+
+// 界面文案的本地化入口。
+//
+// key 用**中文原文**，开发区域设为 zh-Hans：漏配翻译时的回退目标就是中文，
+// 于是界面对中文用户永远正确（失败模式安全）。en.lproj/Localizable.strings
+// 只需提供「中文 → 英文」映射，zh-Hans 侧不需要字符串表。
+#define L(s) NSLocalizedString(s, nil)
 
 #pragma mark - 常量与小工具
 
@@ -1200,7 +1211,7 @@ static NSImage *FileIcon(NSString *name, BOOL isDir, BOOL isLink)
 @property (nonatomic, strong) NSButton *logBtn;
 @property (nonatomic, strong) NSButton *optionsBtn;
 @property (nonatomic, strong) NSSearchField *searchField;
-/// 搜索项的引用，供 ⌘F 判断搜索框当下是否在视图层级里（见 performFindPanelAction:）。
+/// 搜索项的引用，供 ⌘F 判断搜索框当下是否在视图层级里（见 focusArchiveSearch:）。
 @property (nonatomic, strong) NSToolbarItem *searchItem;
 /// 轮询搜索框文本的定时器与上一次的值。为什么需要它见 buildCompressionControls。
 @property (nonatomic, strong) NSTimer *searchPollTimer;
@@ -2405,7 +2416,7 @@ static NSString *LevelNameForTick(NSInteger tick)
 
 - (void)buildColumnHeaderMenu
 {
-    NSMenu *menu = [[NSMenu alloc] initWithTitle:@"列"];
+    NSMenu *menu = [[NSMenu alloc] initWithTitle:L(@"列")];
     for (NSTableColumn *col in self.outline.tableColumns) {
         if ([col.identifier isEqualToString:@"名称"]) continue;   // 名称不可隐藏
         NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:col.title
@@ -2639,10 +2650,10 @@ static NSString *LevelNameForTick(NSInteger tick)
 
     // 右键菜单（§6.4）
     NSMenu *ctx = [[NSMenu alloc] init];
-    [ctx addItemWithTitle:@"解压所选…" action:@selector(doExtractSelection:) keyEquivalent:@""];
-    [ctx addItemWithTitle:@"预览" action:@selector(doPreview:) keyEquivalent:@""];
+    [ctx addItemWithTitle:L(@"解压所选…") action:@selector(doExtractSelection:) keyEquivalent:@""];
+    [ctx addItemWithTitle:L(@"预览") action:@selector(doPreview:) keyEquivalent:@""];
     [ctx addItem:[NSMenuItem separatorItem]];
-    [ctx addItemWithTitle:@"删除" action:@selector(doDelete:) keyEquivalent:@""];
+    [ctx addItemWithTitle:L(@"删除") action:@selector(doDelete:) keyEquivalent:@""];
     for (NSMenuItem *mi in ctx.itemArray) mi.target = self;
     self.outline.menu = ctx;
 }
@@ -3139,6 +3150,21 @@ static const NSUInteger kZ7LogCharLimit = 200000;
     // 日志抽屉或搜索框获得焦点时走的是文本视图自己的 target，不经过这里。
     if (a == @selector(cut:) || a == @selector(paste:)) return NO;
     if (a == @selector(copy:)) return [self selectedNodes].count > 0;
+    // 视图类菜单项要显示开关状态。菜单弹出时会逐项调用本方法，这里设的 state
+    // 正好在弹出前生效，不需要另外监听窗口变化。
+    if (a == @selector(toggleLog:)) {
+        item.state = self.logVisible ? NSControlStateValueOn : NSControlStateValueOff;
+        return YES;
+    }
+    // 全屏项的标题要跟着窗口状态走。手写的菜单项 AppKit 不会替你改标题，
+    // 一直停在「进入全屏幕」会让已经全屏的用户以为按下去还要再进一层。
+    if (a == @selector(toggleFullScreenFromMenu:)) {
+        NSWindow *w = self.view.window;
+        if (!w) return NO;
+        item.title = (w.styleMask & NSWindowStyleMaskFullScreen) ? L(@"退出全屏幕")
+                                                                  : L(@"进入全屏幕");
+        return YES;
+    }
     return YES;
 }
 
@@ -3155,7 +3181,12 @@ static const NSUInteger kZ7LogCharLimit = 200000;
 /// 于是动作沿响应链落到标准查找面板上（本窗口没有可查找的文本视图）——按下去
 /// 毫无反应。本应用里「查找」只有一种含义：按文件名过滤归档列表，也就是工具栏
 /// 上的搜索框。这里把它接过来：聚焦并全选，用户可以直接开始输入。
-- (void)performFindPanelAction:(id)sender
+///
+/// 刻意不用标准的 performFindPanelAction:。日志抽屉是 NSTextView，它实现了那个
+/// 标准动作，焦点落在日志上时会先于本控制器成为菜单项的 target，⌘F 于是拐去开
+/// 文本查找面板（收到的 tag 还是无效的 0）。改用自有 selector 后，无论焦点在
+/// 哪儿，⌘F 的落点都只有搜索框一个。
+- (void)focusArchiveSearch:(id)sender
 {
     if (self.current) return;   // 任务进行中列表被锁定，搜索没有意义
     NSWindow *w = self.view.window;
@@ -3170,6 +3201,17 @@ static const NSUInteger kZ7LogCharLimit = 200000;
     // visibilityPriority 已提到 High，紧凑窗口下也会优先保住它。真到了这一步
     // 也没有官方 API 能把它取回来，至少给一声提示音，别让 ⌘F 变成无声的空操作。
     NSBeep();
+}
+
+/// 菜单里的「进入 / 退出全屏幕」。
+///
+/// 不直接把菜单项接到 toggleFullScreen: 的原因见 buildMenu 里的注释：NSWindow
+/// 实现了那个 selector，会先于本控制器成为菜单项的 target，标题于是不归我们管。
+/// 这里转一手，图的是标题能在 validateMenuItem: 里随窗口状态切换。
+- (void)toggleFullScreenFromMenu:(id)sender
+{
+    NSWindow *w = self.view.window;
+    if (w) [w toggleFullScreen:nil];
 }
 
 /// ⌘C 拷贝所选项。
@@ -3889,6 +3931,13 @@ static NSString *UniqueArchivePath(NSString *dir, NSString *base, NSString *ext)
     [self compressURLs:urls];
 }
 
+/// 外部入口（菜单栏图标拖放等）投递文件时的统一落点。语义与窗口拖放完全一致——
+/// 判断规则只有一条，实现也只有一份，入口多一个不会多出一种脾气。
+- (void)receiveExternalURLs:(NSArray<NSURL *> *)urls
+{
+    [self dropView:nil didReceiveURLs:urls];
+}
+
 #pragma mark NSOutlineViewDataSource
 
 - (NSInteger)outlineView:(NSOutlineView *)ov numberOfChildrenOfItem:(id)item
@@ -4467,11 +4516,18 @@ static NSString *UniqueArchivePath(NSString *dir, NSString *base, NSString *ext)
 
 @end
 
+// 菜单栏状态图标的拖放装配在 Z7StatusItem.{h,m} 里。单独成文件只有一个理由：
+// 那段 runtime 装配（给无法子类化的 NSStatusBarButton 补 NSDraggingDestination
+// 方法）最容易悄悄失效，必须让 objc-test 能链接它、逐条断言。
+
 #pragma mark - app delegate
 
-@interface AppDelegate : NSObject <NSApplicationDelegate, NSMenuDelegate>
+@interface AppDelegate : NSObject <NSApplicationDelegate, NSMenuDelegate,
+                                  NSMenuItemValidation, Z7StatusDropReceiver>
 /// 活着的窗口。关掉的窗口会通过 Z7WindowController.onClose 自我摘除。
 @property (nonatomic, strong) NSMutableArray<Z7WindowController *> *windowControllers;
+/// 菜单栏状态图标。nil 表示当前不显示。
+@property (nonatomic, strong) NSStatusItem *statusItem;
 @end
 
 @implementation AppDelegate
@@ -4484,79 +4540,117 @@ static NSString *UniqueArchivePath(NSString *dir, NSString *base, NSString *ext)
     NSMenuItem *appItem = [[NSMenuItem alloc] init];
     [bar addItem:appItem];
     NSMenu *appMenu = [[NSMenu alloc] init];
-    [appMenu addItemWithTitle:@"关于 7-Zip" action:@selector(showAbout:) keyEquivalent:@""];
+    [appMenu addItemWithTitle:L(@"关于 7-Zip") action:@selector(showAbout:) keyEquivalent:@""];
     [appMenu addItem:[NSMenuItem separatorItem]];
     // ⌘, 是 macOS 上「打开设置」的固定位置，压缩选项属于这一类。
-    [appMenu addItemWithTitle:@"压缩选项…" action:@selector(showOptions:) keyEquivalent:@","];
-    [appMenu addItemWithTitle:@"致谢与许可…" action:@selector(showLicenses:) keyEquivalent:@""];
+    [appMenu addItemWithTitle:L(@"压缩选项…") action:@selector(showOptions:) keyEquivalent:@","];
+    [appMenu addItemWithTitle:L(@"致谢与许可…") action:@selector(showLicenses:) keyEquivalent:@""];
     [appMenu addItem:[NSMenuItem separatorItem]];
-    [appMenu addItemWithTitle:@"服务" action:nil keyEquivalent:@""];
+    [appMenu addItemWithTitle:L(@"服务") action:nil keyEquivalent:@""];
     NSMenu *services = [[NSMenu alloc] init];
     [NSApp setServicesMenu:services];
     appMenu.itemArray.lastObject.submenu = services;
     [appMenu addItem:[NSMenuItem separatorItem]];
-    [appMenu addItemWithTitle:@"隐藏 7-Zip" action:@selector(hide:) keyEquivalent:@"h"];
-    [appMenu addItemWithTitle:@"退出 7-Zip" action:@selector(terminate:) keyEquivalent:@"q"];
+    [appMenu addItemWithTitle:L(@"隐藏 7-Zip") action:@selector(hide:) keyEquivalent:@"h"];
+    // 「隐藏其他」与「显示全部」是 app 菜单标准三件套里原先缺的两件。⌥⌘H 必须
+    // 显式设掩码：带 keyEquivalent 初始化得到的默认掩码只有 ⌘，不设的话这一条会和
+    // 上一行的 ⌘H 撞在同一个等价键上（同一等价键只认第一条），⌥⌘H 将永不生效。
+    NSMenuItem *hideOthers = [appMenu addItemWithTitle:L(@"隐藏其他")
+                                                action:@selector(hideOtherApplications:)
+                                         keyEquivalent:@"h"];
+    hideOthers.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagOption;
+    [appMenu addItemWithTitle:L(@"显示全部") action:@selector(unhideAllApplications:) keyEquivalent:@""];
+    [appMenu addItem:[NSMenuItem separatorItem]];
+    [appMenu addItemWithTitle:L(@"退出 7-Zip") action:@selector(terminate:) keyEquivalent:@"q"];
     appItem.submenu = appMenu;
 
     // 文件
     NSMenuItem *fileItem = [[NSMenuItem alloc] init];
     [bar addItem:fileItem];
-    NSMenu *fileMenu = [[NSMenu alloc] initWithTitle:@"文件"];
-    [fileMenu addItemWithTitle:@"新建归档…" action:@selector(doCompressPick:) keyEquivalent:@"n"];
-    [fileMenu addItemWithTitle:@"打开归档…" action:@selector(doOpen:) keyEquivalent:@"o"];
+    NSMenu *fileMenu = [[NSMenu alloc] initWithTitle:L(@"文件")];
+    [fileMenu addItemWithTitle:L(@"新建归档…") action:@selector(doCompressPick:) keyEquivalent:@"n"];
+    [fileMenu addItemWithTitle:L(@"打开归档…") action:@selector(doOpen:) keyEquivalent:@"o"];
     // 「打开最近使用」由 menuNeedsUpdate: 在弹出时填充——最近列表是会变的，
     // 菜单内容不能在建菜单时一次性定死。
-    NSMenuItem *recentItem = [[NSMenuItem alloc] initWithTitle:@"打开最近使用"
+    NSMenuItem *recentItem = [[NSMenuItem alloc] initWithTitle:L(@"打开最近使用")
                                                        action:nil keyEquivalent:@""];
-    NSMenu *recentMenu = [[NSMenu alloc] initWithTitle:@"打开最近使用"];
+    NSMenu *recentMenu = [[NSMenu alloc] initWithTitle:L(@"打开最近使用")];
     recentMenu.delegate = self;
     recentItem.submenu = recentMenu;
     [fileMenu addItem:recentItem];
     [fileMenu addItem:[NSMenuItem separatorItem]];
-    [fileMenu addItemWithTitle:@"解压到…" action:@selector(doExtract:) keyEquivalent:@"e"];
-    [fileMenu addItemWithTitle:@"添加文件…" action:@selector(doAdd:) keyEquivalent:@"d"];
+    [fileMenu addItemWithTitle:L(@"解压到…") action:@selector(doExtract:) keyEquivalent:@"e"];
+    [fileMenu addItemWithTitle:L(@"添加文件…") action:@selector(doAdd:) keyEquivalent:@"d"];
     [fileMenu addItem:[NSMenuItem separatorItem]];
-    [fileMenu addItemWithTitle:@"测试归档" action:@selector(doTest:) keyEquivalent:@"t"];
+    [fileMenu addItemWithTitle:L(@"测试归档") action:@selector(doTest:) keyEquivalent:@"t"];
     [fileMenu addItem:[NSMenuItem separatorItem]];
     // 多窗口下 ⌘W 的含义是「关掉这个归档的窗口」。不设 target，让响应链把它交给
     // key window——只作用于前台窗口，正是用户预期的语义。
-    [fileMenu addItemWithTitle:@"关闭窗口" action:@selector(performClose:) keyEquivalent:@"w"];
+    [fileMenu addItemWithTitle:L(@"关闭窗口") action:@selector(performClose:) keyEquivalent:@"w"];
     fileItem.submenu = fileMenu;
 
     // 编辑
     NSMenuItem *editItem = [[NSMenuItem alloc] init];
     [bar addItem:editItem];
-    NSMenu *editMenu = [[NSMenu alloc] initWithTitle:@"编辑"];
-    [editMenu addItemWithTitle:@"剪切" action:@selector(cut:) keyEquivalent:@"x"];
-    [editMenu addItemWithTitle:@"拷贝" action:@selector(copy:) keyEquivalent:@"c"];
-    [editMenu addItemWithTitle:@"粘贴" action:@selector(paste:) keyEquivalent:@"v"];
-    [editMenu addItemWithTitle:@"全选" action:@selector(selectAll:) keyEquivalent:@"a"];
-    [editMenu addItemWithTitle:@"查找" action:@selector(performFindPanelAction:) keyEquivalent:@"f"];
+    NSMenu *editMenu = [[NSMenu alloc] initWithTitle:L(@"编辑")];
+    // 撤销 / 重做必须有菜单项才存在：实测菜单里没有 undo: 项时，⌘Z 事件根本
+    // 不会被菜单接受，响应链上也就没有入口——搜索框、密码框里打字打错想按
+    // ⌘Z 是完全无效的。真正的目标是窗口的 undo:（由 NSWindow 实现并转发给
+    // field editor 的 undoManager）；焦点在归档列表时它同样会被点亮，这与系统
+    // 自带应用一致，不做特殊处理。重做写成大写 Z，AppKit 会自动为其要求 Shift。
+    [editMenu addItemWithTitle:L(@"撤销") action:@selector(undo:) keyEquivalent:@"z"];
+    [editMenu addItemWithTitle:L(@"重做") action:@selector(redo:) keyEquivalent:@"Z"];
+    [editMenu addItem:[NSMenuItem separatorItem]];
+    [editMenu addItemWithTitle:L(@"剪切") action:@selector(cut:) keyEquivalent:@"x"];
+    [editMenu addItemWithTitle:L(@"拷贝") action:@selector(copy:) keyEquivalent:@"c"];
+    [editMenu addItemWithTitle:L(@"粘贴") action:@selector(paste:) keyEquivalent:@"v"];
+    [editMenu addItemWithTitle:L(@"全选") action:@selector(selectAll:) keyEquivalent:@"a"];
+    [editMenu addItem:[NSMenuItem separatorItem]];
+    // 用自定义 selector 而不是标准的 performFindPanelAction:：本应用里「查找」
+    // 只有一种含义——按文件名过滤归档列表。标准动作会被 first responder 抢走
+    // （日志抽屉是 NSTextView，它实现了 performFindPanelAction:，抢到之后收到的
+    // tag 是 0，即无效的动作编号），焦点一旦落在日志上 ⌘F 就成了无声的空操作。
+    [editMenu addItemWithTitle:L(@"查找") action:@selector(focusArchiveSearch:) keyEquivalent:@"f"];
     editItem.submenu = editMenu;
 
     // 操作
     NSMenuItem *arcItem = [[NSMenuItem alloc] init];
     [bar addItem:arcItem];
-    NSMenu *arcMenu = [[NSMenu alloc] initWithTitle:@"操作"];
-    [arcMenu addItemWithTitle:@"删除所选" action:@selector(doDelete:) keyEquivalent:@""];
-    [arcMenu addItemWithTitle:@"预览" action:@selector(doPreview:) keyEquivalent:@" "];
+    NSMenu *arcMenu = [[NSMenu alloc] initWithTitle:L(@"操作")];
+    [arcMenu addItemWithTitle:L(@"删除所选") action:@selector(doDelete:) keyEquivalent:@""];
+    // 预览刻意不给快捷键。原先写的是 keyEquivalent:@" "，但带 keyEquivalent 初始化
+    // 得到的修饰掩码默认是 ⌘，于是这条实际成了 **⌘空格**——那是系统输入法/Spotlight
+    // 的固定占用，按下去不会响，菜单上显示的还是一个错的提示。空格预览在列表里由
+    // Z7OutlineView 的 keyDown: 独立实现（实测空格不带修饰时菜单并不会拦截它，两条
+    // 路互不干扰），菜单这一条只服务鼠标用户。
+    NSMenuItem *previewItem = [arcMenu addItemWithTitle:L(@"预览")
+                                                 action:@selector(doPreview:)
+                                          keyEquivalent:@""];
+    previewItem.toolTip = L(@"在列表中选中条目后按空格键预览");
     [arcMenu addItem:[NSMenuItem separatorItem]];
-    [arcMenu addItemWithTitle:@"停止当前任务" action:@selector(doCancel:) keyEquivalent:@"."];
+    [arcMenu addItemWithTitle:L(@"停止当前任务") action:@selector(doCancel:) keyEquivalent:@"."];
     arcItem.submenu = arcMenu;
 
     // 显示
     NSMenuItem *viewItem = [[NSMenuItem alloc] init];
     [bar addItem:viewItem];
-    NSMenu *viewMenu = [[NSMenu alloc] initWithTitle:@"显示"];
-    [viewMenu addItemWithTitle:@"显示/隐藏日志" action:@selector(toggleLog:) keyEquivalent:@"l"];
-    [viewMenu addItemWithTitle:@"清空日志" action:@selector(clearLog:) keyEquivalent:@""];
+    NSMenu *viewMenu = [[NSMenu alloc] initWithTitle:L(@"显示")];
+    [viewMenu addItemWithTitle:L(@"显示/隐藏日志") action:@selector(toggleLog:) keyEquivalent:@"l"];
+    [viewMenu addItemWithTitle:L(@"清空日志") action:@selector(clearLog:) keyEquivalent:@""];
+    [viewMenu addItem:[NSMenuItem separatorItem]];
+    // 菜单栏图标要有一个可发现、也能关掉的入口。只在状态栏菜单里放「隐藏」是不够的：
+    // 图标一旦收起，用户想找回它就没有别的落点可点了。
+    [viewMenu addItemWithTitle:L(@"显示菜单栏图标") action:@selector(toggleStatusItem:) keyEquivalent:@""];
     [viewMenu addItem:[NSMenuItem separatorItem]];
     // 进入/退出全屏幕：窗口本来就可缩放，是全屏幕的合格对象，但 AppKit 只在
     // 窗口菜单里放「平铺」之类的排布命令，不会替你生成这一条。快捷键 ⌃⌘F 是
     // macOS 的固定约定，不写这条用户就只能靠绿色按钮，键盘用户没有入口。
-    NSMenuItem *fsItem = [viewMenu addItemWithTitle:@"进入全屏幕"
-                                             action:@selector(toggleFullScreen:)
+    //
+    // 走自定义 action 而非 toggleFullScreen:：NSWindow 自己也实现了后者，会先于
+    // 窗口控制器被解析成菜单项的 target，标题就落在 AppKit 手里、不随状态变化。
+    // 换成自己的 selector 后，validateMenuItem: 才能把标题在「进入 / 退出」间切换。
+    NSMenuItem *fsItem = [viewMenu addItemWithTitle:L(@"进入全屏幕")
+                                             action:@selector(toggleFullScreenFromMenu:)
                                       keyEquivalent:@"f"];
     fsItem.keyEquivalentModifierMask = NSEventModifierFlagControl | NSEventModifierFlagCommand;
     viewItem.submenu = viewMenu;
@@ -4564,28 +4658,39 @@ static NSString *UniqueArchivePath(NSString *dir, NSString *base, NSString *ext)
     // 窗口
     NSMenuItem *winItem = [[NSMenuItem alloc] init];
     [bar addItem:winItem];
-    NSMenu *winMenu = [[NSMenu alloc] initWithTitle:@"窗口"];
-    [winMenu addItemWithTitle:@"最小化" action:@selector(performMiniaturize:) keyEquivalent:@"m"];
-    [winMenu addItemWithTitle:@"缩放" action:@selector(performZoom:) keyEquivalent:@""];
-    [winMenu addItemWithTitle:@"全部置于顶层" action:@selector(arrangeInFront:) keyEquivalent:@""];
+    NSMenu *winMenu = [[NSMenu alloc] initWithTitle:L(@"窗口")];
+    [winMenu addItemWithTitle:L(@"最小化") action:@selector(performMiniaturize:) keyEquivalent:@"m"];
+    [winMenu addItemWithTitle:L(@"缩放") action:@selector(performZoom:) keyEquivalent:@""];
+    [winMenu addItemWithTitle:L(@"前置全部窗口") action:@selector(arrangeInFront:) keyEquivalent:@""];
     // 注册为系统的「窗口」菜单后，AppKit 会自己在末尾维护窗口列表与标签页管理项
     // （显示上一个/下一个标签页、合并所有窗口…）。手写这些条目只会失去系统一致性，
     // 例如系统会按「系统设置」里的标签页偏好决定是否显示它们。
     winItem.submenu = winMenu;
     NSApp.windowsMenu = winMenu;
 
-    // 帮助菜单。菜单栏里这是个固定位置，缺了它整条菜单栏就不完整。内容只放
-    // 真正有用的两条：本应用里「帮助」约等于「怎么找东西」，所以把焦点动作
-    // （搜索列表）与项目文档放在这里。
+    // 帮助菜单。菜单栏里这是个固定位置，缺了它整条菜单栏就不完整。内容按
+    // 「越靠本地越靠前」排：内置帮助书 → 在线文档 → 官方网站。
     NSMenuItem *helpItem = [[NSMenuItem alloc] init];
     [bar addItem:helpItem];
-    NSMenu *helpMenu = [[NSMenu alloc] initWithTitle:@"帮助"];
-    [helpMenu addItemWithTitle:@"搜索归档内的条目（⌘F）"
-                        action:@selector(performFindPanelAction:) keyEquivalent:@""];
+    NSMenu *helpMenu = [[NSMenu alloc] initWithTitle:L(@"帮助")];
+    // 标题里不硬写快捷键：本地化之后那串字样会变成一句错话，系统也不会替你维护
+    // 它。真正的键盘入口在「编辑」菜单的 ⌘F（这里再挂同一个等价键也不会生效——
+    // 同一等价键只认第一条），这条只作为鼠标入口存在。
+    [helpMenu addItemWithTitle:L(@"搜索归档内的条目")
+                        action:@selector(focusArchiveSearch:) keyEquivalent:@""];
     [helpMenu addItem:[NSMenuItem separatorItem]];
-    [helpMenu addItemWithTitle:@"7-Zip 使用说明"
-                        action:@selector(showDocumentation:) keyEquivalent:@"?"];
-    [helpMenu addItemWithTitle:@"7-Zip 官方网站"
+    // 「7-Zip 帮助」打开的是随应用分发、离线可用、也能被系统检索到的帮助书
+    // （Apple Help Book，见 .app/Contents/Resources/<lang>.lproj/7-Zip.help）。
+    // 它同时是帮助菜单里那个系统搜索框存在的**前提**：没有 Help Book，AppKit
+    // 不会往帮助菜单里放搜索字段。原先这一条只是跳转到项目主页的 README，
+    // 等于把「帮助」交给了浏览器。
+    [helpMenu addItemWithTitle:L(@"7-Zip 帮助")
+                        action:@selector(showHelp:)
+                 keyEquivalent:@"?"];
+    [helpMenu addItemWithTitle:L(@"在线文档")
+                        action:@selector(showDocumentation:)
+                 keyEquivalent:@""];
+    [helpMenu addItemWithTitle:L(@"7-Zip 官方网站")
                         action:@selector(showSevenZipWebsite:) keyEquivalent:@""];
     helpItem.submenu = helpMenu;
     NSApp.helpMenu = helpMenu;   // 登记后系统才会把它当作帮助菜单处理
@@ -4629,6 +4734,7 @@ static NSString *UniqueArchivePath(NSString *dir, NSString *base, NSString *ext)
 - (void)applicationDidFinishLaunching:(NSNotification *)n
 {
     [self buildMenu];
+    [self buildStatusItem];
 
     // §8.2 SIGTERM / SIGINT 清理：登记表在退出前统一释放临时产物
     signal(SIGTERM, Z7SignalHandler);
@@ -4737,9 +4843,9 @@ static NSString *UniqueArchivePath(NSString *dir, NSString *base, NSString *ext)
 - (NSMenu *)applicationDockMenu:(NSApplication *)sender
 {
     NSMenu *m = [[NSMenu alloc] init];
-    NSMenuItem *n = [m addItemWithTitle:@"新建归档…" action:@selector(dockNewArchive:) keyEquivalent:@""];
+    NSMenuItem *n = [m addItemWithTitle:L(@"新建归档…") action:@selector(dockNewArchive:) keyEquivalent:@""];
     n.target = self;
-    NSMenuItem *o = [m addItemWithTitle:@"打开归档…" action:@selector(dockOpenArchive:) keyEquivalent:@""];
+    NSMenuItem *o = [m addItemWithTitle:L(@"打开归档…") action:@selector(dockOpenArchive:) keyEquivalent:@""];
     o.target = self;
 
     NSArray<NSString *> *recent = Z7RecentPaths();
@@ -4794,6 +4900,145 @@ static NSString *UniqueArchivePath(NSString *dir, NSString *base, NSString *ext)
 // 窗口状态恢复（关闭即退出），显式声明支持即可消除这条噪音，而不是留一个假的恢复路径。
 - (BOOL)applicationSupportsSecureRestorableState:(NSApplication *)app { return YES; }
 
+#pragma mark 菜单栏状态图标
+
+/// 建状态栏图标。窗口不开的时候，菜单栏是唯一常驻的落点——这类工具最自然的
+/// 入口就是「把东西丢给它」，所以图标同时接受点击（弹菜单）与拖放（收文件）。
+- (void)buildStatusItem
+{
+    if (self.statusItem) return;
+    if (!Z7StatusItemWanted()) return;
+
+    NSStatusItem *item = [[NSStatusBar systemStatusBar]
+        statusItemWithLength:NSSquareStatusItemLength];
+
+    // template 让系统按菜单栏底色自动反色。SF Symbols 取不到时降级成文字标题，
+    // 宁可显示「7z」也不要一个空白格子。
+    NSImage *icon = Symbol(@"archivebox", 15);
+    if (icon) {
+        icon.template = YES;
+        item.button.image = icon;
+    } else {
+        item.button.title = @"7z";
+    }
+    item.button.toolTip = L(@"点击打开菜单；把文件或归档拖到这里即可压缩或解压");
+
+    Z7InstallStatusButtonDragging(item, self);
+
+    // 直接挂 menu 而不是在 action 里手工弹出：NSStatusItem 会替我们处理弹出位置、
+    // 按下高亮与键盘导航；menuNeedsUpdate: 仍会在每次弹出前刷新「最近使用」。
+    item.menu = [self buildStatusItemMenu];
+    self.statusItem = item;
+}
+
+- (NSMenu *)buildStatusItemMenu
+{
+    NSMenu *m = [[NSMenu alloc] init];
+
+    NSMenuItem *open = [m addItemWithTitle:L(@"打开归档…")
+                                    action:@selector(statusOpenArchive:)
+                             keyEquivalent:@""];
+    open.target = self;
+    NSMenuItem *fresh = [m addItemWithTitle:L(@"新建归档…")
+                                     action:@selector(statusNewArchive:)
+                              keyEquivalent:@""];
+    fresh.target = self;
+
+    // 「最近使用」在这种入口上最有用：窗口没开的时候它就是回到刚才那个归档的捷径。
+    // 内容由 menuNeedsUpdate: 在弹出时填，与「文件」菜单共用同一份列表。
+    NSMenuItem *recent = [[NSMenuItem alloc] initWithTitle:L(@"打开最近使用")
+                                                   action:nil keyEquivalent:@""];
+    NSMenu *recentMenu = [[NSMenu alloc] initWithTitle:L(@"打开最近使用")];
+    recentMenu.delegate = self;
+    recent.submenu = recentMenu;
+    [m addItem:recent];
+
+    [m addItem:[NSMenuItem separatorItem]];
+
+    NSMenuItem *show = [m addItemWithTitle:L(@"显示主窗口")
+                                    action:@selector(statusShowWindow:)
+                             keyEquivalent:@""];
+    show.target = self;
+    NSMenuItem *hide = [m addItemWithTitle:L(@"隐藏菜单栏图标")
+                                    action:@selector(statusHideItem:)
+                             keyEquivalent:@""];
+    hide.target = self;
+
+    [m addItem:[NSMenuItem separatorItem]];
+
+    NSMenuItem *quit = [m addItemWithTitle:L(@"退出 7-Zip")
+                                    action:@selector(terminate:)
+                             keyEquivalent:@""];
+    quit.target = NSApp;   // 菜单栏菜单弹出时焦点不在窗口上，显式指向应用对象
+
+    return m;
+}
+
+/// 菜单栏菜单里点的动作都要先把应用拉到前台，否则新窗口会开在当前应用之后，
+/// 用户看到的是「点了没反应」。
+- (void)statusOpenArchive:(id)s
+{
+    [NSApp activateIgnoringOtherApps:YES];
+    [self dockOpenArchive:s];
+}
+
+- (void)statusNewArchive:(id)s
+{
+    [NSApp activateIgnoringOtherApps:YES];
+    [self dockNewArchive:s];
+}
+
+- (void)statusShowWindow:(id)s
+{
+    Z7WindowController *wc = [self vacantWindowController] ?: [self newWindowAndShow:YES];
+    [NSApp activateIgnoringOtherApps:YES];
+    [wc showWindow:nil];
+    [wc.window makeKeyAndOrderFront:nil];
+}
+
+- (void)statusHideItem:(id)s
+{
+    [self setStatusItemEnabled:NO];
+}
+
+/// 「显示」菜单里的勾选项与状态栏菜单里的「隐藏」共用这一个落点，两处不会各说各话。
+- (void)toggleStatusItem:(id)s
+{
+    [self setStatusItemEnabled:self.statusItem == nil];
+}
+
+- (void)setStatusItemEnabled:(BOOL)on
+{
+    Z7SetStatusItemWanted(on);
+    if (on) {
+        [self buildStatusItem];
+    } else if (self.statusItem) {
+        [[NSStatusBar systemStatusBar] removeStatusItem:self.statusItem];
+        self.statusItem = nil;
+    }
+}
+
+/// 拖进菜单栏图标的文件。
+///
+/// 与拖进窗口、拖到程序坞图标走同一套判断（单个文件当归档打开，目录或多个文件
+/// 当压缩输入）——三条入口不该出现三种脾气，所以这里转给主窗口那份实现。
+- (void)statusItemReceivedURLs:(NSArray<NSURL *> *)urls
+{
+    [self dockTarget:^(MainViewController *vc) {
+        [vc receiveExternalURLs:urls];
+    }];
+}
+
+/// 只接管状态栏那一项的状态显示，其余交给默认行为。AppDelegate 会成为菜单项的
+/// target（响应链末端），因此这里返回 YES 的范围要克制。
+- (BOOL)validateMenuItem:(NSMenuItem *)item
+{
+    if (item.action == @selector(toggleStatusItem:)) {
+        item.state = self.statusItem ? NSControlStateValueOn : NSControlStateValueOff;
+    }
+    return YES;
+}
+
 #pragma mark 最近使用
 
 /// 菜单弹出时才填内容：最近列表每打开一个归档就变，建菜单时定死会一直显示旧内容。
@@ -4803,7 +5048,7 @@ static NSString *UniqueArchivePath(NSString *dir, NSString *base, NSString *ext)
 
     NSArray<NSString *> *recent = Z7RecentPaths();
     if (!recent.count) {
-        NSMenuItem *empty = [menu addItemWithTitle:@"没有最近使用的归档"
+        NSMenuItem *empty = [menu addItemWithTitle:L(@"没有最近使用的归档")
                                            action:nil keyEquivalent:@""];
         empty.enabled = NO;
         return;
@@ -4819,7 +5064,7 @@ static NSString *UniqueArchivePath(NSString *dir, NSString *base, NSString *ext)
     }
 
     [menu addItem:[NSMenuItem separatorItem]];
-    NSMenuItem *clear = [menu addItemWithTitle:@"清除菜单"
+    NSMenuItem *clear = [menu addItemWithTitle:L(@"清除菜单")
                                         action:@selector(clearRecent:)
                                  keyEquivalent:@""];
     clear.target = self;
