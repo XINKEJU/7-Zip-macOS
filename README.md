@@ -132,7 +132,8 @@
 │   ├── tests/                 验收测试与工具
 │   │   ├── engine_test.cpp    桥接层验收程序（对照官方 7zz 逐项比对）
 │   │   ├── objc_test.m        ObjC 适配层验收程序
-│   │   ├── verify_engine.sh   桥接层验收套件（158 个用例）
+│   │   ├── mini_rar.h         测试用最小 RAR4 合成器（RAR 是本机唯一无法生成的格式）
+│   │   ├── verify_engine.sh   桥接层验收套件（166 个用例）
 │   │   ├── verify_app.sh      应用包验收（依赖解析 / 部署目标 / 签名 / 真实启动）
 │   │   └── build_test.sh, build_objc_test.sh
 │   ├── lib/                   构建产物：lib7z.dylib、lib7zbridge*.a
@@ -260,9 +261,9 @@ make app         # 组装 7-Zip.app，并构建内嵌 Quick Look 扩展
 make ql          # 只重建 Quick Look 扩展
 make pkg         # 生成 .pkg / .dmg / .tar.xz / checksums.txt
 make tarball     # 生成 Homebrew 分发包
-make test        # 桥接层验收（对照官方 7zz 逐项比对，158 个用例）
-make objc-test   # ObjC 适配层验收（App 实际调用的那一层，95 个用例）
-make appcheck    # 应用包验收：依赖解析 / 部署目标 / 签名 / 真实启动（42 个用例）
+make test        # 桥接层验收（对照官方 7zz 逐项比对，166 个用例）
+make objc-test   # ObjC 适配层验收（App 实际调用的那一层，103 个用例）
+make appcheck    # 应用包验收：依赖解析 / 部署目标 / 签名 / 真实启动（43 个用例）
 make verify      # 离线校验：安装/卸载脚本逻辑 + 公式一致性
 make check       # verify + 产物校验和、DMG 完整性、应用签名
 make clean       # 删除构建产物
@@ -333,9 +334,9 @@ macOS 26 起，旧式 `.qlgenerator` 插件已不再被 `quicklookd` 加载，�
 
 | 门禁 | 内容 | 规模 |
 |---|---|---|
-| `make test` | 桥接层对照官方 `7zz` 逐项比对（`engine_test.cpp` + `verify_engine.sh`，共 20 节） | **158 项** |
-| `make objc-test` | Objective-C 适配层（`objc_test.m`），含菜单栏状态图标的装配与拖放行为、压缩选项持久化、列表右键菜单结构 | **95 项** |
-| `make appcheck` | 应用包：包结构、本地化与帮助书、动态库依赖解析（真正解析到磁盘）、部署目标、签名、进程模型 | **42 项** |
+| `make test` | 桥接层对照官方 `7zz` 逐项比对（`engine_test.cpp` + `verify_engine.sh`，共 21 节） | **166 项** |
+| `make objc-test` | Objective-C 适配层（`objc_test.m`），含菜单栏状态图标的装配与拖放行为、压缩选项持久化、列表右键菜单结构、RAR 倒序索引解压回归 | **103 项** |
+| `make appcheck` | 应用包：包结构、本地化与帮助书、动态库依赖解析（真正解析到磁盘）、部署目标、签名、进程模型 | **43 项** |
 
 其中 ISO / DMG 用三重独立手段交叉验证，避免「自己写、自己验」的循环论证：
 

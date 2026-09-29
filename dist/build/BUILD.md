@@ -786,6 +786,73 @@ LaunchServices 认定的「首选副本」（本机是 `/Applications/7-Zip.app`
 必须同时有中英语言键、`NSMessage` 必须能在源码里找到对应处理器）就是为防止将来又被
 改回去而设的。
 
+### 坑点 34：`IInArchive::Extract` 的索引数组必须升序——倒序会让 RAR「只出目录、不出文件」，而且返回成功
+
+现象：解压某些 RAR，**只得到目录结构，一个文件都没有**，界面上没有任何报错，
+`lastStats.errors == 0`，日志也是空的。同一个 RAR 用官方 `7zz x` 解压完全正常。
+
+根因分两段，缺一不可：
+
+1. **调用侧给的是倒序索引**。`indicesForNodes`（`main.m`）用显式栈做后进先出遍历
+   条目树，产出的索引序列天然是（近似）倒序；而 RAR 归档的条目表通常把**文件排在
+   前、目录排在后**，遍历序就更容易一路递减。
+2. **RAR 处理器把「索引升序」写成了硬依赖**。`RarHandler::Extract` 用 `lastIndex`
+   把相邻条目合并成固实块：
+
+```cpp
+unsigned lastIndex = 0;
+for (UInt32 t = 0; t < numItems; t++) {
+  unsigned index = allFilesMode ? t : indices[t];
+  for (j = lastIndex; j <= index; j++) if (!IsSolid(j)) lastIndex = j;
+  for (j = lastIndex; j <= index; j++) { importantIndexes.Add(j); extractStatuses.Add(j == index); }
+  lastIndex = index + 1;                    // ← 一旦 index 小于它，上面的区间就永远是空循环
+}
+```
+
+   传入递减序列时，第一个元素之后的每次迭代两个区间都为空 → 条目**根本不进
+   `importantIndexes`**，于是 `GetStream` 不会被调用、文件不会被写，而函数**照样返回
+   `S_OK`**。`Rar5Handler::Extract` 有同一假设（用 `solidLimit`）。
+
+实测（`Audio.rar`，47 条目 = 43 文件 + 4 目录，目录的索引 43..46 排在最后）：
+给引擎传**同一组索引**，只是顺序不同——
+
+| 传入顺序 | 返回 | 落盘结果 |
+|---|---|---|
+| 倒序（46,45,42,…,0） | `S_OK`，无错误日志 | **0 文件**，只有 3 个目录 |
+| 升序（0,1,2,…,46） | `S_OK` | 43 文件，与官方 `7zz x` 逐字节一致 |
+
+插桩记录回调实际收到的索引，倒序那次只有 `46 / 44 / 43` 三个 —— 恰好是「严格大于
+前一个元素」的那几个，与上面的 `lastIndex` 推导完全吻合。
+
+**修复位置在桥接层**（`dist/engine/SevenZipEngine.cpp` 的 `Archive::extract`）：
+在调 `Extract` 之前把索引**升序排序并去重**。理由有三：
+
+- 这是 SDK 的隐含前置条件，而不是某个调用方的口味问题。官方客户端始终按升序构造该
+  数组（`UI/Common/Extract.cpp`：`for (i …) realIndices.Add(i)`），也就是说上游从来
+  不产生乱序输入，处理器没有理由去容忍它。
+- 显式索引解压只有这一个入口（`extractToFile` / `extractToMemory` 传单个索引），
+  改一处即全覆盖；将来任何新调用方都不会再踩。
+- 放在 `main.m` 里排序只能修好这一个调用点，`engine_test` / QL 扩展等其它入口仍旧暴露。
+
+⚠️ **回归门禁不能用 7z / zip / tar 当夹具**：实测这三个格式的处理器对顺序不敏感，
+倒序也全量落盘（`treehash` 一致），拿它们写的门禁**永远不会红**，等于没测。
+唯一会因此失败的 RAR 又恰恰无法在本机生成（7-Zip 不含 RAR 编码器，`rar`/`unrar`
+也不在环境里）。解决办法是让测试**自己合成一个最小 RAR4**：`dist/tests/mini_rar.h`
+按 RAR 4.x 字节布局（标记块 / 主头 13 字节 / 文件头 32+NAME / 结束块，`HEAD_CRC` 为
+「自 `HEAD_TYPE` 起」的 CRC32 低 16 位）拼出「3 文件 + 3 目录、目录排在最后」的归档，
+`engine_test mkrar` 与 `objc_test` 两处共用。夹具必须先过官方 `7zz l` 这一关
+（`3 files, 3 folders`），否则后面的失败说明不了任何问题。
+
+门禁落在两处，都是「解压到磁盘再数文件」，不依赖返回码：
+
+- `verify_engine.sh` 第 3.6 节：`engine_test extractidx <rar> <dest> 5,4,3,2,1,0`
+  必须落 3 个文件，且与升序解的产物 `treehash` 相同。
+- `objc_test.m` 的 `== O.` 节：走 App 真正用的 `extractItems:to:…`，断言 3 个文件
+  全部落盘且**内容正确**。
+
+⚠️ 门禁里特意保留了一条「倒序索引解压返回成功」的断言并注明它在缺陷存在时**也会
+通过** —— 这正是本坑最容易被漏掉的地方：**别把返回码当成落盘证据**。
+
 ## 二·补：内嵌引擎库的构建顺序
 
 应用依赖三个产物，顺序固定：
@@ -1047,9 +1114,9 @@ sh dist/build/package.sh && shasum -a 256 dist/7zip-macos-26.03-macos-arm64.tar.
 自动化入口：
 
 ```bash
-make test        # 桥接层验收，对照官方 7zz 逐项比对（158 个用例，共 20 节）
-make objc-test   # ObjC 适配层验收（App 实际调用的那一层，95 个用例）
-make appcheck    # 应用包验收（含真实启动与进程模型检查，42 个用例）
+make test        # 桥接层验收，对照官方 7zz 逐项比对（166 个用例，共 21 节）
+make objc-test   # ObjC 适配层验收（App 实际调用的那一层，103 个用例）
+make appcheck    # 应用包验收（含真实启动与进程模型检查，43 个用例）
 make verify      # 离线校验：安装/卸载脚本逻辑 + Homebrew 公式一致性
 make check       # verify + 产物校验和 + DMG 完整性 + 应用签名
 make tarball     # Homebrew 分发包（可复现，见上）

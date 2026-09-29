@@ -14,6 +14,7 @@
 #include <sys/stat.h>
 
 #include "SevenZipEngine.h"
+#include "mini_rar.h"
 
 using namespace z7;
 
@@ -61,6 +62,8 @@ static void usage() {
       "  engine_test list <archive>\n"
       "  engine_test test <archive>\n"
       "  engine_test extract <archive> <destdir> [--overwrite]\n"
+      "  engine_test extractidx <archive> <destdir> <i,i,...>\n"
+      "  engine_test mkrar <outpath>\n"
       "  engine_test extractone <archive> <index> <outfile>\n"
       "  engine_test extractmem <archive> <index> <maxbytes>\n"
       "  engine_test create <format> <dest> <input>... [选项]\n"
@@ -267,8 +270,51 @@ static int CmdExtract(const std::string &path, const std::string &dest, ClashPol
   return ok ? 0 : 1;
 }
 
-static int CmdExtractOne(const std::string &path, unsigned index, const std::string &out) {
+// 按调用方给定的顺序传显式索引解压。存在的意义是把「索引数组必须升序」这条
+// 契约钉住：RAR 处理器按 lastIndex 合并固实块，收到倒序索引会静默丢条目
+// （返回 S_OK 却少写文件），而 7z / zip / tar 不会 —— 见 mini_rar.h 的说明。
+static int CmdExtractIdx(const std::string &path, const std::string &dest,
+                         const std::string &list) {
   ConsoleCallback cb;
+  std::string err;
+  Archive *a = Archive::Open(path, &cb, err);
+  if (!a) {
+    fprintf(stderr, "打开失败: %s\n", err.c_str());
+    return 1;
+  }
+  std::vector<uint32_t> idx;
+  {
+    size_t pos = 0;
+    while (pos <= list.size()) {
+      const size_t comma = list.find(',', pos);
+      const std::string one = list.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos);
+      if (!one.empty()) idx.push_back((uint32_t)strtoul(one.c_str(), NULL, 10));
+      if (comma == std::string::npos) break;
+      pos = comma + 1;
+    }
+  }
+  if (idx.empty()) {
+    fprintf(stderr, "索引列表为空\n");
+    delete a;
+    return 1;
+  }
+  const bool ok = a->extract(idx, dest, false, ClashPolicy::Overwrite, &cb, err);
+  if (!ok) fprintf(stderr, "解压失败: %s\n", err.c_str());
+  delete a;
+  return ok ? 0 : 1;
+}
+
+// 生成最小 RAR4 夹具（见 mini_rar.h）。RAR 是本机唯一无法用 7-Zip 生成的格式，
+// 而它恰好是唯一对索引顺序敏感的格式，所以夹具得由测试自己合成。
+static int CmdMkRar(const std::string &path) {
+  if (Z7TestWriteMiniRar(path.c_str()) != 0) {
+    fprintf(stderr, "写出夹具失败: %s\n", path.c_str());
+    return 1;
+  }
+  return 0;
+}
+
+static int CmdExtractOne(const std::string &path, unsigned index, const std::string &out) {  ConsoleCallback cb;
   std::string err;
   Archive *a = Archive::Open(path, &cb, err);
   if (!a) {
@@ -551,6 +597,8 @@ int main(int argc, char **argv) {
     return CmdExtract(argv[2], argv[3], clash);
   }
   if (cmd == "extractone" && argc >= 5) return CmdExtractOne(argv[2], (unsigned)atoi(argv[3]), argv[4]);
+  if (cmd == "extractidx" && argc >= 5) return CmdExtractIdx(argv[2], argv[3], argv[4]);
+  if (cmd == "mkrar" && argc >= 3) return CmdMkRar(argv[2]);
   if (cmd == "extractmem" && argc >= 5)
     return CmdExtractMem(argv[2], (unsigned)atoi(argv[3]), ParseSize(argv[4]));
   if (cmd == "create") return CmdCreate(argc, argv);

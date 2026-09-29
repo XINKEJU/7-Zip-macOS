@@ -21,6 +21,7 @@
 #import "Z7ListContextMenu.h"
 #import "Z7CompressionPrefs.h"
 #import "Z7OutlineView.h"
+#include "mini_rar.h"
 
 static int g_pass = 0;
 static int g_fail = 0;
@@ -698,6 +699,77 @@ int main(int argc, const char *argv[]) {
             [v keyDown:arrow];
             ok(del.spaceCount == 1 && del.deleteCount == 1,
                @"普通字符不触发任何 delegate 回调（继续走 super）");
+        }
+
+        printf("\n== O. 解压索引顺序无关（RAR 倒序回归）==\n");
+        {
+            // 背景见 dist/tests/mini_rar.h：IInArchive::Extract 要求索引数组升序，
+            // RAR 处理器用 lastIndex 合并固实块，收到倒序索引会把条目静默跳过 ——
+            // 返回成功、没有任何错误日志，磁盘上只剩目录。而 App 的
+            // indicesForNodes 用显式栈做后进先出遍历条目树，给出的恰恰是倒序。
+            // 这就是「解压 RAR 只有目录结构、没有文件」的成因。
+            NSString *rarPath = [work stringByAppendingPathComponent:@"order.rar"];
+            ok(Z7TestWriteMiniRar(rarPath.fileSystemRepresentation) == 0,
+               @"合成最小 RAR4 夹具（store 方法）");
+
+            Z7Archive *ra = [Z7Archive openPath:rarPath password:nil callback:cb error:&err];
+            ok(ra != nil, ra ? @"打开夹具归档成功"
+                             : [NSString stringWithFormat:@"打开夹具失败: %@", err.localizedDescription]);
+            if (ra) {
+                ok([ra.formatName isEqualToString:@"Rar"],
+                   [NSString stringWithFormat:@"夹具 formatName = %@", ra.formatName]);
+                ok(ra.itemCount == Z7TEST_RAR_ITEM_COUNT,
+                   [NSString stringWithFormat:@"夹具条目数 = %u（期望 %d）",
+                                              ra.itemCount, Z7TEST_RAR_ITEM_COUNT]);
+
+                NSString *revDir = [work stringByAppendingPathComponent:@"out-rev"];
+                [fm removeItemAtPath:revDir error:NULL];
+                [fm createDirectoryAtPath:revDir withIntermediateDirectories:YES attributes:nil error:NULL];
+
+                // 刻意倒序：真机上 indicesForNodes 的 LIFO 遍历给出的就是这个形态。
+                NSMutableArray<NSNumber *> *reversed = [NSMutableArray array];
+                for (NSUInteger i = ra.itemCount; i > 0; i--) [reversed addObject:@(i - 1)];
+
+                BOOL okRev = [ra extractItems:reversed to:revDir testMode:NO
+                                        clash:Z7ClashPolicyOverwrite atomicFiles:YES
+                                  createLinks:YES callback:cb error:&err];
+                // 注意：这一条在缺陷存在时**也会通过** —— 引擎返回成功却什么都没写，
+                // 所以真正有判别力的是下面的落盘断言。
+                ok(okRev, okRev ? @"倒序索引解压返回成功"
+                                : [NSString stringWithFormat:@"倒序索引解压失败: %@",
+                                                             err.localizedDescription]);
+
+                NSUInteger landed = 0;
+                for (int i = 0; i < Z7TEST_RAR_FILE_COUNT; i++) {
+                    NSString *rel = [NSString stringWithUTF8String:Z7TestRarFilePaths[i]];
+                    NSString *want = [NSString stringWithUTF8String:Z7TestRarFileData[i]];
+                    NSString *got = [NSString stringWithContentsOfFile:
+                                        [revDir stringByAppendingPathComponent:rel]
+                                                            encoding:NSUTF8StringEncoding
+                                                               error:NULL];
+                    if ([got isEqualToString:want]) landed++;
+                    else printf("        缺失或内容不符：%s\n", rel.UTF8String);
+                }
+                ok(landed == Z7TEST_RAR_FILE_COUNT,
+                   [NSString stringWithFormat:@"倒序索引下 %d 个文件全部落盘且内容正确（实际 %lu）",
+                                              Z7TEST_RAR_FILE_COUNT, (unsigned long)landed]);
+
+                // 索引顺序对调用方不可见：升序必须给出同样的结果。
+                NSString *ascDir = [work stringByAppendingPathComponent:@"out-asc"];
+                [fm removeItemAtPath:ascDir error:NULL];
+                [fm createDirectoryAtPath:ascDir withIntermediateDirectories:YES attributes:nil error:NULL];
+                NSMutableArray<NSNumber *> *asc = [NSMutableArray array];
+                for (NSUInteger i = 0; i < ra.itemCount; i++) [asc addObject:@(i)];
+                BOOL okAsc = [ra extractItems:asc to:ascDir testMode:NO
+                                        clash:Z7ClashPolicyOverwrite atomicFiles:YES
+                                  createLinks:YES callback:cb error:&err];
+                ok(okAsc && FileExists([ascDir stringByAppendingPathComponent:@"Audio/Alarms/one.bin"]),
+                   @"升序索引解压结果与倒序等价");
+
+                // 倒序不得留下半成品（.partial 是原子落盘的中间态）
+                ok(!FileExists([revDir stringByAppendingPathComponent:@"Audio/root.bin.partial"]),
+                   @"倒序解压后没有 .partial 残留");
+            }
         }
 
         printf("\n== I. 错误路径 ==\n");

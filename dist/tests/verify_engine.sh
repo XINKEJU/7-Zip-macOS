@@ -23,6 +23,7 @@
 #  17. DMG 创建：调系统 hdiutil（唯一子进程例外）
 #  18. lzip：自研容器 + liblzma raw LZMA1（往返 / 外部产出 / 多成员 / 三因子完整性）
 #  19. snappy：自实现（分帧格式 / 裸格式 / 掩码 CRC-32C / 损坏检测）
+#  20. 解压索引顺序无关（RAR 处理器静默丢条目的回归；夹具见 tests/mini_rar.h）
 #
 # 用法：sh verify_engine.sh
 
@@ -201,6 +202,63 @@ if "$T" create 7z "$CLASH_ARC" "$SRC/a.txt" >/dev/null 2>&1; then
     fi
 else
     bad "同名冲突：测试归档创建失败"
+fi
+
+# ---------------------------------------------------------------------------
+head1 "3.6 解压索引顺序无关（RAR 倒序回归）"
+
+# IInArchive::Extract 要求索引数组按升序排列。RAR 的处理器（RarHandler /
+# Rar5Handler）用 lastIndex 把相邻条目合并成固实块（`for (j = lastIndex;
+# j <= index; j++)` 之后 `lastIndex = index + 1`），一旦传入的索引递减，
+# 区间就是空循环，条目被**静默跳过** —— 函数照样返回 S_OK。症状是
+# 「解压成功、无任何错误日志，磁盘上只剩目录」。7z / zip / tar 对顺序不敏感
+# （实测倒序也全量落盘），所以夹具必须用 RAR；而 7-Zip 不含 RAR 编码器、
+# 本机无法生成，因此夹具由 engine_test 自己合成（见 dist/tests/mini_rar.h）。
+IDX_RAR="$WORK/idxorder.rar"
+IDX_REV="$WORK/idx_rev"
+IDX_ASC="$WORK/idx_asc"
+rm -f "$IDX_RAR"
+rm -rf "$IDX_REV" "$IDX_ASC"
+
+if "$T" mkrar "$IDX_RAR" && [ -s "$IDX_RAR" ]; then
+    ok "合成最小 RAR4 夹具"
+
+    # 夹具本身必须能被官方 7zz 认可，否则后面的失败说明不了任何问题
+    ZFILES="$("$Z" l "$IDX_RAR" 2>/dev/null | sed -n 's/.*\([0-9][0-9]*\) files, \([0-9][0-9]*\) folders.*/\1 \2/p')"
+    [ "$ZFILES" = "3 3" ] && ok "官方 7zz 认可夹具：3 文件 / 3 目录" \
+                          || bad "官方 7zz 读到的夹具为 [$ZFILES]，期望 [3 3]"
+
+    NITEMS="$("$T" dumpitems "$IDX_RAR" | awk -F'\t' 'NR>4 && NF>1 {n++} END{print n+0}')"
+    [ "$NITEMS" = "6" ] && ok "桥接层枚举夹具条目数 = 6" || bad "桥接层枚举条目数 = $NITEMS，期望 6"
+
+    # 倒序：真机上 indicesForNodes 的后进先出遍历给出的就是这个形态
+    if "$T" extractidx "$IDX_RAR" "$IDX_REV" "5,4,3,2,1,0" >/dev/null 2>&1; then
+        ok "倒序索引解压返回成功"
+    else
+        bad "倒序索引解压返回失败"
+    fi
+    NREV="$(find "$IDX_REV" -type f 2>/dev/null | wc -l | tr -d ' ')"
+    [ "$NREV" = "3" ] && ok "倒序索引下 3 个文件全部落盘" \
+                      || bad "倒序索引下只落盘 $NREV 个文件（期望 3）"
+
+    # 索引顺序对调用方不可见：升序必须给出完全相同的目录树
+    "$T" extractidx "$IDX_RAR" "$IDX_ASC" "0,1,2,3,4,5" >/dev/null 2>&1
+    NASC="$(find "$IDX_ASC" -type f 2>/dev/null | wc -l | tr -d ' ')"
+    [ "$NASC" = "3" ] && ok "升序索引下 3 个文件全部落盘" \
+                      || bad "升序索引下只落盘 $NASC 个文件（期望 3）"
+    if [ "$NREV" = "3" ] && [ "$NASC" = "3" ] && [ "$(treehash "$IDX_REV")" = "$(treehash "$IDX_ASC")" ]; then
+        ok "倒序与升序的产物目录树完全一致"
+    else
+        bad "倒序与升序的产物不一致"
+    fi
+
+    if [ -z "$(find "$IDX_REV" -name '*.partial' 2>/dev/null)" ]; then
+        ok "倒序解压后没有 .partial 残留"
+    else
+        bad "倒序解压后留下了 .partial 半成品"
+    fi
+else
+    bad "合成最小 RAR4 夹具失败"
 fi
 
 # ---------------------------------------------------------------------------

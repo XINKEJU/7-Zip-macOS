@@ -22,6 +22,7 @@
 
 #include "SevenZipEngine.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cctype>
 #include <cstdio>
@@ -2140,6 +2141,24 @@ bool Archive::extract(const std::vector<uint32_t> &indices, const std::string &u
     return false;
   }
 
+  // ⚠️ IInArchive::Extract 的索引数组必须按升序排列。
+  //
+  // 上层「解压所选 / 解压全部」给出的是条目树的遍历序（indicesForNodes 用显式栈
+  // 后进先出遍历，实际是倒序），原样转发会踩到各处理器的升序前提：RAR 的
+  // RarHandler::Extract / Rar5Handler::Extract 内部用 `lastIndex` 做固实块合并
+  // （`for (j = lastIndex; j <= index; j++)` 后 `lastIndex = index + 1`），
+  // 一旦 index 小于当前 lastIndex，该区间为空循环，条目被**静默跳过**。
+  // 症状：解压返回成功、无任何错误日志，但磁盘上只剩少数目录、文件全部丢失
+  // （实测 RAR 只落地了索引 46 / 44 / 43 三个目录）。官方客户端始终按升序
+  // 构造该数组（UI/Common/Extract.cpp 的 `for (i…) realIndices.Add(i)`），
+  // 因此这里统一规范化：升序排序 + 去重。
+  std::vector<UInt32> sorted;
+  if (!indices.empty()) {
+    sorted.assign(indices.begin(), indices.end());
+    std::sort(sorted.begin(), sorted.end());
+    sorted.erase(std::unique(sorted.begin(), sorted.end()), sorted.end());
+  }
+
   // 压缩炸弹上限：max(归档文件大小 × 40, 8 GiB)，并按声明总量预检
   UInt64 bombLimit = (UInt64)8 << 30;
   {
@@ -2149,10 +2168,10 @@ bool Archive::extract(const std::vector<uint32_t> &indices, const std::string &u
       if (scaled > bombLimit) bombLimit = scaled;
     }
     UInt64 declared = 0;
-    const UInt32 upto = indices.empty() ? m_impl->numItems : (UInt32)indices.size();
+    const UInt32 upto = sorted.empty() ? m_impl->numItems : (UInt32)sorted.size();
     for (UInt32 k = 0; k < upto; k++) {
       ItemInfo it;
-      const UInt32 idx = indices.empty() ? k : indices[k];
+      const UInt32 idx = sorted.empty() ? k : sorted[k];
       if (getItem(idx, it) && it.hasSize && !it.isDir) declared += it.size;
     }
     if (declared > bombLimit) {
@@ -2173,9 +2192,9 @@ bool Archive::extract(const std::vector<uint32_t> &indices, const std::string &u
 
   UInt32 count = (UInt32)(Int32)-1;
   const UInt32 *items = NULL;
-  if (!indices.empty()) {
-    count = (UInt32)indices.size();
-    items = (const UInt32 *)&indices[0];
+  if (!sorted.empty()) {
+    count = (UInt32)sorted.size();
+    items = (const UInt32 *)&sorted[0];
   }
 
   const HRESULT hr = m_impl->archive->Extract(items, count, testMode, holder);
